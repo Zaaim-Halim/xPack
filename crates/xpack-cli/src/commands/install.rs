@@ -5,12 +5,17 @@ use std::process::ExitCode;
 
 use clap::Args as ClapArgs;
 use xpack_core::Result;
-use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
+use xpack_install::{InstallOptions, Installer, LauncherOutcome, TrustDecision, open_and_verify};
 use xpack_package::PackageReader;
 
 use super::Context;
 
 /// Arguments for `xpack install`.
+///
+/// The bool count trips a lint meant for domain types, where several flags
+/// usually mean a missing enum. These are command-line switches: each one is
+/// independently settable by a user and clap requires exactly this shape.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Package to install.
@@ -34,6 +39,16 @@ pub(crate) struct Args {
     /// Permit installing a version that is not newer than the active one.
     #[arg(long)]
     allow_downgrade: bool,
+
+    /// Launcher binary to place in the installation root.
+    ///
+    /// Defaults to the `xpack-launcher` sitting beside this executable.
+    #[arg(long, value_name = "FILE", conflicts_with = "no_launcher")]
+    launcher: Option<PathBuf>,
+
+    /// Install without a launcher, leaving the application with no entry point.
+    #[arg(long, conflicts_with = "launcher")]
+    no_launcher: bool,
 }
 
 impl Args {
@@ -74,8 +89,18 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let mut verified = open_and_verify(&args.package, &lock, &decision)?;
     let signed_by = verified.signing_key().fingerprint();
 
-    let options =
-        InstallOptions { allow_downgrade: args.allow_downgrade, activate: !args.no_activate };
+    let launcher = resolve_launcher(args)?;
+    // The updater follows the launcher: an installation with an entry point
+    // but no way to learn about updates is only half of what was asked for.
+    let updater = if args.no_launcher { None } else { super::default_updater() };
+    let uninstaller = if args.no_launcher { None } else { super::default_uninstaller() };
+    let options = InstallOptions {
+        allow_downgrade: args.allow_downgrade,
+        activate: !args.no_activate,
+        launcher,
+        updater,
+        uninstaller,
+    };
     let installed = Installer::new(&lock).install(&mut verified, &options)?;
 
     if !installed.recovery.is_empty() {
@@ -87,6 +112,9 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     crate::output::field("signed by", signed_by);
     crate::output::field("active", installed.activated);
     crate::output::field("location", lock.paths().version_dir(&installed.version).display());
+    report_binary("launcher", installed.launcher, &lock.paths().launcher_file());
+    report_binary("updater", installed.updater, &lock.paths().updater_file());
+    report_binary("uninstaller", installed.uninstaller, &lock.paths().uninstaller_file());
 
     if matches!(decision, TrustDecision::OnFirstUse) {
         eprintln!();
@@ -97,4 +125,46 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     }
 
     super::success()
+}
+
+/// Decides which launcher binary, if any, to place in the installation.
+///
+/// An explicit path is used as given and fails loudly when it is missing,
+/// because a caller who named a file expects that file.
+///
+/// Otherwise the default is the `xpack-launcher` built or shipped beside this
+/// executable. That is a convenience for the common cases — a developer
+/// running out of a build directory, a bootstrap installer shipping both
+/// binaries together — and its absence is not an error: an installation
+/// without a launcher is still valid, just without an entry point. It says so
+/// rather than failing, so `xpack install` keeps working wherever the CLI has
+/// been deployed on its own.
+fn resolve_launcher(args: &Args) -> Result<Option<PathBuf>> {
+    if args.no_launcher {
+        return Ok(None);
+    }
+    if let Some(path) = &args.launcher {
+        if !path.is_file() {
+            return Err(xpack_core::Error::invalid(
+                "launcher",
+                format!("{} does not exist", path.display()),
+            ));
+        }
+        return Ok(Some(path.clone()));
+    }
+
+    let Some(sibling) = super::default_launcher() else {
+        eprintln!("note: no launcher was installed; pass --launcher to supply one");
+        return Ok(None);
+    };
+    Ok(Some(sibling))
+}
+
+/// Prints what happened to one of the binaries placed in the installation.
+fn report_binary(what: &str, outcome: Option<LauncherOutcome>, path: &std::path::Path) {
+    match outcome {
+        Some(LauncherOutcome::Installed) => crate::output::field(what, path.display()),
+        Some(LauncherOutcome::AlreadyPresent) => crate::output::field(what, "already present"),
+        None => crate::output::field(what, "none"),
+    }
 }

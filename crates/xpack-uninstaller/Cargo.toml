@@ -1,0 +1,27 @@
+[package]
+name = "xpack-uninstaller"
+description = "The uninstaller that ships inside an xPack installation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-uninstaller"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+xpack-platform.workspace = true
+xpack-install.workspace = true
+xpack-log.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

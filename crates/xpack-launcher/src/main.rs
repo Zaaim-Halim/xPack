@@ -33,6 +33,11 @@ fn main() -> ExitCode {
         format: xpack_log::Format::Text,
     });
 
+    // Started before the application, so a slow network never delays opening
+    // it, and deliberately not waited on. Whatever it finds takes effect the
+    // next time the application starts.
+    xpack_launcher::spawn_updater(launcher.paths());
+
     match launcher.launch(&arguments, true) {
         Ok(outcome) => {
             if let Some(target) = &outcome.rolled_back_to {

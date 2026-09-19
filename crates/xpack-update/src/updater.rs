@@ -2,27 +2,43 @@
 //!
 //! # Locking
 //!
-//! The installation lock is held for the whole operation, including the
-//! download. That blocks other xpack commands for the duration, which is the
-//! right trade for a command a person deliberately invoked: it guarantees the
-//! version being installed is decided against the state that is still true
-//! when the install happens, and it uses the persisted update phases exactly
-//! as recovery expects to find them.
+//! The installation lock is **released across the download** and held only for
+//! the state writes and the install. A download can take half an hour, and
+//! holding the lock throughout would mean a user could not start their own
+//! application while it ran — the launcher would fail with "another operation
+//! is already running" because an update was quietly fetching in the
+//! background.
 //!
-//! It is the wrong trade for a background updater that should download while
-//! the application runs. Doing that needs the lock split — held for the state
-//! writes and the install, released across the download — along with rules for
-//! a partial file another process's recovery may delete underneath it. That is
-//! deliberately not attempted here.
+//! Releasing it costs two things, and both are paid rather than assumed away.
+//!
+//! **The decision goes stale.** What to install is decided before the download
+//! and acted on after it, with minutes in between during which another process
+//! may have installed that version, rolled back to a newer one, or cleared the
+//! phase. So the decision is made twice: once to start, and again under the
+//! lock before anything is installed. A mismatch discards the download rather
+//! than installing against state that is no longer true.
+//!
+//! **Recovery cannot tell a live download from abandoned debris.** Its rule
+//! for the `Downloading` phase is to clear the downloads directory, which
+//! would delete the file a running download is writing. A
+//! [`xpack_platform::DownloadLease`] answers whether anyone is
+//! still there, and the operating system answers it: the lease is an advisory
+//! file lock, released the instant the holding process ends. The lease is
+//! taken before the installation lock is released and dropped after it is
+//! re-acquired, so there is no window in which the phase says `Downloading`,
+//! the lease is free, and a download is nonetheless in progress.
+//!
+//! A caller must not hold the installation lock when calling into this
+//! module. The lock is not reentrant, so it would deadlock against itself.
 
 use std::io::Write;
 
 use xpack_core::atomic;
 use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::state::UpdatePhase;
-use xpack_core::{Error, Platform, Result, Version};
+use xpack_core::{Error, InstallPaths, Platform, Result, Version};
 use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
-use xpack_platform::InstallLock;
+use xpack_platform::{DownloadLease, InstallLock};
 
 use crate::index::{MAX_INDEX_BYTES, UpdateIndex};
 use crate::reporting::ProgressWriter;
@@ -41,6 +57,16 @@ pub struct UpdateOptions {
     pub allow_downgrade: bool,
     /// Activate the new version once installed.
     pub activate: bool,
+    /// Uninstaller to place in the installation root, if it has none.
+    pub uninstaller: Option<std::path::PathBuf>,
+    /// Background updater to place in the installation root, if it has none.
+    pub updater: Option<std::path::PathBuf>,
+    /// Launcher binary to place in the installation root, if it has none.
+    ///
+    /// An update normally finds one already there and leaves it alone. This
+    /// matters for the case where an update is also the first install, so the
+    /// resulting installation is not left without an entry point.
+    pub launcher: Option<std::path::PathBuf>,
 }
 
 /// An update the server offers and this installation would accept.
@@ -57,16 +83,23 @@ pub struct Available {
 }
 
 /// Drives update checking and application.
+///
+/// Takes the installation's paths rather than a held lock, because it acquires
+/// the lock in short windows of its own. See the module documentation for why.
 pub struct Updater<'a> {
-    lock: &'a InstallLock,
+    paths: &'a InstallPaths,
     transport: &'a dyn UpdateTransport,
     progress: &'a dyn ProgressReporter,
 }
 
 impl<'a> Updater<'a> {
-    /// Wraps a held lock and a transport, reporting nothing.
-    pub fn new(lock: &'a InstallLock, transport: &'a dyn UpdateTransport) -> Self {
-        Self { lock, transport, progress: &NoProgress }
+    /// Wraps an installation and a transport, reporting nothing.
+    ///
+    /// The caller must **not** hold the installation lock. This type acquires
+    /// it itself, and the lock is not reentrant, so a caller holding one would
+    /// deadlock against itself on the first window.
+    pub fn new(paths: &'a InstallPaths, transport: &'a dyn UpdateTransport) -> Self {
+        Self { paths, transport, progress: &NoProgress }
     }
 
     /// Reports progress to `progress` as the operation runs.
@@ -87,15 +120,16 @@ impl<'a> Updater<'a> {
         let application = self.application_id()?;
         self.progress
             .report(&ProgressEvent::CheckingForUpdate { application: application.clone() });
-        let state = self.lock.load_or_new_state(&application)?;
+
+        // The lock is held only to read. Fetching the index over the network
+        // while holding it would block every other command for as long as a
+        // server chose to be slow.
+        let state = {
+            let lock = self.lock()?;
+            lock.load_or_new_state(&application)?
+        };
         let channel = self.channel(&state)?;
-
-        let url = index_url(base_url, &channel);
-        let bytes = self.transport.fetch_to_vec(&url, MAX_INDEX_BYTES)?;
-
-        // Untrusted from here until a signature says otherwise.
-        let index = UpdateIndex::from_slice(&bytes)?;
-        index.ensure_matches(&application, Platform::host()?, &channel)?;
+        let index = self.fetch_index(base_url, &application, &channel)?;
 
         // Checked before anything is downloaded: the cheapest possible
         // rejection, and it stops a hostile index spending a user's bandwidth.
@@ -128,53 +162,153 @@ impl<'a> Updater<'a> {
     /// Checks, downloads, verifies and installs in one operation.
     ///
     /// Returns `Ok(None)` when there was nothing to do.
+    ///
+    /// # Lock windows
+    ///
+    /// Three short ones, with the download outside all of them:
+    ///
+    /// 1. recover, read state, learn the channel
+    /// 2. re-check against fresh state, take the download lease, mark the phase
+    /// 3. re-validate, verify, install
+    ///
+    /// Window 2 decides against state that may be minutes old by the time
+    /// window 3 runs, so window 3 checks again rather than trusting it.
     pub fn update(&self, base_url: &str, options: &UpdateOptions) -> Result<Option<Version>> {
-        let installer = Installer::new(self.lock);
-        installer.recover()?;
-
         let application = self.application_id()?;
-        let mut state = self.lock.load_or_new_state(&application)?;
+
+        // --- Window 1 -----------------------------------------------------
+        let state = {
+            let lock = self.lock()?;
+            Installer::new(&lock).recover()?;
+            lock.load_or_new_state(&application)?
+        };
         let channel = self.channel(&state)?;
 
-        let url = index_url(base_url, &channel);
-        let bytes = self.transport.fetch_to_vec(&url, MAX_INDEX_BYTES)?;
-        let index = UpdateIndex::from_slice(&bytes)?;
-        index.ensure_matches(&application, Platform::host()?, &channel)?;
-
+        // --- Unlocked: the index ------------------------------------------
+        let index = self.fetch_index(base_url, &application, &channel)?;
         if state.ensure_not_downgrade(&index.version, options.allow_downgrade).is_err() {
             return Ok(None);
         }
-        if state.record(&index.version).is_some() && installer.is_usable(&index.version) {
-            tracing::debug!(version = %index.version, "offered version is already installed");
+
+        // --- Window 2 -----------------------------------------------------
+        // The lease is taken here, before this window closes, so that recovery
+        // in another process can never see `Downloading` with a free lease
+        // while this download is genuinely running.
+        let lease = {
+            let lock = self.lock()?;
+            let mut state = lock.load_or_new_state(&application)?;
+            let installer = Installer::new(&lock);
+
+            if state.ensure_not_downgrade(&index.version, options.allow_downgrade).is_err() {
+                return Ok(None);
+            }
+            if state.record(&index.version).is_some() && installer.is_usable(&index.version) {
+                tracing::debug!(version = %index.version, "offered version is already installed");
+                return Ok(None);
+            }
+
+            let Some(lease) = DownloadLease::acquire(self.paths)? else {
+                return Err(Error::Locked(format!(
+                    "{} (a download is already in progress)",
+                    self.paths.download_lock_file().display()
+                )));
+            };
+
+            state.update = UpdatePhase::Downloading { version: index.version.clone() };
+            lock.save_state(&state)?;
+            lease
+        };
+
+        // --- Unlocked: the download ---------------------------------------
+        let downloaded = match self.download(&index, base_url) {
+            Ok(path) => path,
+            Err(e) => {
+                // The lease is still held, so this reset cannot race a
+                // recovery that would otherwise clear the directory first.
+                self.reset_phase_taking_the_lock()?;
+                return Err(e);
+            }
+        };
+
+        // --- Window 3 -----------------------------------------------------
+        let lock = self.lock()?;
+        let result = self.finish(&lock, &index, &downloaded, options);
+
+        // Released only after the installation lock is held again, closing the
+        // window in the other direction.
+        drop(lease);
+        result
+    }
+
+    /// Verifies and installs a package that has finished downloading.
+    ///
+    /// Runs under the installation lock, with the download lease still held.
+    fn finish(
+        &self,
+        lock: &InstallLock,
+        index: &UpdateIndex,
+        downloaded: &std::path::Path,
+        options: &UpdateOptions,
+    ) -> Result<Option<Version>> {
+        let application = self.application_id()?;
+        let mut state = lock.load_or_new_state(&application)?;
+        let installer = Installer::new(lock);
+
+        // The decision to download was made before the download started, and a
+        // download takes minutes. Anything could have happened to the
+        // installation since: another process installed this version, rolled
+        // back to a newer one, or cleared the phase. Re-checking is what makes
+        // releasing the lock safe.
+        match &state.update {
+            UpdatePhase::Downloading { version } if version == &index.version => {}
+            other => {
+                let _ = atomic::remove_file_if_exists(downloaded);
+                return Err(Error::invalid(
+                    "update",
+                    format!(
+                        "the installation changed while {} was downloading (now {}); \
+                         discarding it rather than installing against stale state",
+                        index.version,
+                        other.describe()
+                    ),
+                ));
+            }
+        }
+        if state.ensure_not_downgrade(&index.version, options.allow_downgrade).is_err() {
+            let _ = atomic::remove_file_if_exists(downloaded);
+            self.clear_phase(lock)?;
             return Ok(None);
         }
-
-        let downloaded = self.download(&mut state, &index, base_url)?;
+        if state.record(&index.version).is_some() && installer.is_usable(&index.version) {
+            let _ = atomic::remove_file_if_exists(downloaded);
+            self.clear_phase(lock)?;
+            return Ok(None);
+        }
 
         // Verification is the same code path a local install uses. A second
         // implementation of this check would eventually disagree with the
         // first, and the weaker one would be the bug.
         state.update = UpdatePhase::Verifying { version: index.version.clone() };
-        self.lock.save_state(&state)?;
+        lock.save_state(&state)?;
         self.progress.report(&ProgressEvent::Verifying { version: index.version.clone() });
 
-        let verify = open_and_verify(&downloaded, self.lock, &TrustDecision::UsePinned);
+        let verify = open_and_verify(downloaded, lock, &TrustDecision::UsePinned);
         let mut verified = match verify {
             Ok(package) => package,
             Err(e) => {
                 // A package that fails verification is not retried; it is
                 // destroyed. Leaving it on disk invites a later code path to
                 // find it and treat it as trustworthy.
-                let _ = atomic::remove_file_if_exists(&downloaded);
-                self.reset_phase()?;
+                let _ = atomic::remove_file_if_exists(downloaded);
+                self.clear_phase(lock)?;
                 return Err(e);
             }
         };
 
         // The index said one thing; the signed manifest says what is true.
         if verified.manifest().application.version != index.version {
-            let _ = atomic::remove_file_if_exists(&downloaded);
-            self.reset_phase()?;
+            let _ = atomic::remove_file_if_exists(downloaded);
+            self.clear_phase(lock)?;
             return Err(Error::Integrity(format!(
                 "the index offered {} but the signed package contains {}",
                 index.version,
@@ -191,29 +325,44 @@ impl<'a> Updater<'a> {
         // On Unix an unlinked file stays readable through its open handle, so
         // leaving this in place would appear to work here and fail on Windows,
         // where deleting an open file is refused outright.
-        self.reset_phase()?;
+        self.clear_phase(lock)?;
 
-        let install_options =
-            InstallOptions { allow_downgrade: options.allow_downgrade, activate: options.activate };
+        let install_options = InstallOptions {
+            allow_downgrade: options.allow_downgrade,
+            activate: options.activate,
+            launcher: options.launcher.clone(),
+            updater: options.updater.clone(),
+            uninstaller: options.uninstaller.clone(),
+        };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
         let outcome =
             installer.install_with_progress(&mut verified, &install_options, self.progress)?;
 
-        atomic::remove_file_if_exists(&downloaded)?;
+        atomic::remove_file_if_exists(downloaded)?;
         tracing::info!(version = %outcome.version, "update installed");
         self.progress.report(&ProgressEvent::Completed { version: outcome.version.clone() });
         Ok(Some(outcome.version))
     }
 
+    /// Fetches and validates the index for a channel.
+    ///
+    /// Everything it returns is still untrusted: the index chooses what to
+    /// download, and only the publisher's signature decides what is installed.
+    fn fetch_index(&self, base_url: &str, application: &str, channel: &str) -> Result<UpdateIndex> {
+        let url = index_url(base_url, channel);
+        let bytes = self.transport.fetch_to_vec(&url, MAX_INDEX_BYTES)?;
+        let index = UpdateIndex::from_slice(&bytes)?;
+        index.ensure_matches(application, Platform::host()?, channel)?;
+        Ok(index)
+    }
+
     /// Downloads the package the index names, bounded while streaming.
-    fn download(
-        &self,
-        state: &mut xpack_core::InstallState,
-        index: &UpdateIndex,
-        base_url: &str,
-    ) -> Result<std::path::PathBuf> {
-        let paths = self.lock.paths();
-        let downloads = paths.downloads_dir();
+    ///
+    /// Writes no state: it runs with the installation lock released, so the
+    /// phase it would write could not be trusted by the time it landed. The
+    /// phase is set before this is called and resolved after it returns.
+    fn download(&self, index: &UpdateIndex, base_url: &str) -> Result<std::path::PathBuf> {
+        let downloads = self.paths.downloads_dir();
         atomic::create_dir_all(&downloads)?;
 
         // The local name is derived, never taken from the index: package.file
@@ -226,14 +375,10 @@ impl<'a> Updater<'a> {
         // since changed, and re-downloading is the honest simple answer.
         atomic::remove_file_if_exists(&target)?;
 
-        state.update = UpdatePhase::Downloading { version: index.version.clone() };
-        self.lock.save_state(state)?;
-
         // A declared size of zero is either a broken publisher or a hostile
         // server buying itself the absolute ceiling to write with. Neither is
         // worth accepting: the index must say how big the package is.
         if index.package.size == 0 {
-            self.reset_phase()?;
             return Err(Error::Transport(
                 "the update index declares no package size; refusing to download an unbounded \
                  response"
@@ -272,23 +417,36 @@ impl<'a> Updater<'a> {
             Err(e) => {
                 // A truncated or oversized download leaves nothing behind.
                 let _ = atomic::remove_file_if_exists(&target);
-                self.reset_phase()?;
                 Err(e)
             }
         }
     }
 
-    /// Returns the installation to idle after a failed step.
-    fn reset_phase(&self) -> Result<()> {
+    /// Acquires the installation lock for one short window.
+    fn lock(&self) -> Result<InstallLock> {
+        InstallLock::acquire(self.paths)
+    }
+
+    /// Returns the installation to idle after a failed step, taking the lock.
+    ///
+    /// Only for callers that do **not** already hold it. The lock is not
+    /// reentrant, so calling this from inside a locked window deadlocks the
+    /// process against itself; those callers want [`Self::clear_phase`].
+    fn reset_phase_taking_the_lock(&self) -> Result<()> {
+        let lock = self.lock()?;
+        self.clear_phase(&lock)
+    }
+
+    /// Returns the installation to idle under a lock the caller already holds.
+    fn clear_phase(&self, lock: &InstallLock) -> Result<()> {
         let application = self.application_id()?;
-        let mut state = self.lock.load_or_new_state(&application)?;
+        let mut state = lock.load_or_new_state(&application)?;
         state.update = UpdatePhase::Idle;
-        self.lock.save_state(&state)
+        lock.save_state(&state)
     }
 
     fn application_id(&self) -> Result<String> {
-        self.lock
-            .paths()
+        self.paths
             .application_id()
             .map(ToString::to_string)
             .ok_or_else(|| Error::invalid("installation", "root has no application id"))
@@ -299,7 +457,7 @@ impl<'a> Updater<'a> {
         let Some(version) = &state.current_version else {
             return Ok("stable".to_string());
         };
-        let manifest_file = self.lock.paths().version_manifest_file(version);
+        let manifest_file = self.paths.version_manifest_file(version);
         let Ok(bytes) = std::fs::read(&manifest_file) else {
             return Ok("stable".to_string());
         };

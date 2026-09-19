@@ -43,16 +43,25 @@ pub(crate) struct Args {
 
 /// Runs `xpack update`.
 pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
-    let lock = context.lock(&args.application)?;
-    let url = resolve_url(args, &lock)?;
+    // Deliberately no lock here. The updater takes it in short windows of its
+    // own and releases it across the download, so that a user can still start
+    // their application while an update is being fetched. Holding one here
+    // would deadlock it against itself on the first window.
+    let paths = context.paths(&args.application)?;
+    let url = resolve_url(args, &paths)?;
 
     let timeouts = Timeouts::with_total(std::time::Duration::from_secs(args.timeout * 60))?;
     let transport = HttpsTransport::with_timeouts(timeouts);
     let progress = TerminalProgress::new();
-    let updater = Updater::new(&lock, &transport).reporting_to(&progress);
+    let updater = Updater::new(&paths, &transport).reporting_to(&progress);
 
-    let options =
-        UpdateOptions { allow_downgrade: args.allow_downgrade, activate: !args.no_activate };
+    let options = UpdateOptions {
+        allow_downgrade: args.allow_downgrade,
+        activate: !args.no_activate,
+        launcher: super::default_launcher(),
+        updater: super::default_updater(),
+        uninstaller: super::default_uninstaller(),
+    };
 
     if args.check_only {
         let outcome = updater.check(&url, &options);
@@ -93,14 +102,20 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
 /// The installed version's own manifest carries it, so the server is whatever
 /// the signed package said it was rather than whatever a caller happened to
 /// type. `--url` overrides it, which is what a private mirror or a test needs.
-fn resolve_url(args: &Args, lock: &xpack_platform::InstallLock) -> Result<String> {
+fn resolve_url(args: &Args, paths: &xpack_core::InstallPaths) -> Result<String> {
     if let Some(url) = &args.url {
         return Ok(url.clone());
     }
 
+    // Reads state without the lock. That is safe for this one purpose: the
+    // value is a URL used to ask a server what it has, and every decision that
+    // follows is re-made under the lock by the updater itself. A URL that was
+    // correct a moment ago is not a hazard; acting on stale *state* would be,
+    // and nothing here does.
+    let lock = xpack_platform::InstallLock::acquire(paths)?;
     let state = lock.load_or_new_state(&args.application)?;
     let version = state.active()?;
-    let manifest_file = lock.paths().version_manifest_file(version);
+    let manifest_file = paths.version_manifest_file(version);
     let bytes = std::fs::read(&manifest_file).map_err(|e| Error::io(&manifest_file, e))?;
     let manifest = xpack_core::Manifest::from_slice(&bytes)?;
 

@@ -132,9 +132,11 @@ impl World {
         let mut verified =
             open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
         Installer::new(&lock)
-            .install(&mut verified, &InstallOptions { activate: true, allow_downgrade: false })
+            .install(
+                &mut verified,
+                &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+            )
             .unwrap();
-        drop(lock);
 
         Self { dir, key, paths }
     }
@@ -150,7 +152,7 @@ impl World {
 }
 
 fn options() -> UpdateOptions {
-    UpdateOptions { activate: true, allow_downgrade: false }
+    UpdateOptions { activate: true, allow_downgrade: false, ..Default::default() }
 }
 
 #[test]
@@ -163,9 +165,7 @@ fn a_genuine_update_is_downloaded_verified_and_installed() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
 
-    let lock = world.lock();
-    let installed = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap();
-    drop(lock);
+    let installed = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
 
     assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
     assert_eq!(world.active(), Some(Version::parse("1.1.0").unwrap()));
@@ -184,9 +184,7 @@ fn a_package_signed_by_another_key_is_refused() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &forged);
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
 
     assert!(err.is_integrity_failure(), "got {err:?}");
     assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()), "must stay put");
@@ -205,9 +203,7 @@ fn an_index_that_lies_about_the_version_is_caught() {
     fixture.serve(&index_url(), index_json("2.0.0", "demo-1.1.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
 
     assert!(err.to_string().contains("offered 2.0.0"), "got {err}");
     assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
@@ -222,9 +218,7 @@ fn a_server_that_streams_forever_is_cut_off() {
     // download path is the one actually under test.
     fixture.flood(&format!("{BASE}/demo-1.1.0.xpkg"), 16 * 1024 * 1024);
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
 
     assert!(err.to_string().contains("limit"), "got {err}");
     assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
@@ -248,9 +242,7 @@ fn a_truncated_download_is_refused_and_discarded() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", full));
     fixture.serve(&format!("{BASE}/demo-1.1.0.xpkg"), bytes);
 
-    let lock = world.lock();
-    assert!(Updater::new(&lock, &fixture).update(BASE, &options()).is_err());
-    drop(lock);
+    assert!(Updater::new(&world.paths, &fixture).update(BASE, &options()).is_err());
     assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
 }
 
@@ -266,11 +258,9 @@ fn an_index_offering_an_older_version_is_ignored() {
     fixture.serve(&index_url(), index_json("0.9.0", "demo-0.9.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-0.9.0.xpkg"), &older);
 
-    let lock = world.lock();
-    let updater = Updater::new(&lock, &fixture);
+    let updater = Updater::new(&world.paths, &fixture);
     assert!(updater.check(BASE, &options()).unwrap().is_none());
     assert_eq!(updater.update(BASE, &options()).unwrap(), None);
-    drop(lock);
     assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
 }
 
@@ -283,9 +273,7 @@ fn an_index_for_a_different_application_is_refused() {
         .replace("com.example.demo", "com.attacker.app");
     fixture.serve(&index_url(), index.into_bytes());
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
     assert!(err.to_string().contains("com.attacker.app"), "got {err}");
 }
 
@@ -301,9 +289,7 @@ fn an_index_for_another_platform_is_refused() {
     let fixture = Fixture::default();
     fixture.serve(&index_url(), index.into_bytes());
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
     assert!(matches!(err, Error::PlatformMismatch { .. }), "got {err:?}");
 }
 
@@ -311,11 +297,9 @@ fn an_index_for_another_platform_is_refused() {
 fn a_plain_http_url_is_refused() {
     let world = World::new();
     let fixture = Fixture::default();
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture)
+    let err = Updater::new(&world.paths, &fixture)
         .update("http://updates.example.com/demo", &options())
         .unwrap_err();
-    drop(lock);
     assert!(err.to_string().contains("https"), "got {err}");
 }
 
@@ -332,9 +316,7 @@ fn the_download_name_comes_from_the_installation_not_the_index() {
     fixture.serve(&index_url(), index_json("1.1.0", hostile_name, size));
     fixture.serve_file(&format!("{BASE}/{hostile_name}"), &package);
 
-    let lock = world.lock();
-    let installed = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap();
-    drop(lock);
+    let installed = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
 
     assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
     assert!(
@@ -349,9 +331,7 @@ fn an_oversized_index_is_refused_before_parsing() {
     let fixture = Fixture::default();
     fixture.serve(&index_url(), vec![b'{'; 2 * 1024 * 1024]);
 
-    let lock = world.lock();
-    let err = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap_err();
-    drop(lock);
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
     assert!(err.to_string().contains("limit"), "got {err}");
 }
 
@@ -368,10 +348,8 @@ fn a_failed_update_leaves_the_phase_idle() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &forged);
 
-    let lock = world.lock();
-    assert!(Updater::new(&lock, &fixture).update(BASE, &options()).is_err());
-    let state = lock.load_state().unwrap().value;
-    drop(lock);
+    assert!(Updater::new(&world.paths, &fixture).update(BASE, &options()).is_err());
+    let state = world.lock().load_state().unwrap().value;
 
     assert!(state.update.is_idle(), "got {:?}", state.update);
 }
@@ -383,9 +361,7 @@ fn check_reports_an_available_update_without_downloading() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", 4096));
     // The package is deliberately not served: check must not fetch it.
 
-    let lock = world.lock();
-    let available = Updater::new(&lock, &fixture).check(BASE, &options()).unwrap();
-    drop(lock);
+    let available = Updater::new(&world.paths, &fixture).check(BASE, &options()).unwrap();
 
     let available = available.expect("an update is available");
     assert_eq!(available.version, Version::parse("1.1.0").unwrap());
@@ -411,9 +387,7 @@ fn the_downloaded_file_is_not_deleted_while_it_is_still_in_use() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
 
-    let lock = world.lock();
-    let installed = Updater::new(&lock, &fixture).update(BASE, &options()).unwrap();
-    drop(lock);
+    let installed = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
     assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
 
     // The downloads directory must still exist: recovery clearing it mid-
@@ -459,10 +433,10 @@ fn an_update_reports_every_stage_it_passes_through() {
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
 
     let recorder = Recorder::default();
-    let lock = world.lock();
-    let installed =
-        Updater::new(&lock, &fixture).reporting_to(&recorder).update(BASE, &options()).unwrap();
-    drop(lock);
+    let installed = Updater::new(&world.paths, &fixture)
+        .reporting_to(&recorder)
+        .update(BASE, &options())
+        .unwrap();
     assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
 
     let events = recorder.events();
@@ -502,9 +476,7 @@ fn download_progress_reaches_the_full_size() {
     fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
 
     let recorder = Recorder::default();
-    let lock = world.lock();
-    Updater::new(&lock, &fixture).reporting_to(&recorder).update(BASE, &options()).unwrap();
-    drop(lock);
+    Updater::new(&world.paths, &fixture).reporting_to(&recorder).update(BASE, &options()).unwrap();
 
     let highest = recorder
         .events()
@@ -527,9 +499,7 @@ fn a_check_reports_what_it_found_without_downloading() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", 4096));
 
     let recorder = Recorder::default();
-    let lock = world.lock();
-    Updater::new(&lock, &fixture).reporting_to(&recorder).check(BASE, &options()).unwrap();
-    drop(lock);
+    Updater::new(&world.paths, &fixture).reporting_to(&recorder).check(BASE, &options()).unwrap();
 
     assert!(recorder.has(|e| matches!(e, E::CheckingForUpdate { .. })));
     assert!(recorder.has(|e| matches!(e, E::UpdateAvailable { .. })));
@@ -548,15 +518,13 @@ fn an_installation_already_current_is_reported_as_such() {
     fixture.serve(&index_url(), index_json("0.9.0", "demo-0.9.0.xpkg", size));
 
     let recorder = Recorder::default();
-    let lock = world.lock();
     assert!(
-        Updater::new(&lock, &fixture)
+        Updater::new(&world.paths, &fixture)
             .reporting_to(&recorder)
             .check(BASE, &options())
             .unwrap()
             .is_none()
     );
-    drop(lock);
 
     assert!(recorder.has(|e| matches!(e, E::UpToDate { .. })), "{:?}", recorder.events());
 }
@@ -572,9 +540,7 @@ fn a_server_declaring_no_size_reports_an_unknown_total() {
     fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", 0));
 
     let recorder = Recorder::default();
-    let lock = world.lock();
-    let _ = Updater::new(&lock, &fixture).reporting_to(&recorder).check(BASE, &options());
-    drop(lock);
+    let _ = Updater::new(&world.paths, &fixture).reporting_to(&recorder).check(BASE, &options());
 
     assert!(
         recorder.has(|e| matches!(e, E::UpdateAvailable { total_bytes: None, .. })),

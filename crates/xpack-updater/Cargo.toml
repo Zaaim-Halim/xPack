@@ -1,0 +1,31 @@
+[package]
+name = "xpack-updater"
+description = "The background updater that runs on a user's machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-updater"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+xpack-platform.workspace = true
+xpack-update.workspace = true
+xpack-log.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+xpack-install.workspace = true
+xpack-package.workspace = true
+xpack-security.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

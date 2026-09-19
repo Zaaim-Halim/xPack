@@ -25,10 +25,30 @@
 //! So: exit non-zero inside the window is a failure, exit zero inside the
 //! window is success, and still running when the window closes is success.
 //!
-//! This is an approximation and is documented as one. An application that
-//! starts, paints a window and is broken in every other respect passes. Real
-//! health confirmation needs the application to report it, which is what the
-//! IPC channel in the design is for and is not built yet.
+//! That is an approximation, and an application can replace it with a real
+//! answer. The launcher puts a path in [`HEALTH_FILE_ENV`]; an application
+//! that creates that file has *said* it started, rather than merely having
+//! avoided dying. A manifest setting `requireStartupReport` makes the report
+//! mandatory, so a version that never sends one is rolled back.
+//!
+//! A file, not a socket. xPack is runtime-independent, and creating a file is
+//! a line of code in every language a payload might be written in — where a
+//! named pipe on Windows would need Win32 calls this workspace forbids. It is
+//! one-way and one-shot, which is exactly what a startup check needs; richer
+//! two-way messaging, for progress or for liveness after startup, is a larger
+//! piece and is not built.
+//!
+//! # It starts the updater
+//!
+//! The launcher spawns the background updater, detached, on every start, and
+//! never waits for it. That is the whole update trigger: no scheduler to
+//! register at install time, no background agent to notarise, no privileges.
+//! A user who never opens the application never updates, which for a desktop
+//! application is the right trade.
+//!
+//! A version the updater staged is activated *here*, not there, because
+//! activation begins a probation and a probation needs something watching the
+//! version start. See [`Launcher::launch`].
 //!
 //! # Which application am I?
 //!
@@ -39,4 +59,4 @@
 
 pub mod launcher;
 
-pub use launcher::{Launcher, Outcome, StartupResult};
+pub use launcher::{HEALTH_FILE_ENV, Launcher, Outcome, StartupResult, spawn_updater};

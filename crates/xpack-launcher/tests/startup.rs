@@ -46,6 +46,10 @@ enum Behaviour {
     CrashesImmediately,
     /// Keeps running well past any startup window.
     StaysRunning,
+    /// Reports that it started, then keeps running.
+    ReportsThenRuns,
+    /// Keeps running but never reports — the case the report exists to catch.
+    RunsWithoutReporting,
 }
 
 #[cfg(unix)]
@@ -56,11 +60,29 @@ fn script(behaviour: Behaviour, version: &str) -> String {
             format!("#!/bin/sh\necho {version} failing\nexit 3\n")
         }
         Behaviour::StaysRunning => format!("#!/bin/sh\necho {version} running\nsleep 30\n"),
+        Behaviour::ReportsThenRuns => {
+            format!("#!/bin/sh\necho {version} running\n: > \"$XPACK_HEALTH_FILE\"\nsleep 30\n")
+        }
+        Behaviour::RunsWithoutReporting => {
+            format!("#!/bin/sh\necho {version} running but silent\nsleep 30\n")
+        }
     }
 }
 
 #[cfg(unix)]
 fn build(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviour, timeout: u64) -> PathBuf {
+    build_with(dir, key, version, behaviour, timeout, false)
+}
+
+#[cfg(unix)]
+fn build_with(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    behaviour: Behaviour,
+    timeout: u64,
+    require_report: bool,
+) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
     let app = payload.join("bin/app");
@@ -88,7 +110,10 @@ fn build(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviour, timeout
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
-        health: HealthSpec { startup_timeout_seconds: timeout },
+        health: HealthSpec {
+            startup_timeout_seconds: timeout,
+            require_startup_report: require_report,
+        },
         signing_key: None,
         payload: PayloadSpec::default(),
         created_at: None,
@@ -120,8 +145,45 @@ impl World {
         let mut verified =
             open_and_verify(&package, &lock, &TrustDecision::Explicit(self.key.public())).unwrap();
         Installer::new(&lock)
-            .install(&mut verified, &InstallOptions { activate: true, allow_downgrade: false })
+            .install(
+                &mut verified,
+                &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+            )
             .unwrap();
+    }
+
+    /// Installs a version without activating it, leaving it staged.
+    /// Installs a version whose manifest demands a startup report.
+    fn install_requiring_report(&self, version: &str, behaviour: Behaviour, timeout: u64) {
+        let package = build_with(self.dir.path(), &self.key, version, behaviour, timeout, true);
+        let lock = InstallLock::acquire(&self.paths).unwrap();
+        let mut verified =
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(self.key.public())).unwrap();
+        Installer::new(&lock)
+            .install(
+                &mut verified,
+                &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+            )
+            .unwrap();
+    }
+
+    fn stage(&self, version: &str, behaviour: Behaviour, timeout: u64) {
+        let package = build(self.dir.path(), &self.key, version, behaviour, timeout);
+        let lock = InstallLock::acquire(&self.paths).unwrap();
+        let mut verified =
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(self.key.public())).unwrap();
+        Installer::new(&lock)
+            .install(
+                &mut verified,
+                &InstallOptions { activate: false, allow_downgrade: false, ..Default::default() },
+            )
+            .unwrap();
+    }
+
+    fn status_of(&self, version: &str) -> xpack_core::state::VersionStatus {
+        let lock = InstallLock::acquire(&self.paths).unwrap();
+        let state = lock.load_state().unwrap().value;
+        state.record(&Version::parse(version).unwrap()).unwrap().status
     }
 
     fn launcher(&self) -> Launcher {
@@ -280,7 +342,7 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
-        health: HealthSpec { startup_timeout_seconds: 30 },
+        health: HealthSpec { startup_timeout_seconds: 30, ..Default::default() },
         signing_key: None,
         payload: PayloadSpec::default(),
         created_at: None,
@@ -294,7 +356,10 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
     let mut verified =
         open_and_verify(&package, &lock, &TrustDecision::Explicit(world.key.public())).unwrap();
     Installer::new(&lock)
-        .install(&mut verified, &InstallOptions { activate: true, allow_downgrade: false })
+        .install(
+            &mut verified,
+            &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+        )
         .unwrap();
 
     // Model interruptions that already consumed the budget.
@@ -361,7 +426,7 @@ fn each_probationary_start_is_counted_before_the_application_runs() {
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
-        health: HealthSpec { startup_timeout_seconds: 5 },
+        health: HealthSpec { startup_timeout_seconds: 5, ..Default::default() },
         signing_key: None,
         payload: PayloadSpec::default(),
         created_at: None,
@@ -375,7 +440,10 @@ fn each_probationary_start_is_counted_before_the_application_runs() {
     let mut verified =
         open_and_verify(&package, &lock, &TrustDecision::Explicit(world.key.public())).unwrap();
     Installer::new(&lock)
-        .install(&mut verified, &InstallOptions { activate: true, allow_downgrade: false })
+        .install(
+            &mut verified,
+            &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+        )
         .unwrap();
     drop(lock);
 
@@ -440,7 +508,10 @@ fn arguments_reach_the_application_unchanged() {
     let mut verified =
         open_and_verify(&package, &lock, &TrustDecision::Explicit(world.key.public())).unwrap();
     Installer::new(&lock)
-        .install(&mut verified, &InstallOptions { activate: true, allow_downgrade: false })
+        .install(
+            &mut verified,
+            &InstallOptions { activate: true, allow_downgrade: false, ..Default::default() },
+        )
         .unwrap();
     drop(lock);
 
@@ -496,4 +567,152 @@ fn a_launcher_does_not_hold_the_lock_while_the_application_runs() {
 
     InstallLock::acquire(&world.paths)
         .expect("the lock must be free while the application is still running");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_staged_version_is_activated_at_the_next_launch() {
+    // The background updater stages; the launcher activates. This is the join
+    // between the two, and it is the only place activation happens for an
+    // update nobody watched being downloaded.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.stage("1.1.0", Behaviour::StaysRunning, 1);
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(outcome.version, Version::parse("1.1.0").unwrap(), "the staged version did not run");
+    assert_eq!(world.active(), Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_staged_version_that_fails_rolls_back_and_leaves_the_old_one_good() {
+    // The whole reason the updater does not activate: the version it staged
+    // gets tried while something is watching, and a bad one is undone.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.stage("1.1.0", Behaviour::CrashesImmediately, 1);
+
+    let outcome = world.launcher().launch(&[], true).unwrap();
+
+    assert_eq!(outcome.rolled_back_to, Some(Version::parse("1.0.0").unwrap()));
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+    assert_eq!(
+        world.status_of("1.0.0"),
+        xpack_core::state::VersionStatus::Good,
+        "the version rolled back to was itself quarantined"
+    );
+    assert_eq!(world.status_of("1.1.0"), xpack_core::state::VersionStatus::Bad);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_download_in_flight_does_not_put_the_active_version_on_trial() {
+    // The updater releases the installation lock across its download, so the
+    // launcher genuinely runs while the phase says `Downloading`. Reading that
+    // as a probation would spend the attempt budget and, on a non-zero exit,
+    // quarantine a version that works.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::CrashesImmediately, 1);
+
+    {
+        let lock = InstallLock::acquire(&world.paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.update = xpack_core::state::UpdatePhase::Downloading {
+            version: Version::parse("1.1.0").unwrap(),
+        };
+        lock.save_state(&state).unwrap();
+    }
+
+    let outcome = world.launcher().launch(&[], true).unwrap();
+
+    assert!(outcome.rolled_back_to.is_none());
+    assert_eq!(
+        world.status_of("1.0.0"),
+        xpack_core::state::VersionStatus::Good,
+        "a working version was quarantined because a download was in flight"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn an_application_that_reports_is_healthy_without_waiting_out_the_window() {
+    // The report is proof, not evidence. A version that sends one does not
+    // have to survive a fifteen-second stare to be believed.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.stage("1.1.0", Behaviour::ReportsThenRuns, 30);
+
+    let started = Instant::now();
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(outcome.startup, Some(StartupResult::ReportedHealthy));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "waited {:?} despite an explicit report",
+        started.elapsed()
+    );
+    assert_eq!(world.active(), Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_version_that_never_reports_is_rolled_back_when_the_manifest_requires_one() {
+    // This is the approximation being closed: the application runs happily and
+    // is still rolled back, because it never said it was working.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+
+    world.install_requiring_report("1.1.0", Behaviour::RunsWithoutReporting, 1);
+
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(outcome.startup, Some(StartupResult::NeverReported));
+    assert_eq!(outcome.rolled_back_to, Some(Version::parse("1.0.0").unwrap()));
+    assert_eq!(world.status_of("1.1.0"), xpack_core::state::VersionStatus::Bad);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_report_is_not_required_unless_the_manifest_says_so() {
+    // Every application that has not added the line must keep working exactly
+    // as it did, or turning this on would roll back every existing update.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.stage("1.1.0", Behaviour::RunsWithoutReporting, 1);
+
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(outcome.startup, Some(StartupResult::SurvivedStartup));
+    assert!(outcome.rolled_back_to.is_none());
+    assert_eq!(world.active(), Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_stale_report_from_a_previous_run_does_not_make_a_silent_version_look_healthy() {
+    // The invariant, not just the file deletion: a version that never reports
+    // must still be judged as never reporting, however many reports it left
+    // behind on earlier runs. Otherwise one good run long ago vouches for a
+    // version forever.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+
+    world.install_requiring_report("1.1.0", Behaviour::RunsWithoutReporting, 1);
+
+    // A report 1.1.0 left behind on some earlier, working run.
+    let stale = world.paths.health_file(&Version::parse("1.1.0").unwrap());
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, b"").unwrap();
+
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(
+        outcome.startup,
+        Some(StartupResult::NeverReported),
+        "a stale report was accepted as this run's"
+    );
+    assert_eq!(outcome.rolled_back_to, Some(Version::parse("1.0.0").unwrap()));
 }

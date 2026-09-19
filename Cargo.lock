@@ -1409,6 +1409,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xpack-uninstaller"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "tempfile",
+ "tracing",
+ "xpack-core",
+ "xpack-install",
+ "xpack-log",
+ "xpack-platform",
+]
+
+[[package]]
 name = "xpack-update"
 version = "0.1.0"
 dependencies = [
@@ -1422,6 +1435,23 @@ dependencies = [
  "xpack-package",
  "xpack-platform",
  "xpack-security",
+]
+
+[[package]]
+name = "xpack-updater"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "xpack-core",
+ "xpack-install",
+ "xpack-log",
+ "xpack-package",
+ "xpack-platform",
+ "xpack-security",
+ "xpack-update",
 ]
 
 [[package]]

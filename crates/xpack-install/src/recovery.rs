@@ -7,7 +7,7 @@
 //! | Phase | Action |
 //! | --- | --- |
 //! | `Idle` | nothing |
-//! | `Downloading`, `Verifying` | discard partial downloads |
+//! | `Downloading`, `Verifying` | discard partial downloads — **unless a live process holds the download lease** |
 //! | `Installing` | discard the staging tree, and the version directory *only* if state does not know it |
 //! | `Staged` | leave it — extraction completed, the version is activatable |
 //! | `RollingBack` | finish the rollback |
@@ -59,6 +59,23 @@ pub fn recover(lock: &InstallLock) -> Result<RecoveryReport> {
         UpdatePhase::Idle => return Ok(report),
 
         UpdatePhase::Downloading { .. } | UpdatePhase::Verifying { .. } => {
+            // A download runs with the installation lock released, so this
+            // phase does not by itself mean the writer is gone. Clearing the
+            // directory under a live downloader deletes the file it is
+            // writing: on Unix it would keep writing to an unlinked inode and
+            // then fail to reopen it, and on Windows the removal itself is
+            // refused, turning an unrelated command into an error.
+            //
+            // The lease answers whether anyone is still there. Holding the
+            // installation lock here is what makes the answer trustworthy: a
+            // downloader takes the lease before releasing that lock, so there
+            // is no moment when this phase is set, the lease is free, and a
+            // download is nonetheless in progress.
+            if xpack_platform::DownloadLease::is_held(paths)? {
+                tracing::debug!("a download is still in progress; leaving it alone");
+                report.left_in_place = true;
+                return Ok(report);
+            }
             atomic::remove_dir_all_if_exists(&paths.downloads_dir())?;
             report.cleared_downloads = true;
         }
@@ -80,7 +97,14 @@ pub fn recover(lock: &InstallLock) -> Result<RecoveryReport> {
         UpdatePhase::Staged { .. } => {
             // Extraction finished. The version is complete and activatable, so
             // discarding it would throw away good work for no reason.
+            //
+            // Returning early matters as much as keeping the files: the phase
+            // is the *only* record that a version is staged and waiting.
+            // Falling through to the reset below would clear that marker on
+            // the next xpack operation of any kind, and whoever was going to
+            // activate it would never learn it existed.
             report.left_in_place = true;
+            return Ok(report);
         }
 
         UpdatePhase::RollingBack { from, to } => {

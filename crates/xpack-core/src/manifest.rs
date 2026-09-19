@@ -149,11 +149,29 @@ pub struct HealthSpec {
     /// unreadable file, an incompatible library — not minutes later.
     #[serde(default = "default_startup_timeout")]
     pub startup_timeout_seconds: u64,
+
+    /// Whether the application must say for itself that it started.
+    ///
+    /// Left off, surviving the startup window counts as healthy. That is an
+    /// approximation and a known one: an application that starts, paints a
+    /// window and is broken in every other respect passes it.
+    ///
+    /// Turned on, surviving is no longer enough — the application has to
+    /// report, and a version that does not is rolled back. It reports by
+    /// creating the file named in `XPACK_HEALTH_FILE`, which the launcher sets
+    /// in its environment. A file rather than a socket because xPack is
+    /// runtime-independent: creating one is a line of code in every language a
+    /// payload might be written in, and needs no library from xPack at all.
+    ///
+    /// Off by default, because a publisher who has not added that line would
+    /// otherwise find every update rolled back.
+    #[serde(default)]
+    pub require_startup_report: bool,
 }
 
 impl Default for HealthSpec {
     fn default() -> Self {
-        Self { startup_timeout_seconds: default_startup_timeout() }
+        Self { startup_timeout_seconds: default_startup_timeout(), require_startup_report: false }
     }
 }
 

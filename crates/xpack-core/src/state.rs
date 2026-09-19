@@ -119,6 +119,18 @@ impl UpdatePhase {
         matches!(self, Self::Idle)
     }
 
+    /// Returns `true` when a version is active but has not yet proved healthy.
+    ///
+    /// Distinct from "not idle" on purpose. Several phases are non-idle
+    /// without any version being on trial — a download in flight, a version
+    /// staged and waiting to be activated — and treating those as a probation
+    /// would make the launcher judge a version that is not being tested,
+    /// spending its bounded attempts and, on a non-zero exit, quarantining a
+    /// version that was working perfectly well.
+    pub fn is_probation(&self) -> bool {
+        matches!(self, Self::PendingVerification { .. })
+    }
+
     /// Returns `true` when the probation has used up its retry budget.
     ///
     /// At this point the launcher must roll back instead of trying again.
@@ -211,6 +223,18 @@ pub struct InstallState {
     /// Every version present under `versions/`, keyed by version string.
     #[serde(default)]
     pub versions: BTreeMap<String, VersionRecord>,
+    /// When an update server was last asked, in seconds since the Unix epoch.
+    ///
+    /// The background updater runs every time the application starts, and a
+    /// user may open their application many times a day. Without a record of
+    /// the last check, every one of those becomes a request, which is a small
+    /// denial-of-service aimed at the publisher's own server.
+    ///
+    /// Absent means "never asked", which is why it is an `Option` rather than
+    /// a zero: zero is a real instant in 1970, and treating it as "never"
+    /// would be a guess dressed as a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_check: Option<u64>,
 }
 
 fn idle_phase() -> UpdatePhase {
@@ -227,6 +251,21 @@ impl InstallState {
             previous_version: None,
             update: UpdatePhase::Idle,
             versions: BTreeMap::new(),
+            last_update_check: None,
+        }
+    }
+
+    /// Returns `true` when an update check is due.
+    ///
+    /// A clock that has moved backwards — a correction, a dual-boot, a virtual
+    /// machine resuming from a snapshot — makes the recorded instant look like
+    /// the future. That is treated as due rather than as a reason to wait out
+    /// a wait that may never end.
+    pub fn update_check_is_due(&self, now: u64, interval_seconds: u64) -> bool {
+        match self.last_update_check {
+            None => true,
+            Some(last) if last > now => true,
+            Some(last) => now.saturating_sub(last) >= interval_seconds,
         }
     }
 
@@ -601,5 +640,64 @@ mod tests {
         };
         let json = serde_json::to_string(&phase).unwrap();
         assert_eq!(serde_json::from_str::<UpdatePhase>(&json).unwrap(), phase);
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::*;
+
+    fn state() -> InstallState {
+        InstallState::new("com.example.app")
+    }
+
+    const HOUR: u64 = 3600;
+
+    #[test]
+    fn a_first_check_is_always_due() {
+        assert!(state().update_check_is_due(1_000_000, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_check_inside_the_interval_is_not_due() {
+        let mut s = state();
+        s.last_update_check = Some(1_000_000);
+        assert!(!s.update_check_is_due(1_000_000 + HOUR, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_check_at_exactly_the_interval_is_due() {
+        let mut s = state();
+        s.last_update_check = Some(1_000_000);
+        assert!(s.update_check_is_due(1_000_000 + 4 * HOUR, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_block_checks_forever() {
+        // A correction, a dual boot or a resumed snapshot can leave the
+        // recorded instant in the future. Waiting it out could mean never
+        // checking again.
+        let mut s = state();
+        s.last_update_check = Some(2_000_000);
+        assert!(s.update_check_is_due(1_000_000, 4 * HOUR));
+    }
+
+    #[test]
+    fn the_last_check_survives_a_round_trip() {
+        let mut s = state();
+        s.last_update_check = Some(1_234_567);
+        let json = serde_json::to_vec(&s).unwrap();
+        let back: InstallState = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.last_update_check, Some(1_234_567));
+    }
+
+    #[test]
+    fn state_written_before_this_field_existed_still_loads() {
+        // Older installations have no such field, and an update must not
+        // refuse to read the state it is meant to update.
+        let json = br#"{"stateFormatVersion":1,"applicationId":"com.example.app"}"#;
+        let s: InstallState = serde_json::from_slice(json).unwrap();
+        assert_eq!(s.last_update_check, None);
+        assert!(s.update_check_is_due(1_000_000, 4 * HOUR));
     }
 }

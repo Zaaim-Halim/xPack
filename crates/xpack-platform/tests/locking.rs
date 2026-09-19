@@ -228,3 +228,65 @@ fn a_corrupt_state_file_is_not_mistaken_for_a_fresh_install() {
 
     assert!(lock.load_or_new_state("com.example.app").is_err());
 }
+
+/// Exit codes the download-lease children use.
+const CHILD_LEASE_FREE: i32 = 20;
+const CHILD_LEASE_HELD: i32 = 21;
+
+/// Performs the child half of a lease probe: report whether anyone holds it.
+fn run_lease_child_if_selected(expected_role: &str) -> bool {
+    let Ok(role) = std::env::var(CHILD_ROLE) else {
+        return false;
+    };
+    if role != expected_role {
+        return false;
+    }
+    let root = std::env::var(CHILD_DIR).expect("child directory");
+    let paths = paths_in(Path::new(&root));
+
+    let code = match xpack_platform::DownloadLease::is_held(&paths) {
+        Ok(true) => CHILD_LEASE_HELD,
+        Ok(false) => CHILD_LEASE_FREE,
+        Err(_) => CHILD_OTHER_ERROR,
+    };
+    std::process::exit(code);
+}
+
+#[test]
+fn a_download_lease_is_visible_to_another_process() {
+    // This is what lets recovery tell a download in progress from debris left
+    // by a process that died.
+    if run_lease_child_if_selected("lease-held") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    let lease = xpack_platform::DownloadLease::acquire(&paths).unwrap();
+    assert!(lease.is_some(), "the lease should have been free");
+
+    let status =
+        spawn_child("lease-held", dir.path(), "a_download_lease_is_visible_to_another_process");
+    assert_eq!(status.code(), Some(CHILD_LEASE_HELD), "another process could not see the lease");
+}
+
+#[test]
+fn a_download_lease_is_released_when_its_holder_ends() {
+    // The whole reason the lease is a file lock and not a timestamp: a process
+    // that dies, however it dies, stops holding it immediately. A timestamp
+    // lease would still be live and owned by nobody.
+    if run_lease_child_if_selected("lease-free") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    {
+        let lease = xpack_platform::DownloadLease::acquire(&paths).unwrap();
+        assert!(lease.is_some());
+    }
+
+    let status =
+        spawn_child("lease-free", dir.path(), "a_download_lease_is_released_when_its_holder_ends");
+    assert_eq!(status.code(), Some(CHILD_LEASE_FREE), "the lease outlived its holder");
+}

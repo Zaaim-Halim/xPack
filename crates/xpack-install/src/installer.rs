@@ -1,5 +1,7 @@
 //! Installing, activating, rolling back and removing versions.
 
+use std::path::{Path, PathBuf};
+
 use xpack_core::atomic;
 use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::state::{UpdatePhase, VersionStatus};
@@ -16,6 +18,36 @@ pub struct InstallOptions {
     pub allow_downgrade: bool,
     /// Make the installed version active immediately.
     pub activate: bool,
+    /// Uninstaller to place in the installation root, if any.
+    ///
+    /// Same rule again: placed only when absent.
+    pub uninstaller: Option<PathBuf>,
+    /// Background updater to place in the installation root, if any.
+    ///
+    /// Optional for the same reason as the launcher, and placed by the same
+    /// rule: only when absent. An installation without one is complete and
+    /// correct, it simply never checks for updates on its own.
+    pub updater: Option<PathBuf>,
+    /// Launcher binary to place in the installation root, if any.
+    ///
+    /// The caller supplies the path rather than this crate finding one. A
+    /// library has no business deciding where an executable comes from, and
+    /// the answer differs by deployment: a bootstrap installer ships one
+    /// alongside itself, a developer running the CLI has one in the same build
+    /// directory.
+    ///
+    /// Without a launcher the installation is complete and correct but has no
+    /// entry point, which is only useful when something else provides one.
+    pub launcher: Option<PathBuf>,
+}
+
+/// What installing a launcher did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherOutcome {
+    /// The binary was written into the installation root.
+    Installed,
+    /// A launcher was already there and was left untouched.
+    AlreadyPresent,
 }
 
 /// The result of a successful install.
@@ -25,6 +57,12 @@ pub struct Installed {
     pub version: Version,
     /// Whether it was also made active.
     pub activated: bool,
+    /// What happened to the launcher, if one was supplied.
+    pub launcher: Option<LauncherOutcome>,
+    /// What happened to the background updater, if one was supplied.
+    pub updater: Option<LauncherOutcome>,
+    /// What happened to the uninstaller, if one was supplied.
+    pub uninstaller: Option<LauncherOutcome>,
     /// What recovery cleaned up beforehand.
     pub recovery: RecoveryReport,
 }
@@ -134,6 +172,21 @@ impl<'lock> Installer<'lock> {
 
         tracing::info!(%version, "version installed");
 
+        // Before activation, so that a version becoming current always has an
+        // entry point by the time anything could try to start it.
+        let launcher = match &options.launcher {
+            Some(source) => Some(self.install_launcher(source)?),
+            None => None,
+        };
+        let updater = match &options.updater {
+            Some(source) => Some(self.install_updater(source)?),
+            None => None,
+        };
+        let uninstaller = match &options.uninstaller {
+            Some(source) => Some(self.install_uninstaller(source)?),
+            None => None,
+        };
+
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
             // Re-activating the version that is already current is a no-op for
@@ -145,7 +198,7 @@ impl<'lock> Installer<'lock> {
             false
         };
 
-        Ok(Installed { version, activated, recovery: report })
+        Ok(Installed { version, activated, launcher, updater, uninstaller, recovery: report })
     }
 
     /// Moves a fully verified staging tree into place.
@@ -360,26 +413,70 @@ impl<'lock> Installer<'lock> {
         Ok(removed)
     }
 
-    /// Removes the entire installation.
+    /// Places the launcher binary in the installation root.
     ///
-    /// Only the installation root. User data lives wherever the application
-    /// chose to put it, which xPack does not know and will not guess at.
-    pub fn uninstall(&self) -> Result<()> {
-        let paths = self.lock.paths();
-        for entry in [paths.versions_dir(), paths.staging_root(), paths.downloads_dir()] {
-            atomic::remove_dir_all_if_exists(&entry)?;
+    /// # Only when absent
+    ///
+    /// An existing launcher is left alone. It is not versioned with the
+    /// application — it belongs to xPack, reads state on every run and is
+    /// replaced only when xPack itself changes — so an application update has
+    /// no reason to rewrite it. Overwriting anyway would fail on Windows for
+    /// the worst possible reason: the launcher stays resident to watch its
+    /// application start, so the file is locked exactly when an update is most
+    /// likely to be running.
+    ///
+    /// Replacing a launcher is therefore a deliberate xPack upgrade and needs
+    /// its own path, not a silent side effect of installing an application.
+    pub fn install_launcher(&self, source: &Path) -> Result<LauncherOutcome> {
+        Self::install_binary(source, &self.lock.paths().launcher_file(), "launcher")
+    }
+
+    /// Places the background updater in the installation root.
+    ///
+    /// Same rule as the launcher, and for a sharper version of the same
+    /// reason: the updater may well be running right now — the launcher starts
+    /// it on every application start — so replacing it is exactly the write
+    /// Windows refuses.
+    pub fn install_updater(&self, source: &Path) -> Result<LauncherOutcome> {
+        Self::install_binary(source, &self.lock.paths().updater_file(), "updater")
+    }
+
+    /// Places the uninstaller in the installation root.
+    pub fn install_uninstaller(&self, source: &Path) -> Result<LauncherOutcome> {
+        Self::install_binary(source, &self.lock.paths().uninstaller_file(), "uninstaller")
+    }
+
+    /// Copies an executable into the installation, if nothing is there yet.
+    ///
+    /// Takes no `self`: the destination is already resolved by the caller, and
+    /// the installation lock is held by whoever called into the installer.
+    fn install_binary(source: &Path, destination: &Path, what: &str) -> Result<LauncherOutcome> {
+        if destination.exists() {
+            tracing::debug!(path = %destination.display(), what, "already present");
+            return Ok(LauncherOutcome::AlreadyPresent);
         }
-        atomic::remove_file_if_exists(&paths.current_link())?;
 
-        let mut state = self.load_state()?;
-        state.current_version = None;
-        state.previous_version = None;
-        state.versions.clear();
-        state.update = UpdatePhase::Idle;
-        self.lock.save_state(&state)?;
+        let bytes = std::fs::read(source).map_err(|e| Error::io(source, e))?;
+        if bytes.is_empty() {
+            return Err(Error::invalid(
+                what,
+                format!("{} is empty and cannot be an executable", source.display()),
+            ));
+        }
 
-        tracing::info!(root = %paths.root().display(), "installation removed");
-        Ok(())
+        atomic::create_dir_all(atomic::parent_dir(destination)?)?;
+        atomic::write(destination, &bytes)?;
+
+        // A binary that exists but cannot be executed is worse than one that is
+        // missing: the installation looks complete and fails at the moment a
+        // user tries to open their application. Undo rather than ship that.
+        if let Err(e) = set_executable(destination) {
+            let _ = std::fs::remove_file(destination);
+            return Err(e);
+        }
+
+        tracing::info!(path = %destination.display(), what, "installed");
+        Ok(LauncherOutcome::Installed)
     }
 
     /// Returns `true` when the active version is quarantined with no way back.
@@ -457,4 +554,149 @@ fn write_version_metadata(staging: &std::path::Path, package: &VerifiedPackage) 
         format!("{}\n", package.signature().to_hex()).as_bytes(),
     )?;
     Ok(())
+}
+
+/// Marks a file executable by its owner, and readable and executable by all.
+///
+/// Windows has no equivalent bit — executability there comes from the file
+/// extension, which [`InstallPaths::launcher_file`] already supplies.
+///
+/// [`InstallPaths::launcher_file`]: xpack_core::InstallPaths::launcher_file
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| Error::io(path, e))
+}
+
+#[cfg(not(unix))]
+fn set_executable(path: &Path) -> Result<()> {
+    let _ = path;
+    Ok(())
+}
+
+/// What a removal managed to delete, and what it did not.
+#[derive(Debug, Clone)]
+pub struct Removal {
+    /// The installation root that was targeted.
+    pub root: PathBuf,
+    /// Whether the root directory itself is now gone.
+    pub root_removed: bool,
+    /// Entries still present in the root, when it could not be removed.
+    pub remaining: Vec<PathBuf>,
+}
+
+impl Removal {
+    /// Returns `true` when nothing at all was left behind.
+    pub fn is_complete(&self) -> bool {
+        self.root_removed
+    }
+}
+
+/// Removes an installation completely.
+///
+/// # Why this consumes the lock
+///
+/// The lock file lives at `state/update.lock`, inside the tree being deleted,
+/// and the lock is held by an open handle to it. Unix would tolerate deleting
+/// it anyway — the inode survives until the handle closes — but Windows
+/// refuses to delete a file that is open, so an uninstall written against Unix
+/// behaviour would leave `state/` behind on every Windows machine.
+///
+/// Taking [`InstallLock`] by value is what makes the ordering enforceable: the
+/// lock is dropped partway through, and afterwards it is gone from the
+/// caller's hands too, so nothing can use a guard that no longer guards
+/// anything.
+///
+/// # Two phases
+///
+/// Everything that matters is deleted under the lock, including the pinned
+/// signing keys in `config/`. State is cleared and saved first, so an
+/// interruption leaves a coherent empty installation rather than a full record
+/// pointing at versions that are already gone.
+///
+/// Only then is the lock released and `state/` removed, followed by the root.
+///
+/// # The root is removed non-recursively
+///
+/// Between releasing the lock and removing the root, another process can
+/// acquire the lock and begin installing. A recursive delete would destroy its
+/// work. [`std::fs::remove_dir`] fails harmlessly on a directory that is no
+/// longer empty, which turns that race into an accurate report instead of data
+/// loss.
+///
+/// It also declines to delete anything a user put in the root themselves, for
+/// the same reason and with the same outcome: the path is reported in
+/// [`Removal::remaining`] rather than removed.
+///
+/// # What is never touched
+///
+/// Application data. It lives wherever the application chose to put it, which
+/// xPack does not know and will not guess at.
+pub fn uninstall(lock: InstallLock) -> Result<Removal> {
+    let paths = lock.paths().clone();
+    let root = paths.root().to_path_buf();
+
+    // Cleared and persisted before anything is deleted, so an interruption
+    // cannot leave state describing versions that no longer exist.
+    let id = paths
+        .application_id()
+        .ok_or_else(|| Error::invalid("installation", "root has no application id"))?;
+    let mut state = lock.load_or_new_state(id)?;
+    state.current_version = None;
+    state.previous_version = None;
+    state.versions.clear();
+    state.update = UpdatePhase::Idle;
+    lock.save_state(&state)?;
+
+    for directory in [paths.versions_dir(), paths.staging_root(), paths.downloads_dir()] {
+        atomic::remove_dir_all_if_exists(&directory)?;
+    }
+    // `current` is a symlink on Unix and is never created on Windows, so
+    // removing it as a file is right on both: on Unix this unlinks the link
+    // and not the directory it names.
+    atomic::remove_file_if_exists(&paths.current_link())?;
+    atomic::remove_file_if_exists(&paths.launcher_file())?;
+    atomic::remove_file_if_exists(&paths.updater_file())?;
+    atomic::remove_file_if_exists(&paths.uninstaller_file())?;
+
+    // The pinned signing keys. Leaving these behind is the consequential part
+    // of an incomplete uninstall: a later reinstall would silently inherit a
+    // trust decision the user believes they revoked.
+    atomic::remove_dir_all_if_exists(&paths.config_dir())?;
+
+    // Releases the lock and closes the handle to the file inside `state/`.
+    // Everything after this point runs unlocked, which is why it is ordered
+    // last and why the root removal cannot recurse.
+    drop(lock);
+
+    atomic::remove_dir_all_if_exists(&paths.state_dir())?;
+
+    let root_removed = match std::fs::remove_dir(&root) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    };
+
+    let remaining = if root_removed { Vec::new() } else { entries_in(&root) };
+    if !remaining.is_empty() {
+        tracing::warn!(
+            root = %root.display(),
+            count = remaining.len(),
+            "installation root was not empty and was left in place"
+        );
+    }
+    tracing::info!(root = %root.display(), root_removed, "installation removed");
+    Ok(Removal { root, root_removed, remaining })
+}
+
+/// Lists a directory's entries, treating an unreadable directory as empty.
+///
+/// Only ever used to explain why a removal stopped, so a failure here must not
+/// turn a mostly successful uninstall into an error.
+fn entries_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    read.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect()
 }

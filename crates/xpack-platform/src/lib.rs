@@ -19,5 +19,5 @@ pub mod lock;
 pub mod process;
 
 pub use link::{LinkOutcome, update_current_link};
-pub use lock::InstallLock;
+pub use lock::{DownloadLease, InstallLock};
 pub use process::{LaunchRequest, launch, resolve_executable};

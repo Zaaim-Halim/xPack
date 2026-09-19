@@ -1,0 +1,172 @@
+//! The background updater.
+//!
+//! This is the piece that makes updates happen on a user's machine without
+//! anyone asking. The launcher starts it, detached, every time the application
+//! opens; it decides whether a check is due, and if one is, fetches and stages
+//! a new version.
+//!
+//! # It stages; it does not activate
+//!
+//! A staged version is complete, verified and sitting in `versions/`, with
+//! nothing about the running application changed. The launcher activates it at
+//! the next start.
+//!
+//! Activating here instead would be one step shorter and wrong for two
+//! reasons. Activation puts a version on probation, and probation is only
+//! meaningful while something watches the version start — which is the
+//! launcher's job and cannot be done from a process that exits immediately.
+//! The attempt budget is small and bounded, so unobserved activations spend it
+//! and can roll back a version nobody ever tried. Separately, the `current`
+//! link is documented as a stable path for shortcuts and scripts; moving it
+//! under a running application is exactly the breakage it exists to avoid.
+//!
+//! This is also what Chrome, Firefox and Windows do, for the same reasons.
+//!
+//! # It is polite about asking
+//!
+//! Running on every application start means a user who opens their application
+//! twenty times a day would otherwise make twenty requests. The last check is
+//! recorded in installation state and a new one is refused until the interval
+//! has passed.
+//!
+//! # It is quiet
+//!
+//! Nobody is watching. There is no terminal, no progress bar and no prompt:
+//! everything goes to the installation's log file, and the exit code carries
+//! the outcome for anything that does care.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use xpack_core::{Error, InstallPaths, Result, Version};
+use xpack_platform::InstallLock;
+use xpack_update::{UpdateOptions, UpdateTransport, Updater};
+
+/// How long to wait between asking the server, by default.
+///
+/// Four hours is frequent enough that a security fix reaches an active user
+/// the same day, and rare enough that a busy user's machine is not a burden on
+/// the publisher's server.
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// What a run of the updater did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The interval has not elapsed; the server was not contacted.
+    NotDue,
+    /// The server was asked and had nothing newer.
+    UpToDate,
+    /// A version was downloaded, verified and staged.
+    Staged(Version),
+    /// A check was made but the installation declares no update server.
+    NoServerConfigured,
+}
+
+/// Decides whether to check, and checks.
+pub struct BackgroundUpdater<'a> {
+    paths: &'a InstallPaths,
+    transport: &'a dyn UpdateTransport,
+    interval: Duration,
+    force: bool,
+}
+
+impl<'a> BackgroundUpdater<'a> {
+    /// Builds an updater for an installation.
+    pub fn new(paths: &'a InstallPaths, transport: &'a dyn UpdateTransport) -> Self {
+        Self { paths, transport, interval: DEFAULT_INTERVAL, force: false }
+    }
+
+    /// Sets the minimum time between checks.
+    #[must_use]
+    pub fn every(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// Checks regardless of when the last one happened.
+    #[must_use]
+    pub fn forced(mut self, force: bool) -> Self {
+        self.force = force;
+        self
+    }
+
+    /// Runs one update cycle.
+    pub fn run(&self) -> Result<Outcome> {
+        let application = self.application_id()?;
+        let now = unix_seconds();
+
+        // The due check and the record of having checked are written in one
+        // locked window, before the network is touched. Two updaters starting
+        // at once would otherwise both find a check due and both make one.
+        let url = {
+            let lock = InstallLock::acquire(self.paths)?;
+            let mut state = lock.load_or_new_state(&application)?;
+
+            if !self.force && !state.update_check_is_due(now, self.interval.as_secs()) {
+                tracing::debug!("an update check is not due yet");
+                return Ok(Outcome::NotDue);
+            }
+
+            let Some(url) = self.update_url(&state)? else {
+                return Ok(Outcome::NoServerConfigured);
+            };
+
+            // Recorded before the attempt, not after. A server that hangs until
+            // the transport gives up would otherwise leave the check unrecorded
+            // and be retried on the very next application start.
+            state.last_update_check = Some(now);
+            lock.save_state(&state)?;
+            url
+        };
+
+        // Staged, never activated. See the module documentation.
+        // No launcher or updater is supplied: this runs *inside* an
+        // installation that already has both, and replacing the binary this
+        // process is executing from is precisely the write Windows refuses.
+        let options = UpdateOptions {
+            allow_downgrade: false,
+            activate: false,
+            launcher: None,
+            updater: None,
+            uninstaller: None,
+        };
+
+        if let Some(version) = Updater::new(self.paths, self.transport).update(&url, &options)? {
+            tracing::info!(%version, "a new version is staged and will be used at next start");
+            return Ok(Outcome::Staged(version));
+        }
+        tracing::debug!("no newer version is available");
+        Ok(Outcome::UpToDate)
+    }
+
+    /// The update server the active version's signed manifest names.
+    ///
+    /// Taken from the manifest rather than from a caller, so the server is
+    /// whatever the publisher signed rather than whatever a process on the
+    /// machine happened to pass in.
+    fn update_url(&self, state: &xpack_core::InstallState) -> Result<Option<String>> {
+        let Some(version) = &state.current_version else {
+            return Ok(None);
+        };
+        let manifest_file = self.paths.version_manifest_file(version);
+        let Ok(bytes) = std::fs::read(&manifest_file) else {
+            return Ok(None);
+        };
+        Ok(xpack_core::Manifest::from_slice(&bytes)?.update.url.clone())
+    }
+
+    fn application_id(&self) -> Result<String> {
+        self.paths
+            .application_id()
+            .map(ToString::to_string)
+            .ok_or_else(|| Error::invalid("installation", "root has no application id"))
+    }
+}
+
+/// Seconds since the Unix epoch, saturating at zero before it.
+///
+/// A clock set before 1970 is a broken clock, not a negative instant, and the
+/// only consumer of this is an interval comparison that treats zero as "very
+/// long ago" — which is the right reading of a clock that cannot be trusted.
+pub fn unix_seconds() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}

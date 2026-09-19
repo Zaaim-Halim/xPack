@@ -4,7 +4,6 @@ use std::process::ExitCode;
 
 use clap::Args as ClapArgs;
 use xpack_core::Result;
-use xpack_install::Installer;
 
 use super::Context;
 
@@ -34,8 +33,26 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         ));
     }
 
-    Installer::new(&lock).uninstall()?;
-    crate::output::field("removed", lock.paths().root().display());
+    // Consumes the lock: the lock file sits inside the tree being removed, so
+    // it has to be released partway through.
+    let removal = xpack_install::uninstall(lock)?;
+
+    crate::output::field("application", &args.application);
+    crate::output::field("root", removal.root.display());
+    crate::output::field("removed", removal.is_complete());
+
+    if !removal.is_complete() {
+        eprintln!();
+        eprintln!(
+            "note: {} was not empty, so it was left in place. Everything xPack installed \
+             there is gone; these are not ours to delete:",
+            removal.root.display()
+        );
+        for path in &removal.remaining {
+            eprintln!("  {}", path.display());
+        }
+    }
+
     eprintln!(
         "note: application data was not touched. xPack does not know where an application \
          stores its data, so it does not guess."

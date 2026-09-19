@@ -108,6 +108,18 @@ impl InstallPaths {
         self.state_dir().join("update.lock")
     }
 
+    /// The lock held for the duration of a download.
+    ///
+    /// Separate from [`Self::lock_file`] on purpose. The installation lock is
+    /// released across a download so the application stays usable, which
+    /// leaves nothing saying whether the downloader is still alive. This lock
+    /// says so, and the operating system answers rather than a timestamp: a
+    /// process that dies has its locks released immediately, with no clock to
+    /// trust and no process id to mistake for a reused one.
+    pub fn download_lock_file(&self) -> PathBuf {
+        self.state_dir().join("download.lock")
+    }
+
     /// Directory for component logs.
     pub fn logs_dir(&self) -> PathBuf {
         self.state_dir().join("logs")
@@ -151,6 +163,67 @@ impl InstallPaths {
         self.root.join("current")
     }
 
+    /// Locates an installation from the running executable's own position.
+    ///
+    /// Every binary xPack installs — the launcher, the updater, the
+    /// uninstaller — lives in the installation root, so the directory
+    /// containing the executable *is* the root. Deriving it rather than
+    /// embedding it at build time means one prebuilt binary serves every
+    /// application.
+    ///
+    /// `XPACK_APPLICATION_DIR` overrides this, which is what the tests use and
+    /// what an unusual deployment can fall back on.
+    pub fn discover() -> Result<Self> {
+        if let Some(dir) = std::env::var_os(APPLICATION_DIR_ENV) {
+            return Ok(Self::from_application_dir(PathBuf::from(dir)));
+        }
+        let executable = std::env::current_exe().map_err(|e| {
+            Error::invalid("installation", format!("cannot locate this binary: {e}"))
+        })?;
+        let dir = crate::atomic::parent_dir(&executable)?;
+        Ok(Self::from_application_dir(dir))
+    }
+
+    /// The launcher binary that starts this application.
+    ///
+    /// It sits in the installation root because that is how the launcher
+    /// identifies which application it belongs to: it resolves its own
+    /// executable path and treats the containing directory as the root.
+    /// Nothing is compiled into it, so one prebuilt binary serves every
+    /// installation.
+    ///
+    /// The name is fixed rather than derived from the application's display
+    /// name. A display name is free-form Unicode and turning one into a
+    /// filename invites normalisation collisions, and nothing reads this name
+    /// anyway — the launcher only cares where it is, not what it is called.
+    pub fn launcher_file(&self) -> PathBuf {
+        self.root.join(format!("xpack-launcher{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    /// The background updater binary for this installation.
+    ///
+    /// Beside the launcher, and found the same way: it resolves its own
+    /// location to learn which application it serves.
+    pub fn updater_file(&self) -> PathBuf {
+        self.root.join(format!("xpack-updater{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    /// Where a version signals that it started successfully.
+    ///
+    /// Per version, so a report from an older one can never be mistaken for a
+    /// report from the version currently being judged.
+    pub fn health_file(&self, version: &Version) -> PathBuf {
+        self.state_dir().join(format!("started-{}.ok", version.to_directory_name()))
+    }
+
+    /// The uninstaller binary for this installation.
+    ///
+    /// Beside the launcher and the updater. It removes the directory it lives
+    /// in, which is why it relocates itself before doing so.
+    pub fn uninstaller_file(&self) -> PathBuf {
+        self.root.join(format!("xpack-uninstaller{}", std::env::consts::EXE_SUFFIX))
+    }
+
     /// Returns `true` when this looks like an initialised installation.
     pub fn is_installed(&self) -> bool {
         self.state_file().is_file()
@@ -171,6 +244,12 @@ pub fn default_install_root() -> Result<PathBuf> {
 
 /// Name of the environment variable that relocates installations.
 pub const INSTALL_ROOT_ENV: &str = "XPACK_INSTALL_ROOT";
+
+/// Overrides the installation an installed binary decides it belongs to.
+///
+/// Used by [`InstallPaths::discover`]. The test suite relies on it, and so
+/// does any deployment that cannot put the binaries in the root.
+pub const APPLICATION_DIR_ENV: &str = "XPACK_APPLICATION_DIR";
 
 /// Resolves the install root from an explicit override, or the user default.
 ///

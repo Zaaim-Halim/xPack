@@ -196,7 +196,7 @@ fn a_downgrade_is_refused_unless_requested() {
     let err = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap_err();
     assert!(matches!(err, xpack_core::Error::DowngradeRejected { .. }), "got {err:?}");
 
-    let allowed = InstallOptions { activate: true, allow_downgrade: true };
+    let allowed = InstallOptions { activate: true, allow_downgrade: true, ..Default::default() };
     install(&lock, dir.path(), &key, "1.0.0", &allowed).expect("explicit override must work");
 }
 
@@ -262,7 +262,7 @@ fn pruning_keeps_everything_recovery_might_need() {
 }
 
 #[test]
-fn uninstalling_removes_versions_and_clears_state() {
+fn uninstalling_removes_the_whole_installation() {
     let dir = tempfile::tempdir().unwrap();
     let key = KeyPair::generate().unwrap();
     let paths = install_paths(dir.path());
@@ -270,12 +270,53 @@ fn uninstalling_removes_versions_and_clears_state() {
     let options = InstallOptions { activate: true, ..Default::default() };
 
     install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
-    Installer::new(&lock).uninstall().unwrap();
+    let removal = xpack_install::uninstall(lock).unwrap();
 
-    assert!(!paths.versions_dir().exists());
-    let state = lock.load_state().unwrap().value;
-    assert!(state.current_version.is_none());
-    assert!(state.versions.is_empty());
+    assert!(removal.is_complete(), "left behind: {:?}", removal.remaining);
+    assert!(!paths.root().exists(), "the installation root survived");
+}
+
+#[test]
+fn uninstalling_removes_the_pinned_signing_keys() {
+    // The consequential part of an incomplete uninstall: a surviving trust
+    // store means a later reinstall inherits a trust decision the user
+    // believes they revoked.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    install(&lock, dir.path(), &key, "1.0.0", &InstallOptions::default()).unwrap();
+    let mut store = xpack_security::trust::TrustStore::new();
+    store.trust(&key.public(), "test");
+    store.save(&paths.trust_file()).unwrap();
+    assert!(paths.trust_file().is_file(), "precondition: a key is pinned");
+
+    xpack_install::uninstall(lock).unwrap();
+
+    assert!(!paths.trust_file().exists(), "the pinned signing key survived uninstall");
+}
+
+#[test]
+fn uninstalling_leaves_unexpected_content_in_the_root_alone() {
+    // The root is emptied non-recursively, so anything xPack did not put there
+    // is reported rather than deleted.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    install(&lock, dir.path(), &key, "1.0.0", &InstallOptions::default()).unwrap();
+    let stray = paths.root().join("user-notes.txt");
+    std::fs::write(&stray, b"keep me").unwrap();
+
+    let removal = xpack_install::uninstall(lock).unwrap();
+
+    assert!(!removal.is_complete(), "the root should have been kept");
+    assert_eq!(removal.remaining, vec![stray.clone()]);
+    assert_eq!(std::fs::read(&stray).unwrap(), b"keep me");
+    assert!(!paths.versions_dir().exists(), "versions should still be gone");
+    assert!(!paths.state_dir().exists(), "state should still be gone");
 }
 
 #[test]
@@ -527,6 +568,35 @@ fn recovery_keeps_a_fully_staged_version() {
     let report = Installer::new(&lock).recover().unwrap();
     assert!(report.left_in_place);
     assert!(paths.version_dir(&v("1.0.0")).join("bin/app").is_file());
+
+    // The phase itself must survive too, not just the files. It is the only
+    // record that a version is staged and waiting to be activated; clearing it
+    // leaves the directory on disk with nothing pointing at it.
+    let state = lock.load_state().unwrap().value;
+    assert!(
+        matches!(&state.update, UpdatePhase::Staged { version } if version == &v("1.0.0")),
+        "the staged marker was erased: {:?}",
+        state.update
+    );
+}
+
+#[test]
+fn repeated_recovery_never_erases_a_staged_marker() {
+    // Recovery runs at the start of every operation, so a marker that survives
+    // once but not twice is still lost in practice.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+    install(&lock, dir.path(), &key, "1.0.0", &InstallOptions::default()).unwrap();
+
+    let installer = Installer::new(&lock);
+    for _ in 0..3 {
+        installer.recover().unwrap();
+    }
+
+    let state = lock.load_state().unwrap().value;
+    assert!(matches!(state.update, UpdatePhase::Staged { .. }), "got {:?}", state.update);
 }
 
 #[test]
@@ -612,4 +682,215 @@ fn state_written_by_a_crash_is_never_mistaken_for_a_fresh_install() {
 
     Installer::new(&lock).recover().unwrap();
     assert!(lock.load_state().unwrap().value.update.is_idle());
+}
+
+/// Writes a stand-in launcher binary and returns its path.
+///
+/// The contents are irrelevant to installation, which copies bytes and sets a
+/// mode without ever running them.
+fn fake_launcher(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("xpack-launcher-source");
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    path
+}
+
+#[test]
+fn installing_places_the_launcher_in_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let source = fake_launcher(dir.path());
+    let options =
+        InstallOptions { activate: true, launcher: Some(source.clone()), ..Default::default() };
+    let installed = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::Installed));
+
+    let launcher = paths.launcher_file();
+    assert!(launcher.is_file(), "no launcher at {}", launcher.display());
+    assert_eq!(std::fs::read(&launcher).unwrap(), std::fs::read(&source).unwrap());
+
+    // The launcher resolves its installation from its own location, so it has
+    // to sit directly in the root.
+    assert_eq!(launcher.parent().unwrap(), paths.root());
+}
+
+#[test]
+#[cfg(unix)]
+fn the_installed_launcher_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options =
+        InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let mode = std::fs::metadata(paths.launcher_file()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "not executable: mode {mode:o}");
+}
+
+#[test]
+fn a_launcher_already_in_place_is_never_overwritten() {
+    // Replacing a resident launcher fails on Windows, and an application
+    // update has no reason to: the launcher belongs to xPack, not the version.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options =
+        InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    std::fs::write(paths.launcher_file(), b"an existing launcher").unwrap();
+
+    let second = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+
+    assert_eq!(second.launcher, Some(xpack_install::LauncherOutcome::AlreadyPresent));
+    assert_eq!(std::fs::read(paths.launcher_file()).unwrap(), b"an existing launcher");
+}
+
+#[test]
+fn a_different_launcher_binary_still_does_not_replace_one_in_place() {
+    // Directly, without the install machinery: the check is existence, not
+    // whether the bytes differ. Installing twice from the same source would
+    // pass even if this compared contents, which is not the guarantee the
+    // Windows reasoning depends on.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+    let installer = Installer::new(&lock);
+
+    std::fs::create_dir_all(paths.root()).unwrap();
+    std::fs::write(paths.launcher_file(), b"the resident launcher").unwrap();
+
+    let newer = dir.path().join("newer-launcher");
+    std::fs::write(&newer, b"a completely different binary").unwrap();
+
+    let outcome = installer.install_launcher(&newer).unwrap();
+
+    assert_eq!(outcome, xpack_install::LauncherOutcome::AlreadyPresent);
+    assert_eq!(std::fs::read(paths.launcher_file()).unwrap(), b"the resident launcher");
+}
+
+#[test]
+fn installing_without_a_launcher_leaves_the_root_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let installed = install(&lock, dir.path(), &key, "1.0.0", &InstallOptions::default()).unwrap();
+
+    assert_eq!(installed.launcher, None);
+    assert!(!paths.launcher_file().exists());
+}
+
+/// Covers the guard only.
+///
+/// An empty source is rejected before anything is written, so "nothing is left
+/// behind" is true here without the cleanup path running at all. The cleanup
+/// that matters — the file is written, made executable, and the mode change
+/// fails — has no test: provoking a `set_permissions` failure on a file just
+/// created in a writable directory is not portable. That path is reasoned, not
+/// covered.
+#[test]
+fn an_empty_launcher_is_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let empty = dir.path().join("empty-launcher");
+    std::fs::write(&empty, b"").unwrap();
+
+    let options = InstallOptions { launcher: Some(empty), ..Default::default() };
+    let error = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap_err();
+
+    assert!(error.to_string().contains("empty"), "got {error}");
+    assert!(!paths.launcher_file().exists());
+}
+
+#[test]
+fn uninstalling_removes_the_launcher() {
+    // The root is emptied non-recursively, so a launcher left behind would
+    // keep every uninstall reporting incomplete.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options =
+        InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+    assert!(paths.launcher_file().is_file(), "precondition: a launcher is installed");
+
+    let removal = xpack_install::uninstall(lock).unwrap();
+
+    assert!(removal.is_complete(), "left behind: {:?}", removal.remaining);
+    assert!(!paths.launcher_file().exists());
+}
+
+#[test]
+fn recovery_leaves_a_download_alone_while_its_lease_is_held() {
+    // The download runs with the installation lock released, so recovery in
+    // another command sees `Downloading` and would otherwise clear the
+    // directory out from under a live writer.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let mut state = InstallState::new("com.example.app");
+    state.update = UpdatePhase::Downloading { version: v("1.1.0") };
+    lock.save_state(&state).unwrap();
+
+    let partial = paths.downloads_dir().join("app-1.1.0.xpkg");
+    std::fs::create_dir_all(paths.downloads_dir()).unwrap();
+    std::fs::write(&partial, b"half a package").unwrap();
+
+    // Held for the duration, exactly as a downloader would.
+    let lease = xpack_platform::DownloadLease::acquire(&paths).unwrap();
+    assert!(lease.is_some(), "precondition: the lease was free");
+
+    let report = Installer::new(&lock).recover().unwrap();
+
+    assert!(!report.cleared_downloads, "recovery deleted a download in progress");
+    assert!(partial.is_file(), "the partial download was removed");
+    let state = lock.load_state().unwrap().value;
+    assert!(
+        matches!(state.update, UpdatePhase::Downloading { .. }),
+        "the phase was cleared under a live download: {:?}",
+        state.update
+    );
+}
+
+#[test]
+fn recovery_clears_a_download_whose_lease_is_gone() {
+    // The other half: once nobody holds the lease, the partial file is debris
+    // from a process that died and must not be mistaken for a live download.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let mut state = InstallState::new("com.example.app");
+    state.update = UpdatePhase::Downloading { version: v("1.1.0") };
+    lock.save_state(&state).unwrap();
+
+    let partial = paths.downloads_dir().join("app-1.1.0.xpkg");
+    std::fs::create_dir_all(paths.downloads_dir()).unwrap();
+    std::fs::write(&partial, b"abandoned").unwrap();
+
+    // No lease held: the writer is gone.
+    let report = Installer::new(&lock).recover().unwrap();
+
+    assert!(report.cleared_downloads, "abandoned debris was left behind");
+    assert!(!partial.exists());
+    let state = lock.load_state().unwrap().value;
+    assert!(state.update.is_idle(), "got {:?}", state.update);
 }

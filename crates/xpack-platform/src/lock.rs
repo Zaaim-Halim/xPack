@@ -167,3 +167,83 @@ impl Drop for InstallLock {
         let _ = self.file.unlock();
     }
 }
+
+/// Held for the duration of a download, to prove the downloader is alive.
+///
+/// # Why a second lock
+///
+/// The installation lock is released across a download so that the
+/// application, the launcher and every other command stay usable while a
+/// large package is fetched. That leaves a gap: the update phase says
+/// `Downloading`, but nothing says whether the process that wrote it is still
+/// running. Recovery's rule for `Downloading` is to clear the downloads
+/// directory, and applying it to a download still in progress deletes the file
+/// out from under a live writer.
+///
+/// A timestamp lease would answer this, and answers it badly: a machine that
+/// loses power mid-download leaves a lease that is live and owned by nobody,
+/// and every later attempt waits out the remainder. Recording a process id
+/// instead trades that for pid reuse.
+///
+/// An advisory file lock has neither problem. The operating system releases it
+/// the moment the holding process ends, however it ends, so "is a download in
+/// progress" becomes a question the kernel answers rather than one this code
+/// infers.
+///
+/// # Ordering
+///
+/// The lease must be taken **before** the installation lock is released, and
+/// released **after** it is re-acquired. Recovery can only inspect the phase
+/// while holding the installation lock, so that ordering leaves no window in
+/// which the phase says `Downloading` and the lease is free while a download
+/// is genuinely running.
+#[derive(Debug)]
+pub struct DownloadLease {
+    /// Holding this handle holds the lease; dropping it releases.
+    file: File,
+}
+
+impl DownloadLease {
+    /// Takes the lease, or returns `None` when another process holds it.
+    pub fn acquire(paths: &InstallPaths) -> Result<Option<Self>> {
+        let file = Self::open(paths)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(Error::io(paths.download_lock_file(), e)),
+        }
+    }
+
+    /// Returns `true` when some live process is downloading.
+    ///
+    /// Answered by trying to take the lease and letting it go again, which is
+    /// the only way to ask without a race: testing and then acting on the
+    /// answer would leave a window between the two.
+    pub fn is_held(paths: &InstallPaths) -> Result<bool> {
+        Ok(Self::acquire(paths)?.is_none())
+    }
+
+    /// Opens the lease file without truncating it.
+    ///
+    /// Truncation would be a write to a file another process may hold, and the
+    /// file is never removed, for the same inode reason the installation lock
+    /// documents.
+    fn open(paths: &InstallPaths) -> Result<File> {
+        let dir = paths.state_dir();
+        xpack_core::atomic::create_dir_all(&dir)?;
+        let path = paths.download_lock_file();
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| Error::io(&path, e))
+    }
+}
+
+impl Drop for DownloadLease {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}

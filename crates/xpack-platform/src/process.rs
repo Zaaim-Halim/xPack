@@ -21,6 +21,13 @@ pub struct LaunchRequest {
     pub user_arguments: Vec<String>,
     /// Whether the child keeps this process's standard streams.
     pub inherit_stdio: bool,
+    /// Environment the launcher adds, on top of the manifest's.
+    ///
+    /// Kept separate from the manifest's own entries because these are set by
+    /// xPack rather than by the publisher, and a manifest must not be able to
+    /// overwrite them: they tell the application how to talk back to the thing
+    /// that started it.
+    pub launcher_environment: Vec<(String, String)>,
 }
 
 impl LaunchRequest {
@@ -31,7 +38,19 @@ impl LaunchRequest {
             spec,
             user_arguments: Vec::new(),
             inherit_stdio: true,
+            launcher_environment: Vec::new(),
         }
+    }
+
+    /// Adds an environment entry the manifest cannot override.
+    #[must_use]
+    pub fn with_launcher_environment(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.launcher_environment.push((key.into(), value.into()));
+        self
     }
 
     /// Appends the arguments the user typed.
@@ -122,6 +141,11 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
     command.current_dir(&working_directory);
 
     for (key, value) in &request.spec.environment {
+        command.env(key, value);
+    }
+    // Applied last, so a manifest cannot shadow the variables xPack uses to
+    // hear back from the application it started.
+    for (key, value) in &request.launcher_environment {
         command.env(key, value);
     }
 

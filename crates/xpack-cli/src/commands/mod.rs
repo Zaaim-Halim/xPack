@@ -74,3 +74,30 @@ pub(crate) fn public_key(value: &str) -> Result<xpack_security::PublicKey> {
         )
     })
 }
+
+/// The `xpack-launcher` binary sitting beside this executable, if there is one.
+///
+/// Shared by the commands that can create an installation. Both default to it
+/// so that an installation always ends up with an entry point, however it came
+/// to exist — an update that happens to be a first install should not produce
+/// something the user cannot start.
+pub(crate) fn default_launcher() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-launcher")
+}
+
+/// The `xpack-updater` binary sitting beside this executable, if there is one.
+pub(crate) fn default_updater() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-updater")
+}
+
+/// The `xpack-uninstaller` binary sitting beside this executable, if there is one.
+pub(crate) fn default_uninstaller() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-uninstaller")
+}
+
+/// Finds a named executable next to this one.
+fn sibling_binary(name: &str) -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let candidate = executable.parent()?.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    candidate.is_file().then_some(candidate)
+}
