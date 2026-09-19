@@ -114,6 +114,7 @@
 
 mod retention;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -230,9 +231,15 @@ pub fn init(config: &Config<'_>) -> FileLogging {
     let mut layers: Vec<BoxedLayer> = Vec::new();
 
     if config.console != Console::Silent {
+        // Colour only when a person is actually looking at a terminal.
+        // Without this, every `xpack ... 2> log` and every CI job captures
+        // escape codes in its logs, and xPack is expected to run headless —
+        // on servers, in containers, over SSH, under a scheduler — far more
+        // often than it runs in front of someone.
         layers.push(Box::new(
             fmt::layer()
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::stderr().is_terminal())
                 .without_time()
                 .with_target(false)
                 .with_filter(filter(config.console.directive())),

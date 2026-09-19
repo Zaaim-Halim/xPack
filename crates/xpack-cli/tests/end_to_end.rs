@@ -294,3 +294,86 @@ fn installing_a_downgrade_is_refused_until_asked_for() {
     let allowed = fixture.run_in_root(&["install", &older, "--allow-downgrade"]);
     assert!(allowed.status.success(), "{}", stderr(&allowed));
 }
+
+/// Returns the distinct ANSI escape sequences in a byte stream.
+///
+/// Looks for the CSI introducer rather than colour specifically: any escape at
+/// all in a captured stream is output written for a terminal that is not there.
+fn escape_sequences(bytes: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            let start = i;
+            i += 2;
+            while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            let sequence = String::from_utf8_lossy(&bytes[start..=i.min(bytes.len() - 1)])
+                .replace('\x1b', "ESC");
+            if !found.contains(&sequence) {
+                found.push(sequence);
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+#[test]
+fn output_carries_no_terminal_escapes_when_nothing_is_watching() {
+    // xPack runs headless far more often than it runs in front of someone: on
+    // servers, in containers, over SSH, under a scheduler, piped into a log.
+    // `Command::output` captures through pipes, so this runs under exactly the
+    // condition that matters — no terminal on either stream.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let install = fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    for (stream, bytes) in [("stdout", &install.stdout), ("stderr", &install.stderr)] {
+        let escapes = escape_sequences(bytes);
+        assert!(
+            escapes.is_empty(),
+            "install wrote terminal escapes to {stream}: {escapes:?}\n\
+             full output:\n{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+
+    // The same for a command that reads state and prints a table, where
+    // highlighting the active version is most tempting.
+    let list = fixture.run_in_root(&["list", "com.example.demo"]);
+    for (stream, bytes) in [("stdout", &list.stdout), ("stderr", &list.stderr)] {
+        let escapes = escape_sequences(bytes);
+        assert!(escapes.is_empty(), "list wrote terminal escapes to {stream}: {escapes:?}");
+    }
+}
+
+#[test]
+fn no_command_waits_for_input_that_will_never_come() {
+    // A prompt in a headless run is a hang, and a hang under a scheduler is an
+    // outage. Destructive commands take a flag instead; stdin is closed here to
+    // prove nothing reads it.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+    fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+
+    let refused = Command::new(xpack())
+        .current_dir(fixture.path())
+        .args(["--root", &fixture.root().to_string_lossy(), "uninstall", "com.example.demo"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the xpack binary should run");
+
+    // Refused for want of a flag, not blocked waiting for someone to type.
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("--yes"),
+        "expected a flag to be demanded, got: {}",
+        stderr(&refused)
+    );
+}
