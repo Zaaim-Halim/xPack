@@ -360,6 +360,79 @@ fn a_setuid_bit_in_the_archive_is_not_honoured() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_setuid_mode_in_the_signed_manifest_is_masked_off() {
+    // The earlier setuid test patches the *archive*, but permissions come from
+    // the manifest, so it never reaches the mask. A publisher — or anyone who
+    // compromised one — declaring a setuid mode in the signed manifest is the
+    // case the mask actually exists for: a setuid binary dropped by an
+    // installer is a privilege-escalation primitive.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let body: &[u8] = b"#!/bin/sh\nid\n";
+
+    let mut manifest = template(host());
+    manifest.launch.executable = "bin/app".into();
+    manifest.payload = PayloadSpec {
+        total_size: body.len() as u64,
+        files: vec![xpack_core::PayloadFile {
+            path: "bin/app".into(),
+            size: body.len() as u64,
+            // setuid, setgid and sticky all set alongside 0o755.
+            mode: Some(0o7755),
+            sha256: xpack_security::sha256(body),
+        }],
+    };
+
+    let pkg = pack_forged(dir.path(), &key, &manifest, &[("bin/app", body)]);
+    let dest = dir.path().join("extracted");
+    PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap().extract_to(&dest).unwrap();
+
+    let mode = fs::metadata(dest.join("bin/app")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7000, 0, "setuid/setgid/sticky must never be applied");
+    assert_eq!(mode & 0o777, 0o755, "the permission bits themselves must survive");
+}
+
+#[test]
+fn a_payload_file_larger_than_the_manifest_declares_is_cut_off() {
+    // The digest would catch this eventually, but only after the whole file
+    // had been written. The size bound exists so a package cannot fill the
+    // disk before being rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let declared: &[u8] = b"small";
+    let actual = vec![b'x'; 64 * 1024];
+
+    let mut manifest = template(host());
+    manifest.launch.executable = "bin/app".into();
+    manifest.payload = PayloadSpec {
+        total_size: declared.len() as u64,
+        files: vec![xpack_core::PayloadFile {
+            path: "bin/app".into(),
+            size: declared.len() as u64,
+            sha256: xpack_security::sha256(declared),
+            mode: Some(0o755),
+        }],
+    };
+
+    // The archive carries far more than the manifest declares.
+    let pkg = pack_forged(dir.path(), &key, &manifest, &[("bin/app", &actual)]);
+    let dest = dir.path().join("extracted");
+    let err = PackageReader::open(&pkg)
+        .unwrap()
+        .verify(&trusting(&key))
+        .unwrap()
+        .extract_to(&dest)
+        .unwrap_err();
+
+    assert!(err.is_integrity_failure(), "got {err:?}");
+    assert!(err.to_string().contains("larger than"), "got {err}");
+    assert!(!dest.exists(), "nothing may survive a refused extraction");
+}
+
 #[test]
 fn a_package_for_another_platform_is_refused() {
     let dir = tempfile::tempdir().unwrap();

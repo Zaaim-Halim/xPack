@@ -81,12 +81,23 @@ fn rejects_every_small_order_public_key() {
 }
 
 #[test]
-fn rejects_a_malleable_signature_with_a_non_canonical_scalar() {
+fn rejects_a_signature_whose_scalar_is_not_reduced() {
     // A signature is (R, S). S must be reduced modulo the group order L.
-    // Adding L to S yields a different byte string that a permissive verifier
-    // still accepts — so one message would have two valid signatures. Strict
-    // verification rejects it, which is what keeps a signature usable as an
-    // identifier.
+    // Adding L to S yields a different byte string that a permissive
+    // implementation would still accept, so one message would have two valid
+    // signatures.
+    //
+    // Worth being precise about what this proves: in this library the
+    // non-canonical scalar is refused while the signature is decoded, before
+    // verification runs at all. So this test covers signature decoding, not
+    // the choice of verify_strict over verify — swapping those two does not
+    // change the outcome here, which a mutation check confirmed.
+    //
+    // verify_strict is still what this crate calls. Its distinguishing
+    // behaviour is refusing low-order public keys and R values, and that case
+    // cannot be reached through this API because PublicKey::from_bytes already
+    // rejects low-order keys. It is defence in depth against that check ever
+    // being weakened, and is documented as such rather than claimed as tested.
     const L: [u8; 32] = [
         0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
         0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
