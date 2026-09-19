@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/xpack-core", "crates/xpack-security", "crates/xpack-package"]
+members = [
+    "crates/xpack-core",
+    "crates/xpack-security",
+    "crates/xpack-package",
+    "crates/xpack-platform",
+]
 
 [workspace.package]
 version = "0.1.0"

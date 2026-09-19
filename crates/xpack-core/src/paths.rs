@@ -55,6 +55,13 @@ impl InstallPaths {
         &self.root
     }
 
+    /// The application id this layout belongs to.
+    ///
+    /// Taken from the final path component, which is how the layout is built.
+    pub fn application_id(&self) -> Option<&str> {
+        self.root.file_name().and_then(|n| n.to_str())
+    }
+
     /// Directory holding every installed version.
     pub fn versions_dir(&self) -> PathBuf {
         self.root.join("versions")

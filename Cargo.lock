@@ -591,6 +591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xpack-platform"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tracing",
+ "xpack-core",
+]
+
+[[package]]
 name = "xpack-security"
 version = "0.1.0"
 dependencies = [

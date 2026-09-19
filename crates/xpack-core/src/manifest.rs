@@ -355,7 +355,11 @@ pub fn validate_application_id(id: &str) -> Result<()> {
 }
 
 /// Rejects anything that is not a plain relative path inside the package.
-fn validate_relative_path(subject: &str, path: &str) -> Result<()> {
+///
+/// Public because the launcher must apply the same rule before executing
+/// anything. A validator that only runs at packaging time is no defence for
+/// the component that actually starts a process.
+pub fn validate_relative_path(subject: &str, path: &str) -> Result<()> {
     let normalised = normalise_separators(path);
     if normalised.is_empty() {
         return Err(Error::invalid(subject, "must not be empty"));
