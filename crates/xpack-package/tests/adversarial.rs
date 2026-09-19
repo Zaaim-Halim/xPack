@@ -18,6 +18,9 @@ use xpack_core::{Platform, Version};
 use xpack_package::{PackageBuilder, PackageReader};
 use xpack_security::{KeyPair, TrustStore};
 
+/// `S_IFLNK`: the ZIP external-attribute file-type bits marking a symbolic link.
+const S_IFLNK: u32 = 0o120_000;
+
 /// Builds a payload tree and returns its root.
 fn payload_tree(root: &Path) {
     fs::create_dir_all(root.join("application")).unwrap();
@@ -319,7 +322,6 @@ fn a_symlink_entry_is_refused() {
 
     // A symlink entry is an arbitrary-write primitive: extract
     // `link -> /etc/cron.d`, then write a file "through" it on the next entry.
-    const S_IFLNK: u32 = 0o120_000;
     let evil = dir.path().join("symlink.xpkg");
     rewrite(&pkg, &evil, |name, data| {
         let mut out = vec![Some((name.to_string(), data, None))];
