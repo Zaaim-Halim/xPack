@@ -1,6 +1,55 @@
-[package]
-name = "xPack"
+[workspace]
+resolver = "3"
+members = ["crates/xpack-core", "crates/xpack-security"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/Zaaim-Halim/xPack"
+authors = ["Halim Zaaim"]
 
-[dependencies]
+[workspace.dependencies]
+xpack-core = { path = "crates/xpack-core", version = "0.1.0" }
+xpack-security = { path = "crates/xpack-security", version = "0.1.0" }
+xpack-package = { path = "crates/xpack-package", version = "0.1.0" }
+xpack-platform = { path = "crates/xpack-platform", version = "0.1.0" }
+xpack-install = { path = "crates/xpack-install", version = "0.1.0" }
+xpack-update = { path = "crates/xpack-update", version = "0.1.0" }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+semver = { version = "1.0.28", features = ["serde"] }
+sha2 = "0.11.0"
+ed25519-dalek = "3.0.0"
+getrandom = "0.4.3"
+hex = "0.4.3"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+walkdir = "2.5.0"
+tempfile = "3.27.0"
+clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+directories = "6.0.0"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
