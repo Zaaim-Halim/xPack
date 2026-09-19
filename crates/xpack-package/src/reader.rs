@@ -434,7 +434,7 @@ impl std::fmt::Debug for VerifiedPackage {
             .field("application", &self.manifest.application.id)
             .field("version", &self.manifest.application.version.to_string())
             .field("signingKey", &self.signing_key.fingerprint())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
