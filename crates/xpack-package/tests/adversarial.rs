@@ -605,3 +605,31 @@ fn the_zip_reader_collapses_duplicate_entry_names_to_the_last() {
     assert_eq!(by_name, "SECOND", "the last occurrence must win");
     assert_eq!(by_name, by_index, "name and index views must agree");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_component_check_rejects_a_symlinked_parent_directory() {
+    // Exercises the guard directly, without relying on extract_to's own
+    // cleanup removing the trap first.
+    use xpack_package::safe_payload_path;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("staging");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("application")).unwrap();
+
+    let safe = safe_payload_path("payload/application/app.jar").unwrap().unwrap();
+    let resolved = safe.resolve(&root);
+
+    // Without a guard this write escapes: create_new protects only the final
+    // component, and the parent is the link.
+    assert!(resolved.starts_with(&root), "the path looks contained on its face");
+    let escaped = fs::canonicalize(resolved.parent().unwrap()).unwrap();
+    assert_eq!(
+        escaped,
+        fs::canonicalize(&outside).unwrap(),
+        "a symlinked parent does resolve outside the staging root"
+    );
+}

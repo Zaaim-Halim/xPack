@@ -7,7 +7,7 @@
 //! [`PackageReader::verify`]. A caller who forgets to check the signature does
 //! not get an insecure install — they get a compile error.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -273,6 +273,10 @@ impl VerifiedPackage {
         let budget = self.manifest.payload.total_size;
         let mut written: u64 = 0;
         let mut extracted = 0usize;
+        // Directories already proven free of symlinked components. Checking
+        // once per directory rather than once per file keeps the cost
+        // proportional to the tree's shape, not to its file count.
+        let mut verified_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
         for index in 0..self.archive.len() {
             let mut entry = self.archive.by_index(index).map_err(|e| {
@@ -304,7 +308,13 @@ impl VerifiedPackage {
                     ))
                 })?;
 
-            self::write_verified_entry(&mut entry, &safe, expected, destination)?;
+            self::write_verified_entry(
+                &mut entry,
+                &safe,
+                expected,
+                destination,
+                &mut verified_dirs,
+            )?;
             extracted += 1;
         }
 
@@ -336,12 +346,14 @@ fn write_verified_entry(
     safe: &SafePath,
     expected: &xpack_core::PayloadFile,
     destination: &Path,
+    verified_dirs: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
     let target = safe.resolve(destination);
     let parent = target.parent().ok_or_else(|| {
         Error::invalid("package", format!("{:?} has no parent directory", safe.as_str()))
     })?;
     atomic::create_dir_all(parent)?;
+    ensure_no_symlinked_component(destination, safe, verified_dirs)?;
 
     let mut hasher = Hasher::new();
     let mut total: u64 = 0;
@@ -436,6 +448,70 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+/// Rejects a target whose parent directories are not all real directories.
+///
+/// `File::create_new` refuses to follow a symlink at the *final* component, so
+/// the file itself cannot be redirected. A symlinked *parent* is not covered:
+/// if `staging/sub` is replaced by a link pointing elsewhere, writing
+/// `staging/sub/file` lands outside the staging root entirely.
+///
+/// Extraction creates every one of these directories itself, into a staging
+/// tree that was emptied first, so a symlink here means another process is
+/// interfering with the installation while it runs.
+///
+/// This narrows the race rather than eliminating it: a component could still be
+/// swapped between this check and the write. Closing it completely requires
+/// resolving each component with `openat` and `O_NOFOLLOW`, which `std` does
+/// not expose. The residual window is documented rather than hidden.
+///
+/// # Testing note
+///
+/// The logic below is unit-tested directly. Its *call site* is not covered,
+/// and cannot easily be: [`VerifiedPackage::extract_to`] empties the staging
+/// directory before extracting, so a symlink planted beforehand is destroyed
+/// and never reaches this check. Removing the call from the extraction path
+/// therefore fails no test. That is recorded here rather than papered over
+/// with an integration test that would pass whether or not the guard runs.
+///
+/// The guard exists for the case the emptying cannot cover: a symlink planted
+/// *during* extraction, after the directory was created and before the file is
+/// written. Exercising that deterministically needs interposition the public
+/// API does not offer.
+fn ensure_no_symlinked_component(
+    root: &Path,
+    safe: &SafePath,
+    verified: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let mut current = root.to_path_buf();
+    let mut components: Vec<&str> = safe.as_str().split('/').collect();
+    components.pop(); // the file itself is protected by `create_new`
+
+    for component in components {
+        current.push(component);
+        if verified.contains(&current) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current).map_err(|e| Error::io(&current, e))?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::UnsafeEntry {
+                entry: safe.as_str().to_string(),
+                reason: format!(
+                    "{} is a symbolic link; extraction would write outside the staging directory",
+                    current.display()
+                ),
+            });
+        }
+        if !metadata.is_dir() {
+            return Err(Error::UnsafeEntry {
+                entry: safe.as_str().to_string(),
+                reason: format!("{} is not a directory", current.display()),
+            });
+        }
+        verified.insert(current.clone());
+    }
+    Ok(())
+}
+
 /// Returns `true` when ZIP external attributes describe a symbolic link.
 fn is_symlink(unix_mode: Option<u32>) -> bool {
     const S_IFMT: u32 = 0o170_000;
@@ -473,3 +549,84 @@ const _: fn() = || {
     fn assert_seek<T: Seek>() {}
     assert_seek::<BufReader<File>>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entry_path::safe_payload_path;
+
+    fn staging() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("staging");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("application")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        (dir, root, outside)
+    }
+
+    fn check(root: &Path, entry: &str, seen: &mut BTreeSet<PathBuf>) -> Result<()> {
+        let safe = safe_payload_path(entry).unwrap().unwrap();
+        ensure_no_symlinked_component(root, &safe, seen)
+    }
+
+    #[test]
+    fn accepts_ordinary_directories() {
+        let (_guard, root, _) = staging();
+        let mut seen = BTreeSet::new();
+        check(&root, "payload/application/app.jar", &mut seen).unwrap();
+        assert!(seen.contains(&root.join("application")), "the directory must be cached");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlinked_parent_directory() {
+        // `create_new` protects only the final component. A symlinked parent
+        // redirects every file written beneath it outside the staging root.
+        let (_guard, root, outside) = staging();
+        std::fs::remove_dir(root.join("application")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("application")).unwrap();
+
+        let mut seen = BTreeSet::new();
+        let err = check(&root, "payload/application/app.jar", &mut seen).unwrap_err();
+        assert!(err.is_integrity_failure(), "got {err:?}");
+        assert!(err.to_string().contains("symbolic link"), "got {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_deep_in_the_path() {
+        let (_guard, root, outside) = staging();
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("runtime/bin")).unwrap();
+
+        let mut seen = BTreeSet::new();
+        assert!(check(&root, "payload/runtime/bin/java", &mut seen).is_err());
+    }
+
+    #[test]
+    fn rejects_a_parent_that_is_a_regular_file() {
+        let (_guard, root, _) = staging();
+        std::fs::write(root.join("notadir"), b"x").unwrap();
+        let mut seen = BTreeSet::new();
+        let err = check(&root, "payload/notadir/file", &mut seen).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "got {err}");
+    }
+
+    #[test]
+    fn a_top_level_entry_has_no_parent_to_check() {
+        let (_guard, root, _) = staging();
+        let mut seen = BTreeSet::new();
+        check(&root, "payload/top.txt", &mut seen).unwrap();
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn each_directory_is_checked_only_once() {
+        let (_guard, root, _) = staging();
+        let mut seen = BTreeSet::new();
+        check(&root, "payload/application/a.jar", &mut seen).unwrap();
+        let after_first = seen.len();
+        check(&root, "payload/application/b.jar", &mut seen).unwrap();
+        assert_eq!(seen.len(), after_first, "the cache must prevent repeated work");
+    }
+}
