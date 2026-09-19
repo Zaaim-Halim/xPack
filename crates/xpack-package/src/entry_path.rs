@@ -13,11 +13,15 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use xpack_core::manifest::PAYLOAD_PREFIX;
+use xpack_core::manifest::{MAX_PAYLOAD_PATH_LEN, PAYLOAD_PREFIX};
 use xpack_core::{Error, Result};
 
-/// Longest entry name accepted, guarding against path-length denial of service.
-const MAX_ENTRY_LEN: usize = 1024;
+/// Longest raw entry name accepted, including the `payload/` prefix.
+///
+/// Bounds work before the prefix is stripped. The relative path that remains is
+/// held to [`MAX_PAYLOAD_PATH_LEN`], the same limit the manifest enforces, so a
+/// package cannot validate at build time and then fail to extract.
+const MAX_ENTRY_LEN: usize = MAX_PAYLOAD_PATH_LEN + PAYLOAD_PREFIX.len();
 
 /// Windows device names, which resolve to hardware rather than to a file.
 ///
@@ -70,7 +74,7 @@ pub fn safe_payload_path(entry: &str) -> Result<Option<SafePath>> {
     };
 
     if entry.len() > MAX_ENTRY_LEN {
-        return Err(reject("entry name exceeds the 1024-byte limit"));
+        return Err(reject("entry name exceeds the maximum length"));
     }
     if entry.contains('\0') {
         return Err(reject("entry name contains a NUL byte"));
@@ -92,6 +96,9 @@ fn validate_relative(relative: &str, reject: &impl Fn(&str) -> Error) -> Result<
     // validate the normalised form — never the other way round.
     let normalised = relative.replace('\\', "/");
 
+    if normalised.len() > MAX_PAYLOAD_PATH_LEN {
+        return Err(reject("entry path exceeds the maximum length"));
+    }
     if normalised.starts_with('/') {
         return Err(reject("entry is an absolute path"));
     }
@@ -244,6 +251,13 @@ mod tests {
     #[test]
     fn rejects_absurdly_long_entry_names() {
         rejected(&format!("payload/{}", "a".repeat(MAX_ENTRY_LEN)));
+    }
+
+    #[test]
+    fn enforces_the_same_path_limit_the_manifest_does() {
+        // One rule, one limit. A path the manifest accepts must be extractable.
+        rejected(&format!("payload/{}", "a".repeat(MAX_PAYLOAD_PATH_LEN + 1)));
+        ok(&format!("payload/{}", "a".repeat(MAX_PAYLOAD_PATH_LEN)));
     }
 
     #[test]

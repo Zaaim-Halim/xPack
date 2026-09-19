@@ -37,6 +37,13 @@ pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 1;
 /// Upper bound on a manifest document, to bound work before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 
+/// Longest payload path accepted, in bytes.
+///
+/// Shared with the extractor so both layers enforce one rule. Two limits for
+/// the same thing drift apart, and a manifest that validates but cannot be
+/// extracted is a confusing failure to diagnose.
+pub const MAX_PAYLOAD_PATH_LEN: usize = 1024;
+
 /// The package format version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -353,6 +360,12 @@ fn validate_relative_path(subject: &str, path: &str) -> Result<()> {
     if normalised.is_empty() {
         return Err(Error::invalid(subject, "must not be empty"));
     }
+    if normalised.len() > MAX_PAYLOAD_PATH_LEN {
+        return Err(Error::invalid(
+            subject,
+            format!("is {} bytes, limit is {MAX_PAYLOAD_PATH_LEN}", normalised.len()),
+        ));
+    }
     if normalised.starts_with('/') {
         return Err(Error::invalid(subject, format!("{path:?} must be relative")));
     }
@@ -471,6 +484,15 @@ mod tests {
     fn rejects_unknown_fields_so_typos_are_not_silently_dropped() {
         let bytes = br#"{"formatVersion":1,"applicatoin":{}}"#;
         assert!(Manifest::from_slice(bytes).is_err());
+    }
+
+    #[test]
+    fn rejects_a_payload_path_longer_than_the_extractor_accepts() {
+        // The manifest and the extractor must agree, or a package validates at
+        // build time and then fails on the user's machine.
+        let mut m = sample();
+        m.payload.files[0].path = "a/".repeat(MAX_PAYLOAD_PATH_LEN);
+        assert!(m.validate().unwrap_err().to_string().contains("limit is"));
     }
 
     #[test]
