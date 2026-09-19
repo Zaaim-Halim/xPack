@@ -25,10 +25,12 @@
 //! that trade-off pay.
 
 pub mod index;
+pub mod reporting;
 pub mod transport;
 pub mod updater;
 
 pub use index::{PackageRef, UpdateIndex};
+pub use reporting::ProgressWriter;
 #[cfg(feature = "https")]
 pub use transport::HttpsTransport;
 pub use transport::UpdateTransport;

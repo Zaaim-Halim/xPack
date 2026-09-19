@@ -23,6 +23,7 @@
 mod commands;
 mod config;
 mod output;
+mod progress;
 
 use clap::{Parser, Subcommand};
 use xpack_core::Error;
@@ -69,6 +70,8 @@ enum Command {
     Uninstall(commands::uninstall::Args),
     /// Finish or undo an interrupted operation.
     Recover(commands::recover::Args),
+    /// Check for and apply an update.
+    Update(commands::update::Args),
 }
 
 impl Command {
@@ -87,6 +90,7 @@ impl Command {
             Self::Prune(a) => Some(a.application.clone()),
             Self::Uninstall(a) => Some(a.application.clone()),
             Self::Recover(a) => Some(a.application.clone()),
+            Self::Update(a) => Some(a.application.clone()),
         }
     }
 }
@@ -124,6 +128,7 @@ fn main() -> std::process::ExitCode {
         Command::Prune(a) => commands::prune::run(a, &context),
         Command::Uninstall(a) => commands::uninstall::run(a, &context),
         Command::Recover(a) => commands::recover::run(a, &context),
+        Command::Update(a) => commands::update::run(a, &context),
     };
 
     match outcome {

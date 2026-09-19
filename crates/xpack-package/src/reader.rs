@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use xpack_core::atomic;
 use xpack_core::manifest::{MANIFEST_ENTRY, MAX_MANIFEST_BYTES, SIGNATURE_ENTRY};
+use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::{Error, Manifest, Platform, Result};
 use xpack_security::Hasher;
 use xpack_security::keys::PublicKey;
@@ -296,10 +297,24 @@ impl VerifiedPackage {
     /// `Ok`. The whole directory is removed on any failure, leaving nothing
     /// half-written for a later run to mistake for a complete install.
     pub fn extract_to(&mut self, destination: &Path) -> Result<()> {
+        self.extract_to_with_progress(destination, &NoProgress)
+    }
+
+    /// Extracts, reporting each file as it is written and verified.
+    ///
+    /// [`Self::extract_to`] is this with a reporter that discards everything,
+    /// so both paths run identical code. Verification is deliberately not
+    /// parameterised: the reporter is told what happened and has no way to
+    /// influence it.
+    pub fn extract_to_with_progress(
+        &mut self,
+        destination: &Path,
+        progress: &dyn ProgressReporter,
+    ) -> Result<()> {
         atomic::remove_dir_all_if_exists(destination)?;
         atomic::create_dir_all(destination)?;
 
-        match self.extract_inner(destination) {
+        match self.extract_inner(destination, progress) {
             Ok(()) => Ok(()),
             Err(e) => {
                 let _ = atomic::remove_dir_all_if_exists(destination);
@@ -308,7 +323,7 @@ impl VerifiedPackage {
         }
     }
 
-    fn extract_inner(&mut self, destination: &Path) -> Result<()> {
+    fn extract_inner(&mut self, destination: &Path, progress: &dyn ProgressReporter) -> Result<()> {
         let declared: BTreeMap<String, xpack_core::PayloadFile> =
             self.manifest.payload.files.iter().map(|f| (f.path.clone(), f.clone())).collect();
 
@@ -358,6 +373,12 @@ impl VerifiedPackage {
                 &mut verified_dirs,
             )?;
             extracted += 1;
+            progress.report(&ProgressEvent::ExtractionProgress {
+                files_completed: extracted,
+                files_total: declared.len(),
+                bytes_completed: written,
+                bytes_total: budget,
+            });
         }
 
         if extracted != declared.len() {

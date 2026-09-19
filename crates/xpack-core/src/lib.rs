@@ -11,6 +11,7 @@ pub mod error;
 pub mod manifest;
 pub mod paths;
 pub mod platform;
+pub mod progress;
 pub mod state;
 pub mod store;
 pub mod version;
@@ -23,6 +24,7 @@ pub use manifest::{
 };
 pub use paths::InstallPaths;
 pub use platform::{Arch, Os, Platform};
+pub use progress::{NoProgress, ProgressEvent, ProgressReporter};
 pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};
 pub use store::Loaded;
 pub use version::Version;

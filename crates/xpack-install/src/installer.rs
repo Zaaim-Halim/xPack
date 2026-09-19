@@ -1,6 +1,7 @@
 //! Installing, activating, rolling back and removing versions.
 
 use xpack_core::atomic;
+use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::state::{UpdatePhase, VersionStatus};
 use xpack_core::{Error, InstallState, Platform, Result, Version};
 use xpack_package::VerifiedPackage;
@@ -56,6 +57,20 @@ impl<'lock> Installer<'lock> {
         package: &mut VerifiedPackage,
         options: &InstallOptions,
     ) -> Result<Installed> {
+        self.install_with_progress(package, options, &NoProgress)
+    }
+
+    /// Installs, reporting extraction and activation as they happen.
+    ///
+    /// [`Self::install`] is this with a reporter that discards everything, so
+    /// both paths run identical code and every existing test exercises the
+    /// same sequence it always did.
+    pub fn install_with_progress(
+        &self,
+        package: &mut VerifiedPackage,
+        options: &InstallOptions,
+        progress: &dyn ProgressReporter,
+    ) -> Result<Installed> {
         let report = self.recover()?;
         let paths = self.lock.paths();
         let manifest = package.manifest().clone();
@@ -108,7 +123,7 @@ impl<'lock> Installer<'lock> {
         self.lock.save_state(&state)?;
 
         let staging = paths.staging_dir(&version);
-        package.extract_to(&staging)?;
+        package.extract_to_with_progress(&staging, progress)?;
         write_version_metadata(&staging, package)?;
 
         self.promote(&staging, &version, &state)?;
@@ -120,6 +135,7 @@ impl<'lock> Installer<'lock> {
         tracing::info!(%version, "version installed");
 
         let activated = if options.activate {
+            progress.report(&ProgressEvent::Activating { version: version.clone() });
             // Re-activating the version that is already current is a no-op for
             // the downgrade rule; a repair must be allowed to restore it.
             let already_current = self.load_state()?.current_version.as_ref() == Some(&version);

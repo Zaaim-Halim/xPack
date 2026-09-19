@@ -423,3 +423,162 @@ fn the_downloaded_file_is_not_deleted_while_it_is_still_in_use() {
         "the downloads directory was destroyed during the install"
     );
 }
+
+/// Records every event an update emits.
+#[derive(Default)]
+struct Recorder(Mutex<Vec<xpack_core::progress::ProgressEvent>>);
+
+impl xpack_core::progress::ProgressReporter for Recorder {
+    fn report(&self, event: &xpack_core::progress::ProgressEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+impl Recorder {
+    fn events(&self) -> Vec<xpack_core::progress::ProgressEvent> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn has(&self, predicate: impl Fn(&xpack_core::progress::ProgressEvent) -> bool) -> bool {
+        self.events().iter().any(predicate)
+    }
+}
+
+#[test]
+fn an_update_reports_every_stage_it_passes_through() {
+    use xpack_core::progress::ProgressEvent as E;
+
+    // A consumer driving a splash screen has no way to poll a function that
+    // has not returned, so the events are the only thing it can react to.
+    let world = World::new();
+    let package = build_package(world.dir.path(), &world.key, "1.1.0");
+    let size = std::fs::metadata(&package).unwrap().len();
+
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
+
+    let recorder = Recorder::default();
+    let lock = world.lock();
+    let installed =
+        Updater::new(&lock, &fixture).reporting_to(&recorder).update(BASE, &options()).unwrap();
+    drop(lock);
+    assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
+
+    let events = recorder.events();
+    assert!(!events.is_empty(), "an update must report something");
+
+    assert!(recorder.has(|e| matches!(e, E::DownloadStarted { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::DownloadProgress { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::DownloadCompleted { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::Verifying { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::Installing { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::ExtractionProgress { .. })), "{events:?}");
+    assert!(recorder.has(|e| matches!(e, E::Completed { .. })), "{events:?}");
+
+    // The last word must be the outcome, not a stage part way through.
+    assert!(
+        matches!(events.last(), Some(E::Completed { .. })),
+        "the final event must be terminal: {events:?}"
+    );
+
+    // Every event carries text a consumer can show without inventing its own.
+    for event in &events {
+        assert!(!event.message().is_empty(), "{event:?} has no message");
+    }
+}
+
+#[test]
+fn download_progress_reaches_the_full_size() {
+    use xpack_core::progress::ProgressEvent as E;
+
+    // A bar that stops at ninety-something percent looks like a hang.
+    let world = World::new();
+    let package = build_package(world.dir.path(), &world.key, "1.1.0");
+    let size = std::fs::metadata(&package).unwrap().len();
+
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
+
+    let recorder = Recorder::default();
+    let lock = world.lock();
+    Updater::new(&lock, &fixture).reporting_to(&recorder).update(BASE, &options()).unwrap();
+    drop(lock);
+
+    let highest = recorder
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            E::DownloadProgress { downloaded, .. } => Some(*downloaded),
+            _ => None,
+        })
+        .max()
+        .expect("progress must be reported");
+    assert_eq!(highest, size, "progress must reach the size actually downloaded");
+}
+
+#[test]
+fn a_check_reports_what_it_found_without_downloading() {
+    use xpack_core::progress::ProgressEvent as E;
+
+    let world = World::new();
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", 4096));
+
+    let recorder = Recorder::default();
+    let lock = world.lock();
+    Updater::new(&lock, &fixture).reporting_to(&recorder).check(BASE, &options()).unwrap();
+    drop(lock);
+
+    assert!(recorder.has(|e| matches!(e, E::CheckingForUpdate { .. })));
+    assert!(recorder.has(|e| matches!(e, E::UpdateAvailable { .. })));
+    assert!(!recorder.has(|e| matches!(e, E::DownloadStarted { .. })), "check must not download");
+}
+
+#[test]
+fn an_installation_already_current_is_reported_as_such() {
+    use xpack_core::progress::ProgressEvent as E;
+
+    let world = World::new();
+    let older = build_package(world.dir.path(), &world.key, "0.9.0");
+    let size = std::fs::metadata(&older).unwrap().len();
+
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("0.9.0", "demo-0.9.0.xpkg", size));
+
+    let recorder = Recorder::default();
+    let lock = world.lock();
+    assert!(
+        Updater::new(&lock, &fixture)
+            .reporting_to(&recorder)
+            .check(BASE, &options())
+            .unwrap()
+            .is_none()
+    );
+    drop(lock);
+
+    assert!(recorder.has(|e| matches!(e, E::UpToDate { .. })), "{:?}", recorder.events());
+}
+
+#[test]
+fn a_server_declaring_no_size_reports_an_unknown_total() {
+    use xpack_core::progress::ProgressEvent as E;
+
+    // A total of zero would make a consumer draw a bar against nothing, so an
+    // absent size must stay absent rather than becoming Some(0).
+    let world = World::new();
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", 0));
+
+    let recorder = Recorder::default();
+    let lock = world.lock();
+    let _ = Updater::new(&lock, &fixture).reporting_to(&recorder).check(BASE, &options());
+    drop(lock);
+
+    assert!(
+        recorder.has(|e| matches!(e, E::UpdateAvailable { total_bytes: None, .. })),
+        "{:?}",
+        recorder.events()
+    );
+}

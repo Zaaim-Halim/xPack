@@ -18,12 +18,14 @@
 use std::io::Write;
 
 use xpack_core::atomic;
+use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::state::UpdatePhase;
 use xpack_core::{Error, Platform, Result, Version};
 use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
 use xpack_platform::InstallLock;
 
 use crate::index::{MAX_INDEX_BYTES, UpdateIndex};
+use crate::reporting::ProgressWriter;
 use crate::transport::UpdateTransport;
 
 /// Absolute ceiling on a downloaded package, whatever the index claims.
@@ -58,12 +60,24 @@ pub struct Available {
 pub struct Updater<'a> {
     lock: &'a InstallLock,
     transport: &'a dyn UpdateTransport,
+    progress: &'a dyn ProgressReporter,
 }
 
 impl<'a> Updater<'a> {
-    /// Wraps a held lock and a transport.
+    /// Wraps a held lock and a transport, reporting nothing.
     pub fn new(lock: &'a InstallLock, transport: &'a dyn UpdateTransport) -> Self {
-        Self { lock, transport }
+        Self { lock, transport, progress: &NoProgress }
+    }
+
+    /// Reports progress to `progress` as the operation runs.
+    ///
+    /// An update takes minutes, and nothing watching it can poll a function
+    /// that has not returned. A splash screen, a status line or a progress bar
+    /// subscribes here.
+    #[must_use]
+    pub fn reporting_to(mut self, progress: &'a dyn ProgressReporter) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Asks the server what it has, without downloading a package.
@@ -71,6 +85,8 @@ impl<'a> Updater<'a> {
     /// Returns `Ok(None)` when the installation is already current.
     pub fn check(&self, base_url: &str, options: &UpdateOptions) -> Result<Option<Available>> {
         let application = self.application_id()?;
+        self.progress
+            .report(&ProgressEvent::CheckingForUpdate { application: application.clone() });
         let state = self.lock.load_or_new_state(&application)?;
         let channel = self.channel(&state)?;
 
@@ -86,10 +102,20 @@ impl<'a> Updater<'a> {
         if let Err(e) = state.ensure_not_downgrade(&index.version, options.allow_downgrade) {
             tracing::debug!(offered = %index.version, "server offered nothing newer");
             return match e {
-                Error::DowngradeRejected { .. } => Ok(None),
+                Error::DowngradeRejected { .. } => {
+                    if let Some(current) = &state.current_version {
+                        self.progress.report(&ProgressEvent::UpToDate { version: current.clone() });
+                    }
+                    Ok(None)
+                }
                 other => Err(other),
             };
         }
+
+        self.progress.report(&ProgressEvent::UpdateAvailable {
+            version: index.version.clone(),
+            total_bytes: declared_size(index.package.size),
+        });
 
         Ok(Some(Available {
             version: index.version.clone(),
@@ -130,6 +156,7 @@ impl<'a> Updater<'a> {
         // first, and the weaker one would be the bug.
         state.update = UpdatePhase::Verifying { version: index.version.clone() };
         self.lock.save_state(&state)?;
+        self.progress.report(&ProgressEvent::Verifying { version: index.version.clone() });
 
         let verify = open_and_verify(&downloaded, self.lock, &TrustDecision::UsePinned);
         let mut verified = match verify {
@@ -168,10 +195,13 @@ impl<'a> Updater<'a> {
 
         let install_options =
             InstallOptions { allow_downgrade: options.allow_downgrade, activate: options.activate };
-        let outcome = installer.install(&mut verified, &install_options)?;
+        self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
+        let outcome =
+            installer.install_with_progress(&mut verified, &install_options, self.progress)?;
 
         atomic::remove_file_if_exists(&downloaded)?;
         tracing::info!(version = %outcome.version, "update installed");
+        self.progress.report(&ProgressEvent::Completed { version: outcome.version.clone() });
         Ok(Some(outcome.version))
     }
 
@@ -213,10 +243,20 @@ impl<'a> Updater<'a> {
         let limit = index.package.size.min(MAX_PACKAGE_BYTES);
         let url = package_url(base_url, &index.package.file);
 
+        self.progress.report(&ProgressEvent::DownloadStarted {
+            version: index.version.clone(),
+            total_bytes: declared_size(index.package.size),
+        });
+
         let result = (|| -> Result<u64> {
             let file = std::fs::File::create(&target).map_err(|e| Error::io(&target, e))?;
             let mut writer = std::io::BufWriter::new(file);
-            let written = self.transport.fetch(&url, limit, &mut writer)?;
+            // Wrapping the sink rather than changing the transport's signature
+            // keeps the seam the hostile-server tests are built on untouched.
+            let mut reporting =
+                ProgressWriter::new(&mut writer, self.progress, declared_size(index.package.size));
+            let written = self.transport.fetch(&url, limit, &mut reporting)?;
+            reporting.flush().map_err(|e| Error::io(&target, e))?;
             writer.flush().map_err(|e| Error::io(&target, e))?;
             let file = writer.into_inner().map_err(|e| Error::io(&target, e.into_error()))?;
             file.sync_all().map_err(|e| Error::io(&target, e))?;
@@ -226,6 +266,7 @@ impl<'a> Updater<'a> {
         match result {
             Ok(written) => {
                 tracing::info!(bytes = written, version = %index.version, "package downloaded");
+                self.progress.report(&ProgressEvent::DownloadCompleted { bytes: written });
                 Ok(target)
             }
             Err(e) => {
@@ -281,4 +322,12 @@ fn package_url(base_url: &str, file: &str) -> String {
         return file.to_string();
     }
     format!("{}/{}", base_url.trim_end_matches('/'), file.trim_start_matches('/'))
+}
+
+/// A declared size, or `None` when the server gave nothing usable.
+///
+/// Zero means the server did not say. Passing it through as `Some(0)` would
+/// make a consumer render a bar against a total of nothing.
+fn declared_size(size: u64) -> Option<u64> {
+    (size > 0).then_some(size)
 }

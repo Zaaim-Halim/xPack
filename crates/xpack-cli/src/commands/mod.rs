@@ -11,6 +11,7 @@ pub(crate) mod recover;
 pub(crate) mod rollback;
 pub(crate) mod run;
 pub(crate) mod uninstall;
+pub(crate) mod update;
 pub(crate) mod verify;
 
 use std::path::PathBuf;
