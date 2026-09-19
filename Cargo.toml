@@ -5,6 +5,7 @@ members = [
     "crates/xpack-security",
     "crates/xpack-package",
     "crates/xpack-platform",
+    "crates/xpack-install",
 ]
 
 [workspace.package]

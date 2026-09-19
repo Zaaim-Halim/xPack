@@ -578,6 +578,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xpack-install"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tracing",
+ "xpack-core",
+ "xpack-package",
+ "xpack-platform",
+ "xpack-security",
+ "zip",
+]
+
+[[package]]
 name = "xpack-package"
 version = "0.1.0"
 dependencies = [
