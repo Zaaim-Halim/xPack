@@ -155,11 +155,9 @@ impl<'lock> Installer<'lock> {
             }
             atomic::remove_dir_all_if_exists(&destination)?;
         }
-        if let Some(parent) = destination.parent() {
-            atomic::create_dir_all(parent)?;
-        }
+        atomic::create_dir_all(atomic::parent_dir(&destination)?)?;
         std::fs::rename(staging, &destination).map_err(|e| Error::io(&destination, e))?;
-        atomic::sync_dir(destination.parent().unwrap_or(&destination))
+        atomic::sync_dir(atomic::parent_dir(&destination)?)
     }
 
     /// Makes an installed version active and puts it on probation.

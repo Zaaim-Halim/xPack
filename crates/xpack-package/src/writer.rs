@@ -162,9 +162,7 @@ impl<'a> PackageBuilder<'a> {
     /// verifier can reach them with a single short read instead of
     /// decompressing attacker-controlled data before authenticating anything.
     fn write_archive(&self, output: &Path, manifest: &[u8], signature: &str) -> Result<()> {
-        if let Some(parent) = output.parent() {
-            xpack_core::atomic::create_dir_all(parent)?;
-        }
+        xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(output)?)?;
 
         let file = File::create(output).map_err(|e| Error::io(output, e))?;
         let mut zip = ZipWriter::new(BufWriter::new(file));
@@ -202,7 +200,7 @@ impl<'a> PackageBuilder<'a> {
         // flushed to stable storage before the build reports success.
         let file = writer.into_inner().map_err(|e| Error::io(output, e.into_error()))?;
         file.sync_all().map_err(|e| Error::io(output, e))?;
-        xpack_core::atomic::sync_dir(output.parent().unwrap_or(Path::new(".")))
+        xpack_core::atomic::sync_dir(xpack_core::atomic::parent_dir(output)?)
     }
 }
 

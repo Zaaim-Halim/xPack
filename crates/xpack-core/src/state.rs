@@ -126,6 +126,26 @@ impl UpdatePhase {
         matches!(self, Self::PendingVerification { attempts, .. } if *attempts >= MAX_ACTIVATION_ATTEMPTS)
     }
 
+    /// A one-line description suitable for showing a user.
+    ///
+    /// The derived `Debug` form exposes field names and nesting, which is
+    /// right for a log and wrong for someone asking what their installation is
+    /// doing.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Idle => "idle".to_string(),
+            Self::Downloading { version } => format!("downloading {version}"),
+            Self::Verifying { version } => format!("verifying {version}"),
+            Self::Installing { version } => format!("installing {version}"),
+            Self::Staged { version } => format!("{version} is staged and ready to activate"),
+            Self::PendingVerification { version, rollback_to, attempts } => format!(
+                "{version} is on probation ({attempts} of {MAX_ACTIVATION_ATTEMPTS} attempts \
+                 used); will roll back to {rollback_to} if it fails"
+            ),
+            Self::RollingBack { from, to } => format!("rolling back from {from} to {to}"),
+        }
+    }
+
     /// Records one more activation attempt of a version on probation.
     ///
     /// Callers must persist the state *before* launching, not after. A
@@ -556,6 +576,20 @@ mod tests {
         let rolling = UpdatePhase::RollingBack { from: v("1.2.0"), to: v("1.1.0") };
         assert_eq!(rolling.version(), Some(&v("1.2.0")));
         assert!(!rolling.is_idle());
+    }
+
+    #[test]
+    fn phases_describe_themselves_readably() {
+        let phase = UpdatePhase::PendingVerification {
+            version: v("1.1.0"),
+            rollback_to: v("1.0.0"),
+            attempts: 1,
+        };
+        let text = phase.describe();
+        assert!(text.contains("1.1.0"), "{text}");
+        assert!(text.contains("1.0.0"), "{text}");
+        assert!(!text.contains('{'), "must not leak struct syntax: {text}");
+        assert_eq!(UpdatePhase::Idle.describe(), "idle");
     }
 
     #[test]

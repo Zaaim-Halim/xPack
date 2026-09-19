@@ -26,6 +26,20 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
 
+/// The directory containing `path`, treating a bare name as the current one.
+///
+/// `Path::parent` returns `Some("")` for a bare relative name such as
+/// `keys.json`. An empty path is not a directory anything can be created in or
+/// synchronised, but it does mean the current directory, so this says so. Any
+/// code that resolves a parent in order to act on it should use this.
+pub fn parent_dir(path: &Path) -> Result<&Path> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Ok(Path::new(".")),
+        Some(parent) => Ok(parent),
+        None => Err(Error::invalid("path", format!("{} has no parent directory", path.display()))),
+    }
+}
+
 /// Creates `dir` and every missing parent.
 pub fn create_dir_all(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))
@@ -36,9 +50,7 @@ pub fn create_dir_all(dir: &Path) -> Result<()> {
 /// The temporary file is created in the destination directory so the rename
 /// never crosses a filesystem boundary, which would make it non-atomic.
 pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::invalid("path", format!("{} has no parent directory", path.display()))
-    })?;
+    let parent = parent_dir(path)?;
     create_dir_all(parent)?;
 
     let temp = temp_sibling(path)?;
@@ -155,6 +167,22 @@ mod tests {
         write(&path, b"first").unwrap();
         write(&path, b"second").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"second");
+    }
+
+    #[test]
+    fn writes_to_a_bare_relative_file_name() {
+        // `Path::parent` returns Some("") here, which is not a usable
+        // directory. Getting this wrong breaks every command whose output path
+        // is a plain file name typed by a user.
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let result = write(Path::new("bare.json"), b"contents");
+
+        std::env::set_current_dir(previous).unwrap();
+        result.expect("a bare file name must be writable");
+        assert_eq!(fs::read(dir.path().join("bare.json")).unwrap(), b"contents");
     }
 
     #[test]

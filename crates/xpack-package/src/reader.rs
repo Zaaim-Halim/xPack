@@ -391,9 +391,7 @@ fn write_verified_entry(
     verified_dirs: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
     let target = safe.resolve(destination);
-    let parent = target.parent().ok_or_else(|| {
-        Error::invalid("package", format!("{:?} has no parent directory", safe.as_str()))
-    })?;
+    let parent = atomic::parent_dir(&target)?;
     atomic::create_dir_all(parent)?;
     ensure_no_symlinked_component(destination, safe, verified_dirs)?;
 

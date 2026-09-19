@@ -12,9 +12,20 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// A `SemVer` 2.0.0 application version.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Version(semver::Version);
+
+/// Prints the version itself rather than its internal structure.
+///
+/// The derived form expands to `Version(Version { major: 1, minor: 2, .. })`,
+/// which is unreadable wherever a version appears inside a larger value — and
+/// versions appear inside almost every diagnostic this project emits.
+impl fmt::Debug for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl Version {
     /// Parses a `SemVer` string such as `1.2.0` or `1.2.0-rc.1`.
@@ -100,6 +111,12 @@ mod tests {
         assert!(!Version::parse("1.2.0").unwrap().is_prerelease());
         // Build metadata alone is not a pre-release.
         assert!(!Version::parse("1.2.0+build.7").unwrap().is_prerelease());
+    }
+
+    #[test]
+    fn debug_prints_the_version_not_its_structure() {
+        let version = Version::parse("1.2.0-rc.1").unwrap();
+        assert_eq!(format!("{version:?}"), "1.2.0-rc.1");
     }
 
     #[test]
