@@ -10,7 +10,7 @@
 //! package into an invalid one (or, worse, invites a lenient comparison that
 //! an attacker can exploit).
 
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::Signer;
 use xpack_core::{Error, Result};
 
 use crate::keys::{KeyPair, PublicKey};

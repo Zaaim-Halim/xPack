@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// A SemVer 2.0.0 application version.
+/// A `SemVer` 2.0.0 application version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Version(semver::Version);
 
 impl Version {
-    /// Parses a SemVer string such as `1.2.0` or `1.2.0-rc.1`.
+    /// Parses a `SemVer` string such as `1.2.0` or `1.2.0-rc.1`.
     pub fn parse(text: &str) -> Result<Self> {
         semver::Version::parse(text)
             .map(Self)
@@ -36,7 +36,7 @@ impl Version {
 
     /// Returns a filesystem-safe rendering of the version.
     ///
-    /// SemVer's grammar (`0-9A-Za-z.-+`) is already safe on every supported
+    /// `SemVer`'s grammar (`0-9A-Za-z.-+`) is already safe on every supported
     /// filesystem except for `+` build metadata, which Windows tolerates but
     /// which confuses URL handling, so it is mapped to `_`.
     pub fn to_directory_name(&self) -> String {

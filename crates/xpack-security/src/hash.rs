@@ -38,6 +38,37 @@ pub fn sha256_reader<R: Read>(reader: &mut R) -> Result<(Sha256Digest, u64)> {
     Ok((Sha256Digest::from_bytes(hasher.finalize().into()), total))
 }
 
+/// An incremental SHA-256 hasher.
+///
+/// Extraction hashes bytes as it writes them, so the digest is computed over
+/// exactly what lands on disk. Hashing the source separately from writing it
+/// would leave a window in which the two could differ.
+#[derive(Default)]
+pub struct Hasher(Sha256);
+
+impl Hasher {
+    /// Starts a new hash.
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Feeds more bytes into the hash.
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    /// Consumes the hasher and returns the digest.
+    pub fn finish(self) -> Sha256Digest {
+        Sha256Digest::from_bytes(self.0.finalize().into())
+    }
+}
+
+impl std::fmt::Debug for Hasher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hasher(..)")
+    }
+}
+
 /// Compares an actual digest against the expected one, in constant time.
 ///
 /// `subject` names the artefact so the resulting error is actionable — the
@@ -70,10 +101,18 @@ mod tests {
     #[test]
     fn streaming_agrees_with_in_memory_across_chunk_boundaries() {
         // Spans several 64 KiB reads plus a partial final chunk.
-        let data: Vec<u8> = (0..(CHUNK * 2 + 7)).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0..(CHUNK * 2 + 7)).map(|i| u8::try_from(i % 251).unwrap()).collect();
         let (digest, len) = sha256_reader(&mut data.as_slice()).unwrap();
         assert_eq!(digest, sha256(&data));
         assert_eq!(len, data.len() as u64);
+    }
+
+    #[test]
+    fn incremental_hashing_agrees_with_one_shot() {
+        let mut h = Hasher::new();
+        h.update(b"a");
+        h.update(b"bc");
+        assert_eq!(h.finish(), sha256(b"abc"));
     }
 
     #[test]

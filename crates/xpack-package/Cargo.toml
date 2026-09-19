@@ -1,0 +1,23 @@
+[package]
+name = "xpack-package"
+description = "Reading, writing and verifying the .xpkg container format."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+xpack-core.workspace = true
+xpack-security.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
