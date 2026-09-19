@@ -22,10 +22,12 @@
 //! which step was in flight and finish or undo it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::store::{self, Loaded};
 use crate::version::Version;
 
 /// Format version of the state document itself.
@@ -44,7 +46,7 @@ pub const MAX_ACTIVATION_ATTEMPTS: u32 = 2;
 /// The value is persisted *before* the step it names is attempted, so
 /// recovery always errs towards assuming the step may have partially run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE", tag = "phase")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase", tag = "phase")]
 pub enum UpdatePhase {
     /// No update in flight.
     Idle,
@@ -206,6 +208,22 @@ impl InstallState {
             update: UpdatePhase::Idle,
             versions: BTreeMap::new(),
         }
+    }
+
+    /// Reads state from disk, recovering from the backup if needed.
+    ///
+    /// The returned [`Loaded`] reports whether recovery happened. Callers must
+    /// surface that: running on recovered state means the primary file was
+    /// lost, which usually means the disk is failing.
+    pub fn load(path: &Path) -> Result<Loaded<Self>> {
+        let loaded: Loaded<Self> = store::load(path)?;
+        loaded.value.ensure_supported()?;
+        Ok(loaded)
+    }
+
+    /// Writes state atomically, rotating the previous good copy to a backup.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        store::save(path, self)
     }
 
     /// Fails closed on a state document written by a newer xPack.
@@ -437,7 +455,7 @@ mod tests {
     fn state_written_before_the_counter_existed_still_loads() {
         // Forward compatibility within formatVersion 1: an older document has
         // no `attempts` field and must default to zero, not fail to parse.
-        let json = r#"{"phase":"PENDING_VERIFICATION","version":"1.2.0","rollback_to":"1.1.0"}"#;
+        let json = r#"{"phase":"PENDING_VERIFICATION","version":"1.2.0","rollbackTo":"1.1.0"}"#;
         let phase: UpdatePhase = serde_json::from_str(json).unwrap();
         assert!(matches!(phase, UpdatePhase::PendingVerification { attempts: 0, .. }));
     }
@@ -447,6 +465,44 @@ mod tests {
         let mut s = InstallState::new("com.example.app");
         s.state_format_version = STATE_FORMAT_VERSION + 1;
         assert!(matches!(s.ensure_supported(), Err(Error::UnsupportedFormatVersion { .. })));
+    }
+
+    #[test]
+    fn survives_a_save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut original = state_at("1.2.0");
+        original.previous_version = Some(v("1.1.0"));
+        original.save(&path).unwrap();
+
+        let loaded = InstallState::load(&path).unwrap();
+        assert_eq!(loaded.value, original);
+        assert!(!loaded.recovered_from_backup);
+    }
+
+    #[test]
+    fn a_corrupt_state_file_falls_back_to_the_last_good_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        state_at("1.1.0").save(&path).unwrap();
+        state_at("1.2.0").save(&path).unwrap();
+
+        std::fs::write(&path, b"garbage from a failing disk").unwrap();
+
+        let loaded = InstallState::load(&path).unwrap();
+        assert_eq!(loaded.value.current_version, Some(v("1.1.0")));
+        assert!(loaded.recovered_from_backup, "recovery must be reported to the caller");
+    }
+
+    #[test]
+    fn a_state_file_from_a_newer_xpack_is_rejected_after_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut future = state_at("1.2.0");
+        future.state_format_version = STATE_FORMAT_VERSION + 1;
+        future.save(&path).unwrap();
+
+        assert!(matches!(InstallState::load(&path), Err(Error::UnsupportedFormatVersion { .. })));
     }
 
     #[test]

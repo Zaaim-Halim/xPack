@@ -19,7 +19,7 @@ xpack-install = { path = "crates/xpack-install", version = "0.1.0" }
 xpack-update = { path = "crates/xpack-update", version = "0.1.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 thiserror = "2.0.20"
 semver = { version = "1.0.28", features = ["serde"] }
 sha2 = "0.11.0"

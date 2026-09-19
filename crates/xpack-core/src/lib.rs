@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod paths;
 pub mod platform;
 pub mod state;
+pub mod store;
 pub mod version;
 
 pub use digest::{SHA256_LEN, Sha256Digest};
@@ -23,4 +24,5 @@ pub use manifest::{
 pub use paths::InstallPaths;
 pub use platform::{Arch, Os, Platform};
 pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};
+pub use store::Loaded;
 pub use version::Version;
