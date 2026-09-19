@@ -5,6 +5,7 @@
 //! here means a test supplies bytes and the engine's own handling is what runs.
 
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use xpack_core::{Error, Result};
 
@@ -28,11 +29,70 @@ pub trait UpdateTransport {
 /// Copy buffer size.
 const CHUNK: usize = 64 * 1024;
 
+/// How long the transport waits, at each point it can wait.
+///
+/// Every field bounds a different way a server can stall, and they are
+/// separate because the right answer differs by three orders of magnitude: a
+/// name that will not resolve should fail in seconds, while a large package on
+/// a slow connection legitimately takes many minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// The whole operation, from name resolution to the last byte.
+    ///
+    /// Thirty minutes by default. This is the backstop, not the first line of
+    /// defence: it has to accommodate a large package on a slow connection, so
+    /// it is far too generous to catch a stalled server quickly. The narrower
+    /// timeouts below do that.
+    pub total: Duration,
+
+    /// Resolving the host name.
+    pub resolve: Duration,
+
+    /// Establishing the connection.
+    pub connect: Duration,
+
+    /// Waiting for response headers after the request was sent.
+    ///
+    /// This is the one that catches the common failure: a server that accepts
+    /// a connection and then says nothing. Without it, such a server holds the
+    /// client for the full total budget while sending nothing at all.
+    pub response: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            total: Duration::from_secs(30 * 60),
+            resolve: Duration::from_secs(10),
+            connect: Duration::from_secs(30),
+            response: Duration::from_secs(60),
+        }
+    }
+}
+
+impl Timeouts {
+    /// Timeouts with a different overall budget, keeping the rest as they are.
+    ///
+    /// A zero or absurdly small total is rejected rather than accepted, because
+    /// it would make every download fail in a way that looks like a network
+    /// problem. The floor is one second.
+    pub fn with_total(total: Duration) -> Result<Self> {
+        if total < Duration::from_secs(1) {
+            return Err(Error::invalid(
+                "timeout",
+                format!("{}s is too short to complete any download", total.as_secs_f64()),
+            ));
+        }
+        Ok(Self { total, ..Self::default() })
+    }
+}
+
 /// Fetches over HTTPS.
 #[cfg(feature = "https")]
 #[derive(Debug)]
 pub struct HttpsTransport {
     agent: ureq::Agent,
+    timeouts: Timeouts,
 }
 
 #[cfg(feature = "https")]
@@ -44,18 +104,30 @@ impl Default for HttpsTransport {
 
 #[cfg(feature = "https")]
 impl HttpsTransport {
-    /// Builds a transport with conservative timeouts.
+    /// Builds a transport with the default timeouts.
     pub fn new() -> Self {
+        Self::with_timeouts(Timeouts::default())
+    }
+
+    /// Builds a transport with explicit timeouts.
+    pub fn with_timeouts(timeouts: Timeouts) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(300)))
-            .timeout_connect(Some(std::time::Duration::from_secs(30)))
+            .timeout_global(Some(timeouts.total))
+            .timeout_resolve(Some(timeouts.resolve))
+            .timeout_connect(Some(timeouts.connect))
+            .timeout_recv_response(Some(timeouts.response))
             // Redirects are followed, because object stores and CDNs rely on
             // them, but the final URL's scheme is checked below. Allowing an
             // unbounded chain would let a server keep a client busy forever.
             .max_redirects(5)
             .build()
             .into();
-        Self { agent }
+        Self { agent, timeouts }
+    }
+
+    /// The timeouts in force.
+    pub fn timeouts(&self) -> &Timeouts {
+        &self.timeouts
     }
 }
 

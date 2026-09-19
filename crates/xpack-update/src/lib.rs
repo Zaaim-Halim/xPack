@@ -33,5 +33,5 @@ pub use index::{PackageRef, UpdateIndex};
 pub use reporting::ProgressWriter;
 #[cfg(feature = "https")]
 pub use transport::HttpsTransport;
-pub use transport::UpdateTransport;
+pub use transport::{Timeouts, UpdateTransport};
 pub use updater::{Available, UpdateOptions, Updater};

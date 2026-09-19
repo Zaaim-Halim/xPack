@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Args as ClapArgs;
 use xpack_core::{Error, Result};
-use xpack_update::{HttpsTransport, UpdateOptions, Updater};
+use xpack_update::{HttpsTransport, Timeouts, UpdateOptions, Updater};
 
 use super::Context;
 use crate::progress::TerminalProgress;
@@ -31,6 +31,14 @@ pub(crate) struct Args {
     /// Permit moving to a version that is not newer.
     #[arg(long)]
     allow_downgrade: bool,
+
+    /// Give up after this many minutes.
+    ///
+    /// Bounds the whole operation. The default is generous because a large
+    /// package on a slow connection legitimately takes a long time; a server
+    /// that stalls is caught much sooner by the narrower transport timeouts.
+    #[arg(long, value_name = "MINUTES", default_value_t = 30)]
+    timeout: u64,
 }
 
 /// Runs `xpack update`.
@@ -38,7 +46,8 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let lock = context.lock(&args.application)?;
     let url = resolve_url(args, &lock)?;
 
-    let transport = HttpsTransport::new();
+    let timeouts = Timeouts::with_total(std::time::Duration::from_secs(args.timeout * 60))?;
+    let transport = HttpsTransport::with_timeouts(timeouts);
     let progress = TerminalProgress::new();
     let updater = Updater::new(&lock, &transport).reporting_to(&progress);
 
