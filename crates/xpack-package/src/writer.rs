@@ -53,9 +53,8 @@ impl<'a> PackageBuilder<'a> {
 
         let files = self.collect_payload()?;
         let total_size = files.iter().try_fold(0u64, |acc, f| {
-            acc.checked_add(f.size).ok_or_else(|| {
-                Error::invalid("payload", "total size overflows a 64-bit integer")
-            })
+            acc.checked_add(f.size)
+                .ok_or_else(|| Error::invalid("payload", "total size overflows a 64-bit integer"))
         })?;
         self.manifest.payload = PayloadSpec { total_size, files };
 
@@ -88,7 +87,8 @@ impl<'a> PackageBuilder<'a> {
     fn collect_payload(&self) -> Result<Vec<PayloadFile>> {
         let mut files = Vec::new();
 
-        for entry in walkdir::WalkDir::new(self.payload_root).follow_links(false).sort_by_file_name()
+        for entry in
+            walkdir::WalkDir::new(self.payload_root).follow_links(false).sort_by_file_name()
         {
             let entry = entry.map_err(|e| {
                 Error::invalid("payload root", format!("cannot walk payload tree: {e}"))
@@ -146,8 +146,7 @@ impl<'a> PackageBuilder<'a> {
             Error::invalid("payload", format!("{entry:?} is not a usable payload entry"))
         })?;
 
-        let mut reader =
-            BufReader::new(File::open(path).map_err(|e| Error::io(path, e))?);
+        let mut reader = BufReader::new(File::open(path).map_err(|e| Error::io(path, e))?);
         let (sha256, size) = sha256_reader(&mut reader)?;
 
         Ok(PayloadFile { path: entry, size, sha256, mode: unix_mode(path)? })
@@ -179,7 +178,8 @@ impl<'a> PackageBuilder<'a> {
         zip.write_all(b"\n").map_err(|e| Error::io(output, e))?;
 
         for file in &self.manifest.payload.files {
-            let source = self.payload_root.join(file.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let source =
+                self.payload_root.join(file.path.replace('/', std::path::MAIN_SEPARATOR_STR));
             let mut options = deflated;
             if let Some(mode) = file.mode {
                 options = options.unix_permissions(mode);
@@ -187,7 +187,8 @@ impl<'a> PackageBuilder<'a> {
 
             zip.start_file(format!("{PAYLOAD_PREFIX}{}", file.path), options)
                 .map_err(|e| zip_error(&e))?;
-            let mut reader = BufReader::new(File::open(&source).map_err(|e| Error::io(&source, e))?);
+            let mut reader =
+                BufReader::new(File::open(&source).map_err(|e| Error::io(&source, e))?);
             std::io::copy(&mut reader, &mut zip).map_err(|e| Error::io(&source, e))?;
         }
 

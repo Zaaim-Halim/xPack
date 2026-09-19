@@ -14,11 +14,11 @@ pub mod platform;
 pub mod state;
 pub mod version;
 
-pub use digest::{Sha256Digest, SHA256_LEN};
+pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
-    Application, FormatVersion, LaunchSpec, Manifest, PayloadFile, PayloadSpec, UpdateSpec,
-    MANIFEST_ENTRY, SIGNATURE_ENTRY,
+    Application, FormatVersion, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadFile, PayloadSpec,
+    SIGNATURE_ENTRY, UpdateSpec,
 };
 pub use paths::InstallPaths;
 pub use platform::{Arch, Os, Platform};

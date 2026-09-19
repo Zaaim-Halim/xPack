@@ -31,9 +31,8 @@ impl Signature {
     /// Parses a 128-character hex signature, tolerating surrounding whitespace.
     pub fn parse_hex(text: &str) -> Result<Self> {
         let mut raw = [0u8; SIGNATURE_LEN];
-        hex::decode_to_slice(text.trim(), &mut raw).map_err(|e| {
-            Error::Integrity(format!("signature is not 128 hex characters: {e}"))
-        })?;
+        hex::decode_to_slice(text.trim(), &mut raw)
+            .map_err(|e| Error::Integrity(format!("signature is not 128 hex characters: {e}")))?;
         Ok(Self(raw))
     }
 

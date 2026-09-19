@@ -221,7 +221,8 @@ mod tests {
     fn a_corrupt_store_fails_loudly_rather_than_trusting_less() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trust.json");
-        std::fs::write(&path, br#"{"formatVersion":1,"keys":[{"publicKey":"not-a-key"}]}"#).unwrap();
+        std::fs::write(&path, br#"{"formatVersion":1,"keys":[{"publicKey":"not-a-key"}]}"#)
+            .unwrap();
         assert!(TrustStore::load_or_empty(&path).is_err());
     }
 

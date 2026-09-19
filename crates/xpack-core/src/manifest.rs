@@ -293,7 +293,10 @@ impl Manifest {
             if !present {
                 return Err(Error::invalid(
                     "manifest",
-                    format!("launch.executable {:?} is not present in the payload", self.launch.executable),
+                    format!(
+                        "launch.executable {:?} is not present in the payload",
+                        self.launch.executable
+                    ),
                 ));
             }
         }
@@ -330,7 +333,9 @@ pub fn validate_application_id(id: &str) -> Result<()> {
     if !id.starts_with(|c: char| c.is_ascii_alphanumeric()) {
         return Err(Error::invalid("application.id", "must start with a letter or digit"));
     }
-    if let Some(bad) = id.chars().find(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_')) {
+    if let Some(bad) =
+        id.chars().find(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_'))
+    {
         return Err(Error::invalid(
             "application.id",
             format!("contains disallowed character {bad:?}; allowed set is [A-Za-z0-9._-]"),

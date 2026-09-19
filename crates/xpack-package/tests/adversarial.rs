@@ -10,8 +10,8 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use xpack_core::manifest::{
-    Application, FormatVersion, LaunchSpec, Manifest, PayloadSpec, UpdateSpec, MANIFEST_ENTRY,
-    SIGNATURE_ENTRY,
+    Application, FormatVersion, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadSpec, SIGNATURE_ENTRY,
+    UpdateSpec,
 };
 use xpack_core::platform::{Arch, Os};
 use xpack_core::{Platform, Version};
@@ -27,11 +27,8 @@ fn payload_tree(root: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            root.join("runtime/bin/java"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        fs::set_permissions(root.join("runtime/bin/java"), fs::Permissions::from_mode(0o755))
+            .unwrap();
     }
 }
 
@@ -114,7 +111,6 @@ fn rewrite(
     }
     writer.finish().unwrap();
 }
-
 
 /// Forces an entry's Unix mode by patching the ZIP central directory.
 ///
@@ -200,8 +196,7 @@ fn a_single_flipped_payload_byte_is_caught_and_the_staging_tree_is_removed() {
     });
 
     // The signature still verifies: only the payload changed.
-    let mut verified =
-        PackageReader::open(&tampered).unwrap().verify(&trusting(&key)).unwrap();
+    let mut verified = PackageReader::open(&tampered).unwrap().verify(&trusting(&key)).unwrap();
 
     let dest = dir.path().join("extracted");
     let err = verified.extract_to(&dest).unwrap_err();
@@ -351,12 +346,7 @@ fn a_setuid_bit_in_the_archive_is_not_honoured() {
     force_entry_mode(&pkg, "payload/runtime/bin/java", 0o104_755);
 
     let dest = dir.path().join("extracted");
-    PackageReader::open(&pkg)
-        .unwrap()
-        .verify(&trusting(&key))
-        .unwrap()
-        .extract_to(&dest)
-        .unwrap();
+    PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap().extract_to(&dest).unwrap();
 
     #[cfg(unix)]
     {
@@ -449,12 +439,7 @@ fn extraction_replaces_a_previous_staging_tree() {
     fs::create_dir_all(dest.join("stale")).unwrap();
     fs::write(dest.join("stale/leftover"), b"from an interrupted run").unwrap();
 
-    PackageReader::open(&pkg)
-        .unwrap()
-        .verify(&trusting(&key))
-        .unwrap()
-        .extract_to(&dest)
-        .unwrap();
+    PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap().extract_to(&dest).unwrap();
 
     assert!(!dest.join("stale").exists(), "stale staging content survived extraction");
     assert!(dest.join("application/app.jar").is_file());

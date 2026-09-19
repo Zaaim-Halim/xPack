@@ -41,8 +41,9 @@ impl PackageReader {
     /// Opens a `.xpkg` without trusting anything inside it.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|e| Error::io(path, e))?;
-        let archive = ZipArchive::new(BufReader::new(file))
-            .map_err(|e| Error::invalid("package", format!("{} is not a valid .xpkg: {e}", path.display())))?;
+        let archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
+            Error::invalid("package", format!("{} is not a valid .xpkg: {e}", path.display()))
+        })?;
         Ok(Self { archive, path: path.to_path_buf() })
     }
 
@@ -66,9 +67,9 @@ impl PackageReader {
         let manifest_bytes = self.read_manifest_bytes()?;
         let signature = self.read_signature()?;
 
-        let signing_key = trust.verify(&manifest_bytes, &signature).map_err(|e| {
-            Error::Integrity(format!("{}: {e}", self.path.display()))
-        })?;
+        let signing_key = trust
+            .verify(&manifest_bytes, &signature)
+            .map_err(|e| Error::Integrity(format!("{}: {e}", self.path.display())))?;
 
         self.finish_verification(&manifest_bytes, signing_key)
     }
@@ -194,12 +195,8 @@ impl PackageReader {
         }
 
         if seen.len() != declared.len() {
-            let missing: Vec<&str> = declared
-                .keys()
-                .copied()
-                .filter(|p| !seen.contains(*p))
-                .take(5)
-                .collect();
+            let missing: Vec<&str> =
+                declared.keys().copied().filter(|p| !seen.contains(*p)).take(5).collect();
             return Err(Error::Integrity(format!(
                 "archive is missing {} manifest file(s), e.g. {missing:?}",
                 declared.len() - seen.len()
@@ -270,13 +267,8 @@ impl VerifiedPackage {
     }
 
     fn extract_inner(&mut self, destination: &Path) -> Result<()> {
-        let declared: BTreeMap<String, xpack_core::PayloadFile> = self
-            .manifest
-            .payload
-            .files
-            .iter()
-            .map(|f| (f.path.clone(), f.clone()))
-            .collect();
+        let declared: BTreeMap<String, xpack_core::PayloadFile> =
+            self.manifest.payload.files.iter().map(|f| (f.path.clone(), f.clone())).collect();
 
         let budget = self.manifest.payload.total_size;
         let mut written: u64 = 0;
@@ -305,13 +297,12 @@ impl VerifiedPackage {
                 Error::Integrity(format!("{:?} is not covered by the manifest", safe.as_str()))
             })?;
 
-            written = written.checked_add(expected.size).filter(|w| *w <= budget).ok_or_else(
-                || {
+            written =
+                written.checked_add(expected.size).filter(|w| *w <= budget).ok_or_else(|| {
                     Error::Integrity(format!(
                         "payload exceeds its declared total of {budget} bytes"
                     ))
-                },
-            )?;
+                })?;
 
             self::write_verified_entry(&mut entry, &safe, expected, destination)?;
             extracted += 1;

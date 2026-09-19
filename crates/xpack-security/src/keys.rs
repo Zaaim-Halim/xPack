@@ -184,9 +184,8 @@ impl KeyPair {
         file.ensure_supported()?;
 
         let mut seed = [0u8; SECRET_KEY_LEN];
-        hex::decode_to_slice(file.private_key.trim(), &mut seed).map_err(|e| {
-            Error::invalid("private key", format!("is not 64 hex characters: {e}"))
-        })?;
+        hex::decode_to_slice(file.private_key.trim(), &mut seed)
+            .map_err(|e| Error::invalid("private key", format!("is not 64 hex characters: {e}")))?;
         let pair = Self::from_secret_bytes(&seed);
         seed.fill(0);
 
@@ -222,7 +221,9 @@ impl KeyPair {
 impl fmt::Debug for KeyPair {
     /// Never prints secret material, even in a panic message.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeyPair").field("public", &self.public().fingerprint()).finish_non_exhaustive()
+        f.debug_struct("KeyPair")
+            .field("public", &self.public().fingerprint())
+            .finish_non_exhaustive()
     }
 }
 
@@ -269,7 +270,10 @@ macro_rules! impl_ensure_supported {
                 if self.algorithm != ALGORITHM {
                     return Err(Error::invalid(
                         "key file",
-                        format!("algorithm {:?} is not supported, expected {ALGORITHM:?}", self.algorithm),
+                        format!(
+                            "algorithm {:?} is not supported, expected {ALGORITHM:?}",
+                            self.algorithm
+                        ),
                     ));
                 }
                 Ok(())

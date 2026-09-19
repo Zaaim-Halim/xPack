@@ -33,6 +33,6 @@ pub mod entry_path;
 pub mod reader;
 pub mod writer;
 
-pub use entry_path::{safe_payload_path, SafePath};
+pub use entry_path::{SafePath, safe_payload_path};
 pub use reader::{PackageReader, VerifiedPackage};
 pub use writer::{PackageBuilder, PackedPackage};

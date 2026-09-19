@@ -183,9 +183,9 @@ impl InstallState {
 
     /// The version the launcher should start.
     pub fn active(&self) -> Result<&Version> {
-        self.current_version
-            .as_ref()
-            .ok_or_else(|| Error::invalid("state", "no version is active; the install is incomplete"))
+        self.current_version.as_ref().ok_or_else(|| {
+            Error::invalid("state", "no version is active; the install is incomplete")
+        })
     }
 
     /// Looks up a version's record.
@@ -216,10 +216,8 @@ impl InstallState {
 
     /// Quarantines a version so it is never activated automatically again.
     pub fn mark_bad(&mut self, version: &Version, reason: impl Into<String>) {
-        let entry = self
-            .versions
-            .entry(version.to_string())
-            .or_insert_with(|| VersionRecord::staged(None));
+        let entry =
+            self.versions.entry(version.to_string()).or_insert_with(|| VersionRecord::staged(None));
         entry.status = VersionStatus::Bad;
         entry.failure_reason = Some(reason.into());
     }
@@ -349,10 +347,8 @@ mod tests {
 
     #[test]
     fn phase_round_trips_through_json() {
-        let phase = UpdatePhase::PendingVerification {
-            version: v("1.2.0"),
-            rollback_to: v("1.1.0"),
-        };
+        let phase =
+            UpdatePhase::PendingVerification { version: v("1.2.0"), rollback_to: v("1.1.0") };
         let json = serde_json::to_string(&phase).unwrap();
         assert_eq!(serde_json::from_str::<UpdatePhase>(&json).unwrap(), phase);
     }

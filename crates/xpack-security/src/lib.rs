@@ -24,6 +24,6 @@ pub mod signature;
 pub mod trust;
 
 pub use hash::{Hasher, sha256, sha256_reader, verify_digest};
-pub use keys::{KeyPair, PublicKey, SECRET_KEY_LEN, PUBLIC_KEY_LEN};
-pub use signature::{sign, verify, Signature, SIGNATURE_LEN};
+pub use keys::{KeyPair, PUBLIC_KEY_LEN, PublicKey, SECRET_KEY_LEN};
+pub use signature::{SIGNATURE_LEN, Signature, sign, verify};
 pub use trust::{TrustEntry, TrustStore};

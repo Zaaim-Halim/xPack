@@ -60,8 +60,8 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
 
 /// Serialises `value` as pretty JSON and writes it atomically.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|e| Error::json(path.display().to_string(), e))?;
+    let mut bytes =
+        serde_json::to_vec_pretty(value).map_err(|e| Error::json(path.display().to_string(), e))?;
     bytes.push(b'\n');
     write(path, &bytes)
 }
