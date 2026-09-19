@@ -348,7 +348,30 @@ fn write_verified_entry(
     let mut buffer = vec![0u8; CHUNK];
 
     {
-        let file = File::create(&target).map_err(|e| Error::io(&target, e))?;
+        // `create_new` rather than `create`: staging was emptied before
+        // extraction, so a file already existing here means two manifest
+        // entries resolved to the same path on this filesystem. That happens
+        // whenever the entry names differ as strings but not as paths —
+        // Unicode NFC vs NFD (the same file on APFS), case differences on
+        // Windows and case-insensitive volumes, and anything else a
+        // filesystem folds together.
+        //
+        // Silently allowing the second write would leave the last entry's
+        // content at a path the manifest attributes to the first entry's
+        // hash, so the extracted tree would no longer match the manifest it
+        // was verified against. Refusing catches every folding rule the local
+        // filesystem implements without xPack having to model any of them.
+        let file = File::create_new(&target).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::Integrity(format!(
+                    "{:?} collides with another payload entry on this filesystem; \
+                     two manifest entries resolve to the same file",
+                    safe.as_str()
+                ))
+            } else {
+                Error::io(&target, e)
+            }
+        })?;
         let mut writer = BufWriter::new(file);
 
         loop {
