@@ -148,9 +148,46 @@ impl Launcher {
 
             let version = state.active()?.clone();
             if !installer.is_usable(&version) {
-                return Err(Error::VersionNotInstalled(format!(
-                    "{version} is active but its files are missing; reinstall it to repair"
-                )));
+                return Err(Error::invalid(
+                    "installation",
+                    format!(
+                        "{version} is active but its files are missing; reinstall it to repair"
+                    ),
+                ));
+            }
+
+            // A publisher marked a release mandatory, and the version about to
+            // start is older than it. Refusing is the point: the alternative
+            // is running something its author has said must not run, which for
+            // the security release this exists for is the whole failure.
+            //
+            // Reached only when the required version is unusable — staged and
+            // present, it was activated a few lines above. So this is a
+            // genuinely broken installation, not an update waiting to happen,
+            // and saying so beats starting anyway and hoping.
+            // A required version that failed its own health check no longer
+            // requires anything. Rollback is the safety net for a bad release,
+            // and a net a publisher can switch off by setting one flag is not
+            // a net: without this, shipping a mandatory version that crashes
+            // on start leaves every installation unable to run *anything* —
+            // the rollback moves to a working older version, and the
+            // requirement then refuses to start it.
+            //
+            // Running the older version is strictly better than running
+            // nothing, and the publisher who shipped the broken release is the
+            // one who has to fix it.
+            if let Some(required) = &state.required_version
+                && &version < required
+                && !state.is_bad(required)
+            {
+                return Err(Error::invalid(
+                    "launch",
+                    format!(
+                        "version {required} is required and {version} is older; \
+                         the required version is not installed and usable, so this \
+                         installation needs repairing before it can start"
+                    ),
+                ));
             }
 
             let probation = state.update.is_probation();

@@ -223,6 +223,13 @@ pub struct InstallState {
     /// Every version present under `versions/`, keyed by version string.
     #[serde(default)]
     pub versions: BTreeMap<String, VersionRecord>,
+    /// The oldest version allowed to run, if a release demanded one.
+    ///
+    /// Written when a version whose **signed** manifest marks it mandatory is
+    /// installed. The launcher refuses to start anything older, so a security
+    /// release cannot be left unapplied by a user who simply never updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_version: Option<Version>,
     /// When an update server was last asked, in seconds since the Unix epoch.
     ///
     /// The background updater runs every time the application starts, and a
@@ -251,6 +258,7 @@ impl InstallState {
             previous_version: None,
             update: UpdatePhase::Idle,
             versions: BTreeMap::new(),
+            required_version: None,
             last_update_check: None,
         }
     }

@@ -24,7 +24,7 @@ pub use manifest::{
 };
 pub use paths::InstallPaths;
 pub use platform::{Arch, Os, Platform};
-pub use progress::{NoProgress, ProgressEvent, ProgressReporter};
+pub use progress::{JsonProgress, NoProgress, ProgressEvent, ProgressReporter, STREAM_SCHEMA};
 pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};
 pub use store::Loaded;
 pub use version::Version;

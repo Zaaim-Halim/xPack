@@ -42,6 +42,20 @@ struct Args {
     /// Give up after this many minutes.
     #[arg(long, value_name = "MINUTES", default_value_t = 30)]
     timeout: u64,
+
+    /// Write one JSON object per line to standard output as work happens.
+    ///
+    /// This is how a desktop application shows an update: spawn this binary,
+    /// read the stream a line at a time, and drive your own progress dialog in
+    /// your own toolkit. xPack draws no windows of its own — a second,
+    /// foreign-looking one that could not be themed or localised to match
+    /// would be worse than none, and it would put a windowing stack inside a
+    /// binary that must stay small and cross-compile cleanly.
+    ///
+    /// Without it the updater stays silent, which is what a background run
+    /// spawned by the launcher wants.
+    #[arg(long)]
+    progress: bool,
 }
 
 fn main() -> ExitCode {
@@ -78,7 +92,12 @@ fn main() -> ExitCode {
     };
     let transport = HttpsTransport::with_timeouts(timeouts);
 
-    let mut updater = BackgroundUpdater::new(&paths, &transport).forced(args.force);
+    let stream = xpack_core::JsonProgress::to_stdout();
+    let reporter: &dyn xpack_core::ProgressReporter =
+        if args.progress { &stream } else { &xpack_core::NoProgress };
+
+    let mut updater =
+        BackgroundUpdater::new(&paths, &transport).forced(args.force).reporting_to(reporter);
     if let Some(hours) = args.interval {
         updater = updater.every(Duration::from_secs(hours * 60 * 60));
     }

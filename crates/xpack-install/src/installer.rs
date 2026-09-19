@@ -167,6 +167,18 @@ impl<'lock> Installer<'lock> {
         self.promote(&staging, &version, &state)?;
 
         state.stage_version(&version, None);
+
+        // Read from the manifest that was just verified, never from the update
+        // index: a server that could declare releases mandatory could stop an
+        // application starting whenever it liked. Raised only, so an older
+        // release cannot lower a requirement a newer one set.
+        if manifest.update.mandatory
+            && state.required_version.as_ref().is_none_or(|current| current < &version)
+        {
+            tracing::info!(%version, "this release is mandatory; older versions will not start");
+            state.required_version = Some(version.clone());
+        }
+
         state.update = UpdatePhase::Staged { version: version.clone() };
         self.lock.save_state(&state)?;
 
@@ -245,9 +257,10 @@ impl<'lock> Installer<'lock> {
         // succeeded. Activating a version that is not on disk would leave
         // `current` naming something that cannot be launched.
         if !self.is_usable(version) {
-            return Err(Error::VersionNotInstalled(format!(
-                "{version} is recorded but its files are missing"
-            )));
+            return Err(Error::invalid(
+                "activate",
+                format!("{version} is recorded but its files are missing"),
+            ));
         }
         if state.is_bad(version) {
             return Err(Error::invalid(

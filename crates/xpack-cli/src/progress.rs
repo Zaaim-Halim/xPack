@@ -26,6 +26,14 @@ impl TerminalProgress {
         Self { bar: Mutex::new(None), interactive: std::io::stderr().is_terminal() }
     }
 
+    /// Builds a reporter that prints plain lines, whatever is attached.
+    ///
+    /// For a caller that wants the words without the redrawing — a log, a CI
+    /// job, a terminal being captured by something else.
+    pub(crate) fn plain() -> Self {
+        Self { bar: Mutex::new(None), interactive: false }
+    }
+
     /// Clears any bar still on screen.
     pub(crate) fn finish(&self) {
         if let Ok(mut slot) = self.bar.lock()
@@ -151,5 +159,66 @@ impl ProgressReporter for TerminalProgress {
                 self.line(&format!("  {}", other.message()));
             }
         }
+    }
+}
+
+/// Where progress goes, and in what shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub(crate) enum ProgressMode {
+    /// A bar when a terminal is attached, plain lines otherwise.
+    #[default]
+    Auto,
+    /// One JSON object per line on stdout, for a program to read.
+    Json,
+    /// Plain lines, never a bar.
+    Plain,
+    /// Nothing at all.
+    None,
+}
+
+/// A reporter and the terminal bar it may own.
+///
+/// The bar has to be cleared before anything else is printed, or a failure
+/// message interleaves with a half-drawn line. Holding both together means a
+/// caller cannot forget which one it has.
+pub(crate) enum Progress {
+    Terminal(TerminalProgress),
+    Json(xpack_core::JsonProgress<std::io::Stdout>),
+    Silent(xpack_core::NoProgress),
+}
+
+impl Progress {
+    /// Builds the reporter a mode asks for.
+    pub(crate) fn new(mode: ProgressMode) -> Self {
+        match mode {
+            ProgressMode::Auto => Self::Terminal(TerminalProgress::new()),
+            ProgressMode::Plain => Self::Terminal(TerminalProgress::plain()),
+            ProgressMode::Json => Self::Json(xpack_core::JsonProgress::to_stdout()),
+            ProgressMode::None => Self::Silent(xpack_core::NoProgress),
+        }
+    }
+
+    /// The reporter to hand to the engine.
+    pub(crate) fn reporter(&self) -> &dyn xpack_core::ProgressReporter {
+        match self {
+            Self::Terminal(p) => p,
+            Self::Json(p) => p,
+            Self::Silent(p) => p,
+        }
+    }
+
+    /// Clears any bar before other output is written.
+    pub(crate) fn finish(&self) {
+        if let Self::Terminal(p) = self {
+            p.finish();
+        }
+    }
+
+    /// Whether the command should also print its own human-readable result.
+    ///
+    /// In JSON mode it must not: the stream is the result, and a stray line of
+    /// prose in the middle of it breaks the parser reading it.
+    pub(crate) fn wants_human_output(&self) -> bool {
+        !matches!(self, Self::Json(_))
     }
 }

@@ -189,11 +189,36 @@ pub struct UpdateSpec {
     /// Base URL of the update index. Must be HTTPS outside of tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+
+    /// Whether this release must be applied before the application runs again.
+    ///
+    /// For a security release the publisher needs more than "it will be picked
+    /// up eventually". Setting this records, once the version is installed and
+    /// its signature checked, that nothing older may start.
+    ///
+    /// # It is read from the signed manifest, never from the index
+    ///
+    /// The update index is served by whoever controls the server and is
+    /// trusted for nothing. A server that could declare releases mandatory
+    /// could stop an application starting at will. So the flag takes effect
+    /// only once the package carrying it has been downloaded and verified —
+    /// the publisher's signature is what makes it true.
+    ///
+    /// # What it does not mean
+    ///
+    /// It does not make the user wait at startup for a download. A mandatory
+    /// version is staged in the background like any other and enforced from
+    /// the next launch, when applying it costs one state write. Blocking a
+    /// user behind a network transfer, with their application unopened and
+    /// nothing drawing a window yet, would be a worse failure than one more
+    /// session on the old version.
+    #[serde(default)]
+    pub mandatory: bool,
 }
 
 impl Default for UpdateSpec {
     fn default() -> Self {
-        Self { channel: default_channel(), url: None }
+        Self { channel: default_channel(), url: None, mandatory: false }
     }
 }
 

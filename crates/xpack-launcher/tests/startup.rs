@@ -532,7 +532,15 @@ fn an_active_version_whose_files_are_gone_fails_clearly() {
     fs::remove_dir_all(world.paths.version_dir(&v("1.0.0"))).unwrap();
 
     let err = world.launcher().launch(&[], true).unwrap_err();
-    assert!(err.to_string().contains("files are missing"), "got {err}");
+    let message = err.to_string();
+    assert!(message.contains("files are missing"), "got {message}");
+    // "Clearly" is the claim this test makes, so check the sentence actually
+    // reads as one. An explanation fed through a variant that wraps it ends up
+    // as "... reinstall it to repair is not installed".
+    assert!(
+        !message.contains("repair is not installed"),
+        "the message is mangled by its error variant: {message}"
+    );
 }
 
 #[test]
@@ -715,4 +723,186 @@ fn a_stale_report_from_a_previous_run_does_not_make_a_silent_version_look_health
         "a stale report was accepted as this run's"
     );
     assert_eq!(outcome.rolled_back_to, Some(Version::parse("1.0.0").unwrap()));
+}
+
+#[cfg(unix)]
+impl World {
+    /// Installs a version whose signed manifest marks the release mandatory.
+    fn install_mandatory(&self, version: &str, behaviour: Behaviour, activate: bool) {
+        let package = build_mandatory(self.dir.path(), &self.key, version, behaviour);
+        let lock = InstallLock::acquire(&self.paths).unwrap();
+        let mut verified =
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(self.key.public())).unwrap();
+        Installer::new(&lock)
+            .install(
+                &mut verified,
+                &InstallOptions { activate, allow_downgrade: false, ..Default::default() },
+            )
+            .unwrap();
+    }
+
+    fn required(&self) -> Option<Version> {
+        let lock = InstallLock::acquire(&self.paths).unwrap();
+        lock.load_state().unwrap().value.required_version
+    }
+}
+
+#[cfg(unix)]
+fn build_mandatory(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviour) -> PathBuf {
+    let payload = dir.join(format!("src-{version}"));
+    fs::create_dir_all(payload.join("bin")).unwrap();
+    let app = payload.join("bin/app");
+    fs::write(&app, script(behaviour, version)).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let manifest = Manifest {
+        format_version: FormatVersion::CURRENT,
+        application: Application {
+            id: "com.example.app".into(),
+            name: "Example".into(),
+            version: Version::parse(version).unwrap(),
+            description: None,
+            publisher: None,
+        },
+        platform: Platform::host().unwrap(),
+        launch: LaunchSpec {
+            executable: "bin/app".into(),
+            arguments: vec![],
+            working_directory: None,
+            environment: BTreeMap::new(),
+        },
+        update: UpdateSpec { mandatory: true, ..UpdateSpec::default() },
+        health: HealthSpec { startup_timeout_seconds: 1, ..Default::default() },
+        signing_key: None,
+        payload: PayloadSpec::default(),
+        created_at: None,
+    };
+    let out = dir.join(format!("mandatory-{version}.xpkg"));
+    PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();
+    out
+}
+
+#[test]
+#[cfg(unix)]
+fn a_mandatory_release_records_the_version_that_must_run() {
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.install_mandatory("1.1.0", Behaviour::StaysRunning, false);
+
+    assert_eq!(world.required(), Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn a_mandatory_release_staged_in_the_background_applies_at_the_next_launch() {
+    // The flag does not make a user wait at startup. It is staged like any
+    // other version and costs one state write to apply.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.install_mandatory("1.1.0", Behaviour::StaysRunning, false);
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+
+    let outcome = world.launcher().launch(&[], false).unwrap();
+
+    assert_eq!(outcome.version, Version::parse("1.1.0").unwrap());
+    assert_eq!(world.active(), Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+#[cfg(unix)]
+fn nothing_older_than_a_required_version_is_allowed_to_start() {
+    // The point of the flag: a version its publisher has said must not run
+    // does not run, even when it is sitting there working perfectly.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.install_mandatory("1.1.0", Behaviour::StaysRunning, true);
+
+    // The required version's files go missing, so it cannot be activated and
+    // the installation falls back to something older.
+    std::fs::remove_dir_all(world.paths.version_dir(&Version::parse("1.1.0").unwrap())).unwrap();
+    {
+        let lock = InstallLock::acquire(&world.paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.current_version = Some(Version::parse("1.0.0").unwrap());
+        state.update = xpack_core::state::UpdatePhase::Idle;
+        lock.save_state(&state).unwrap();
+    }
+
+    let error = world.launcher().launch(&[], false).unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("1.1.0") && message.contains("required"), "got: {message}");
+}
+
+#[test]
+#[cfg(unix)]
+fn an_ordinary_release_never_sets_a_requirement() {
+    // Every application that has not opted in must be unaffected.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.stage("1.1.0", Behaviour::StaysRunning, 1);
+
+    assert_eq!(world.required(), None);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_broken_mandatory_release_does_not_brick_the_installation() {
+    // The failure this guards against: a publisher ships a mandatory version
+    // that crashes on start. The rollback moves to a working older version,
+    // and the requirement then refuses to start it — leaving the user unable
+    // to run anything at all, which is worse than the problem the flag exists
+    // to solve.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.install_mandatory("2.0.0", Behaviour::CrashesImmediately, true);
+    assert_eq!(world.required(), Some(Version::parse("2.0.0").unwrap()));
+
+    // 2.0.0 fails its health check and is rolled back.
+    let first = world.launcher().launch(&[], true).unwrap();
+    assert_eq!(first.rolled_back_to, Some(Version::parse("1.0.0").unwrap()));
+    assert_eq!(world.status_of("2.0.0"), xpack_core::state::VersionStatus::Bad);
+
+    // The requirement must now be void: a version that could not start cannot
+    // go on requiring anything.
+    let second = world.launcher().launch(&[], false).unwrap();
+    assert_eq!(
+        second.version,
+        Version::parse("1.0.0").unwrap(),
+        "the installation was bricked by its own mandatory release"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_requirement_still_stands_when_the_required_version_merely_went_missing() {
+    // The other half: voiding the requirement only because the version failed
+    // must not void it whenever the version is simply absent, or the flag
+    // would mean nothing — deleting a directory would be enough to escape it.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::StaysRunning, 1);
+    world.install_mandatory("2.0.0", Behaviour::StaysRunning, true);
+
+    // 2.0.0 is healthy and required, but its files are removed and the active
+    // pointer is put back to 1.0.0 — a damaged installation, not a bad release.
+    let required = Version::parse("2.0.0").unwrap();
+    fs::remove_dir_all(world.paths.version_dir(&required)).unwrap();
+    {
+        let lock = InstallLock::acquire(&world.paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.current_version = Some(Version::parse("1.0.0").unwrap());
+        state.update = xpack_core::state::UpdatePhase::Idle;
+        lock.save_state(&state).unwrap();
+    }
+    assert_ne!(world.status_of("2.0.0"), xpack_core::state::VersionStatus::Bad);
+
+    let error = world.launcher().launch(&[], false).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("2.0.0") && message.contains("required"),
+        "a missing requirement was silently ignored: {message}"
+    );
 }

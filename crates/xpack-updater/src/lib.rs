@@ -37,6 +37,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::{Error, InstallPaths, Result, Version};
 use xpack_platform::InstallLock;
 use xpack_update::{UpdateOptions, UpdateTransport, Updater};
@@ -65,6 +66,7 @@ pub enum Outcome {
 pub struct BackgroundUpdater<'a> {
     paths: &'a InstallPaths,
     transport: &'a dyn UpdateTransport,
+    progress: &'a dyn ProgressReporter,
     interval: Duration,
     force: bool,
 }
@@ -72,7 +74,18 @@ pub struct BackgroundUpdater<'a> {
 impl<'a> BackgroundUpdater<'a> {
     /// Builds an updater for an installation.
     pub fn new(paths: &'a InstallPaths, transport: &'a dyn UpdateTransport) -> Self {
-        Self { paths, transport, interval: DEFAULT_INTERVAL, force: false }
+        Self { paths, transport, progress: &NoProgress, interval: DEFAULT_INTERVAL, force: false }
+    }
+
+    /// Reports each stage to `progress` as it happens.
+    ///
+    /// How a desktop application shows an update it did not start: spawn this
+    /// binary with `--progress json`, read the stream, render in its own
+    /// toolkit.
+    #[must_use]
+    pub fn reporting_to(mut self, progress: &'a dyn ProgressReporter) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Sets the minimum time between checks.
@@ -106,6 +119,9 @@ impl<'a> BackgroundUpdater<'a> {
                 return Ok(Outcome::NotDue);
             }
 
+            self.progress
+                .report(&ProgressEvent::CheckingForUpdate { application: application.clone() });
+
             let Some(url) = self.update_url(&state)? else {
                 return Ok(Outcome::NoServerConfigured);
             };
@@ -130,12 +146,26 @@ impl<'a> BackgroundUpdater<'a> {
             uninstaller: None,
         };
 
-        if let Some(version) = Updater::new(self.paths, self.transport).update(&url, &options)? {
-            tracing::info!(%version, "a new version is staged and will be used at next start");
-            return Ok(Outcome::Staged(version));
+        let result = Updater::new(self.paths, self.transport)
+            .reporting_to(self.progress)
+            .update(&url, &options);
+
+        match result {
+            Ok(Some(version)) => {
+                tracing::info!(%version, "a new version is staged and will be used at next start");
+                Ok(Outcome::Staged(version))
+            }
+            Ok(None) => {
+                tracing::debug!("no newer version is available");
+                Ok(Outcome::UpToDate)
+            }
+            // Reported before returning, so a consumer watching the stream
+            // learns why it stopped rather than seeing it simply end.
+            Err(error) => {
+                self.progress.report(&ProgressEvent::Failed { reason: error.to_string() });
+                Err(error)
+            }
         }
-        tracing::debug!("no newer version is available");
-        Ok(Outcome::UpToDate)
     }
 
     /// The update server the active version's signed manifest names.

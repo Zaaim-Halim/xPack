@@ -75,6 +75,10 @@ pub enum Error {
     },
 
     /// The requested version is not installed.
+    ///
+    /// Carries **only the version**, because the message wraps it: passing a
+    /// whole sentence produces `version <sentence> is not installed`. Use
+    /// [`Error::invalid`] for anything that needs to explain itself.
     #[error("version {0} is not installed")]
     VersionNotInstalled(String),
 

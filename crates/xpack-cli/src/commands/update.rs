@@ -7,7 +7,7 @@ use xpack_core::{Error, Result};
 use xpack_update::{HttpsTransport, Timeouts, UpdateOptions, Updater};
 
 use super::Context;
-use crate::progress::TerminalProgress;
+use crate::progress::{Progress, ProgressMode};
 
 /// Arguments for `xpack update`.
 #[derive(ClapArgs)]
@@ -39,6 +39,14 @@ pub(crate) struct Args {
     /// that stalls is caught much sooner by the narrower transport timeouts.
     #[arg(long, value_name = "MINUTES", default_value_t = 30)]
     timeout: u64,
+
+    /// How to report progress.
+    ///
+    /// `json` writes one object per line to standard output, which is how a
+    /// desktop application drives its own progress dialog: spawn this command,
+    /// read the stream, render in your own toolkit. xPack draws no windows.
+    #[arg(long, value_name = "MODE", value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 }
 
 /// Runs `xpack update`.
@@ -52,8 +60,8 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
 
     let timeouts = Timeouts::with_total(std::time::Duration::from_secs(args.timeout * 60))?;
     let transport = HttpsTransport::with_timeouts(timeouts);
-    let progress = TerminalProgress::new();
-    let updater = Updater::new(&paths, &transport).reporting_to(&progress);
+    let progress = Progress::new(args.progress);
+    let updater = Updater::new(&paths, &transport).reporting_to(progress.reporter());
 
     let options = UpdateOptions {
         allow_downgrade: args.allow_downgrade,
@@ -66,7 +74,13 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     if args.check_only {
         let outcome = updater.check(&url, &options);
         progress.finish();
-        if let Some(available) = outcome? {
+        let available = outcome?;
+        if !progress.wants_human_output() {
+            // The stream already carried the answer. Printing prose into it
+            // would break the parser on the other end.
+            return super::success();
+        }
+        if let Some(available) = available {
             crate::output::field("available", &available.version);
             if let Some(current) = &available.current {
                 crate::output::field("current", current);
@@ -89,7 +103,11 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // message is never interleaved with a half-drawn line.
     progress.finish();
 
-    if let Some(version) = outcome? {
+    let version = outcome?;
+    if !progress.wants_human_output() {
+        return super::success();
+    }
+    if let Some(version) = version {
         crate::output::field("updated to", &version);
     } else {
         println!("up to date");

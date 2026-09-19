@@ -18,6 +18,10 @@
 //! removes a partial file.
 
 use std::fmt;
+use std::io::Write;
+use std::sync::Mutex;
+
+use serde::Serialize;
 
 use crate::Version;
 
@@ -47,7 +51,8 @@ impl ProgressReporter for NoProgress {
 ///
 /// Marked `non_exhaustive`: new stages will be added, and doing so must not
 /// break a consumer that already matches on the ones it knows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "event", rename_all = "camelCase", rename_all_fields = "camelCase")]
 #[non_exhaustive]
 pub enum ProgressEvent {
     /// Asking the update server what it has.
@@ -185,6 +190,92 @@ impl fmt::Display for ProgressEvent {
     }
 }
 
+/// The version of the event stream's shape.
+///
+/// Carried on every line rather than announced once, so a consumer that
+/// attaches to a stream already in progress, or reads a single line out of a
+/// log, still knows what it is looking at.
+pub const STREAM_SCHEMA: u32 = 1;
+
+/// Writes one JSON object per line, for a program to read.
+///
+/// # Why a stream and not a window
+///
+/// A GUI application already has a toolkit, a theme, a language and a place
+/// its users expect progress to appear. xPack drawing its own window would
+/// mean a second, foreign-looking dialog that cannot be localised or themed to
+/// match — and it would put a windowing stack inside a security-critical
+/// binary that is otherwise free of one and cross-compiles to musl.
+///
+/// So the engine reports and the application renders. The application spawns
+/// the updater, reads its standard output a line at a time, and drives its own
+/// progress dialog. That works from Java, .NET, Python, Electron or anything
+/// else that can read a pipe, which is the same runtime independence the rest
+/// of xPack is built on.
+///
+/// # Format
+///
+/// One object per line, newline-terminated, flushed as it is written so a
+/// reader sees each event as it happens rather than when a buffer fills.
+///
+/// ```text
+/// {"v":1,"event":"downloadProgress","message":"Downloading 1.0 MiB of 46.0 MiB",
+///  "downloaded":1048576,"totalBytes":48210432}
+/// ```
+///
+/// `event` is the discriminator and the remaining fields belong to that
+/// variant. `message` is always present and always the same wording every
+/// other consumer uses, so an application that only wants a status line does
+/// not have to compose one.
+///
+/// A reader must **ignore events it does not recognise**: stages are added
+/// over time, and [`ProgressEvent`] is `non_exhaustive` for the same reason.
+pub struct JsonProgress<W: Write + Send> {
+    writer: Mutex<W>,
+}
+
+impl<W: Write + Send> JsonProgress<W> {
+    /// Writes the stream to `writer`.
+    pub fn new(writer: W) -> Self {
+        Self { writer: Mutex::new(writer) }
+    }
+}
+
+impl JsonProgress<std::io::Stdout> {
+    /// Writes the stream to standard output, where a parent process reads it.
+    ///
+    /// Standard output rather than standard error because this is the
+    /// process's result, not its diagnostics: a caller redirecting one and not
+    /// the other should get the machine-readable half here.
+    pub fn to_stdout() -> Self {
+        Self::new(std::io::stdout())
+    }
+}
+
+impl<W: Write + Send> ProgressReporter for JsonProgress<W> {
+    fn report(&self, event: &ProgressEvent) {
+        // Every failure here is swallowed deliberately. A closed pipe means the
+        // application stopped listening, which is not a reason to fail an
+        // update that is otherwise working — and this runs inside a download,
+        // where a panic would skip the cleanup that removes the partial file.
+        let Ok(mut writer) = self.writer.lock() else {
+            return;
+        };
+        let Ok(serde_json::Value::Object(mut fields)) = serde_json::to_value(event) else {
+            return;
+        };
+        fields.insert("v".to_string(), STREAM_SCHEMA.into());
+        fields.insert("message".to_string(), event.message().into());
+
+        if let Ok(line) = serde_json::to_string(&fields) {
+            let _ = writeln!(writer, "{line}");
+            // Flushed per event: a progress stream buffered until the end is
+            // not a progress stream.
+            let _ = writer.flush();
+        }
+    }
+}
+
 /// Formats a byte count for a person reading it.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -271,5 +362,118 @@ mod tests {
     #[test]
     fn the_default_reporter_accepts_everything_and_does_nothing() {
         NoProgress.report(&ProgressEvent::Verifying { version: v("1.0.0") });
+    }
+}
+
+#[cfg(test)]
+mod json_stream_tests {
+    use super::*;
+
+    /// Captures the stream into a buffer a test can read back.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn lines_for(events: &[ProgressEvent]) -> Vec<serde_json::Value> {
+        let sink = Sink::default();
+        let reporter = JsonProgress::new(sink.clone());
+        for event in events {
+            reporter.report(event);
+        }
+        let bytes = sink.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line must be a JSON object"))
+            .collect()
+    }
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn every_event_is_one_self_describing_line() {
+        // A consumer reads a line at a time, so an event spanning two lines or
+        // two events sharing one would both break parsing.
+        let events = [
+            ProgressEvent::CheckingForUpdate { application: "com.example.demo".into() },
+            ProgressEvent::UpdateAvailable { version: v("1.1.0"), total_bytes: Some(48_210_432) },
+            ProgressEvent::DownloadProgress {
+                downloaded: 1_048_576,
+                total_bytes: Some(48_210_432),
+            },
+            ProgressEvent::Completed { version: v("1.1.0") },
+        ];
+        let lines = lines_for(&events);
+        assert_eq!(lines.len(), events.len());
+        for line in &lines {
+            assert!(line.get("event").and_then(|e| e.as_str()).is_some(), "{line}");
+            assert_eq!(line["v"], STREAM_SCHEMA);
+        }
+    }
+
+    #[test]
+    fn a_message_is_always_present_and_matches_the_shared_wording() {
+        // So a status line needs no string building, and every consumer says
+        // the same thing for the same state.
+        let event = ProgressEvent::Verifying { version: v("1.1.0") };
+        let lines = lines_for(std::slice::from_ref(&event));
+        assert_eq!(lines[0]["message"], event.message());
+    }
+
+    #[test]
+    fn variant_fields_survive_with_their_numbers_intact() {
+        // A progress bar is driven by these two numbers; losing either, or
+        // rounding them through a float, makes the bar wrong.
+        let lines = lines_for(&[ProgressEvent::DownloadProgress {
+            downloaded: 1_048_576,
+            total_bytes: Some(48_210_432),
+        }]);
+        assert_eq!(lines[0]["event"], "downloadProgress");
+        assert_eq!(lines[0]["downloaded"], 1_048_576u64);
+        assert_eq!(lines[0]["totalBytes"], 48_210_432u64);
+    }
+
+    #[test]
+    fn an_unknown_total_is_null_rather_than_zero() {
+        // A consumer must be able to tell "size unknown, show an indeterminate
+        // spinner" from "size is zero", which would render a finished bar.
+        let lines =
+            lines_for(&[ProgressEvent::DownloadStarted { version: v("1.1.0"), total_bytes: None }]);
+        // The key must be present *and* null. Asserting only that it reads as
+        // null would pass if the field were missing entirely, or misnamed.
+        assert!(
+            lines[0].as_object().unwrap().contains_key("totalBytes"),
+            "totalBytes is absent from {}",
+            lines[0]
+        );
+        assert!(lines[0]["totalBytes"].is_null(), "got {}", lines[0]);
+    }
+
+    #[test]
+    fn a_closed_pipe_never_panics() {
+        // The consumer may quit at any moment. Reporting runs inside the
+        // download, where unwinding would skip the cleanup of the partial file.
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let reporter = JsonProgress::new(Closed);
+        reporter.report(&ProgressEvent::Completed { version: v("1.1.0") });
     }
 }

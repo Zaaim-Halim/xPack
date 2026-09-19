@@ -57,9 +57,10 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let paths = lock.paths();
 
     if !installer.is_usable(&version) {
-        return Err(Error::VersionNotInstalled(format!(
-            "{version} is active but its files are missing; reinstall it to repair"
-        )));
+        return Err(Error::invalid(
+            "installation",
+            format!("{version} is active but its files are missing; reinstall it to repair"),
+        ));
     }
 
     // The manifest recorded at install time describes how to launch, so the

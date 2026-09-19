@@ -392,7 +392,12 @@ fn activating_a_version_whose_files_are_gone_is_refused() {
     assert!(!installer.is_usable(&v("1.0.0")));
 
     let err = installer.activate(&v("1.0.0"), true).unwrap_err();
-    assert!(err.to_string().contains("files are missing"), "got {err}");
+    let message = err.to_string();
+    assert!(message.contains("files are missing"), "got {message}");
+    assert!(
+        !message.contains("missing is not installed"),
+        "the message is mangled by its error variant: {message}"
+    );
 }
 
 #[test]
