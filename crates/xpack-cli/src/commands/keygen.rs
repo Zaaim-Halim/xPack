@@ -14,7 +14,7 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FILE", default_value = "xpack-signing.json")]
     out: PathBuf,
 
-    /// Where to write the public key. Defaults to <OUT>.pub.json.
+    /// Where to write the public key. Defaults to `<OUT>.pub.json`.
     #[arg(long, value_name = "FILE")]
     public: Option<PathBuf>,
 

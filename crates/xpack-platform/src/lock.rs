@@ -14,8 +14,8 @@
 //! [`InstallLock::load_state`] and [`InstallLock::save_state`] require the
 //! guard, so "read before locking" does not compile.
 //!
-//! This is the same move [`xpack_package::PackageReader`] makes for
-//! verification, for the same reason.
+//! This is the same move the package reader makes for verification, where
+//! extraction is only reachable from a verified package, for the same reason.
 //!
 //! # Two hazards this file exists to avoid
 //!

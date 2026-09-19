@@ -1,0 +1,188 @@
+name: CI
+
+# xPack installs and updates software on other people's machines, so the point
+# of this workflow is to *run* the suite on every platform it claims to
+# support. Cross-compiling catches type errors and nothing else: a bug that
+# deleted an open file passed every test on macOS and would have broken every
+# update on Windows.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # RUSTFLAGS is deliberately not set to -D warnings here. It would apply to
+  # dependencies as well, so an upstream crate emitting a new warning would
+  # fail this build for a reason nobody here can fix. The lint job denies
+  # warnings for this workspace's own code, which is the part we control.
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platforms because one failed. A failure on one
+      # and a pass on the others is the most informative result there is.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      # `--all-targets` skips doctests, and the logging crate's usage examples
+      # are doctests. Running them separately keeps the documentation honest.
+      - name: Doc tests
+        run: cargo test --workspace --doc
+
+      # Proves the built binary starts and does real work on this platform.
+      # The Rust suite covers behaviour; this covers the thing a user actually
+      # invokes, including argument parsing and process startup.
+      - name: Smoke test the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_DIR="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+          BIN="$TARGET_DIR/debug/xpack"
+          WORK="$(mktemp -d)"
+          cd "$WORK"
+          mkdir -p payload
+          printf 'payload contents\n' > payload/data.txt
+
+          # Written with printf rather than a heredoc: a heredoc terminator
+          # inside an indented YAML block is itself indented, so the shell
+          # never sees it at the start of a line and the document never ends.
+          printf '%s\n' \
+            '{' \
+            '  "application": { "id": "com.example.ci", "name": "CI", "version": "1.0.0" },' \
+            '  "launch": { "executable": "data.txt" }' \
+            '}' > xpack.json
+
+          "$BIN" keygen --out signing.json
+          "$BIN" pack payload --key signing.json --out ci.xpkg
+          "$BIN" inspect ci.xpkg
+          "$BIN" verify ci.xpkg --key signing.pub.json
+
+          # A package signed by a different key must fail with the security
+          # exit code, not a generic one. A script that retries on failure must
+          # never retry a signature mismatch.
+          "$BIN" keygen --out other.json --force
+          code=0
+          "$BIN" verify ci.xpkg --key other.pub.json || code=$?
+          if [ "$code" -ne 3 ]; then
+            echo "expected exit code 3 for a signature mismatch, got $code" >&2
+            exit 1
+          fi
+
+          echo "smoke test passed on ${{ matrix.os }}"
+
+  lint:
+    name: format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Public documentation is part of what this project ships, so a broken
+      # intra-doc link or an undocumented public item fails here rather than
+      # being discovered by whoever reads it next.
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-version in Cargo.toml is a promise to anyone building this. The
+      # binding constraint is std's file locking, stable since 1.89.
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --all-targets
+
+  musl:
+    name: static linux build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+      - name: Install musl tooling
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # A launcher that ships to end users must not depend on the glibc version
+      # of whichever machine built it. Linking against musl makes the binary
+      # work on Alpine and on distributions older than the build host.
+      # The launcher ships to end users on whatever distribution they happen to
+      # run, so it is the binary that must not depend on the build host's libc.
+      # It has no TLS stack and links cleanly.
+      - name: Build the launcher
+        run: cargo build --release --target x86_64-unknown-linux-musl -p xpack-launcher
+
+      # The CLI pulls in rustls and therefore ring, which compiles C for the
+      # target. This is the step most likely to need attention: if it fails, the
+      # cause is the C toolchain rather than anything in this repository.
+      - name: Build the CLI
+        run: cargo build --release --target x86_64-unknown-linux-musl -p xpack-cli
+
+      - name: Verify the binaries are actually static
+        run: |
+          set -euo pipefail
+          for bin in xpack-launcher xpack; do
+            path="target/x86_64-unknown-linux-musl/release/$bin"
+            file "$path"
+            if ldd "$path" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "$bin is dynamically linked; it would not run on a different libc" >&2
+              ldd "$path" || true
+              exit 1
+            fi
+          done
+
+  cross-check:
+    name: cross-compile / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # These architectures have no runner available, so the claim being tested
+      # is narrower and stated as such: the code compiles for them. The TLS
+      # stack needs a C cross-toolchain, so the transport-independent engine is
+      # what gets checked here.
+      - run: cargo check -p xpack-core -p xpack-security -p xpack-package -p xpack-platform -p xpack-install -p xpack-launcher -p xpack-log --all-targets --target ${{ matrix.target }}
+      - run: cargo check -p xpack-update --no-default-features --target ${{ matrix.target }}
