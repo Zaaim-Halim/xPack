@@ -57,6 +57,23 @@ impl PackageReader {
         Manifest::from_slice(&self.read_manifest_bytes()?)
     }
 
+    /// The signing key the package declares, **without verifying anything**.
+    ///
+    /// Only trust-on-first-use should call this, and only to decide which key
+    /// to pin. The returned key proves nothing by itself; the caller must
+    /// still verify the package against it, and doing so proves only internal
+    /// consistency.
+    pub fn declared_signing_key_unverified(&mut self) -> Result<PublicKey> {
+        let manifest = self.peek_manifest_unverified()?;
+        let declared = manifest.signing_key.ok_or_else(|| {
+            Error::Integrity(
+                "the package declares no signing key, so there is nothing to pin on first use"
+                    .to_string(),
+            )
+        })?;
+        PublicKey::parse_hex(&declared)
+    }
+
     /// Verifies the package against a pinned trust store.
     ///
     /// Order is fixed: raw bytes, then signature, then parse. Parsing first
@@ -71,7 +88,7 @@ impl PackageReader {
             .verify(&manifest_bytes, &signature)
             .map_err(|e| Error::Integrity(format!("{}: {e}", self.path.display())))?;
 
-        self.finish_verification(&manifest_bytes, signing_key)
+        self.finish_verification(&manifest_bytes, signature, signing_key)
     }
 
     /// Verifies against an explicit key list, bypassing the trust store.
@@ -84,12 +101,13 @@ impl PackageReader {
         let signing_key = signature::verify_any(keys, &manifest_bytes, &signature)
             .map_err(|e| Error::Integrity(format!("{}: {e}", self.path.display())))?
             .clone();
-        self.finish_verification(&manifest_bytes, signing_key)
+        self.finish_verification(&manifest_bytes, signature, signing_key)
     }
 
     fn finish_verification(
         mut self,
         manifest_bytes: &[u8],
+        signature: Signature,
         signing_key: PublicKey,
     ) -> Result<VerifiedPackage> {
         // Only now are the bytes authentic, so only now may they be parsed.
@@ -104,7 +122,14 @@ impl PackageReader {
             "package signature verified"
         );
 
-        Ok(VerifiedPackage { archive: self.archive, path: self.path, manifest, signing_key })
+        Ok(VerifiedPackage {
+            archive: self.archive,
+            path: self.path,
+            manifest,
+            manifest_bytes: manifest_bytes.to_vec(),
+            signature,
+            signing_key,
+        })
     }
 
     /// Reads the raw manifest bytes, bounded before allocation.
@@ -215,6 +240,9 @@ pub struct VerifiedPackage {
     archive: Archive,
     path: PathBuf,
     manifest: Manifest,
+    /// The exact bytes the signature was verified over.
+    manifest_bytes: Vec<u8>,
+    signature: Signature,
     signing_key: PublicKey,
 }
 
@@ -222,6 +250,20 @@ impl VerifiedPackage {
     /// The authenticated manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The exact manifest bytes the signature was verified over.
+    ///
+    /// Callers writing these to disk must write them verbatim. Re-serialising
+    /// a parsed manifest would produce different bytes, and the signature
+    /// beside them would no longer verify.
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    /// The signature over [`Self::manifest_bytes`].
+    pub fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     /// The trusted key whose signature matched.

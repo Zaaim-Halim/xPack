@@ -58,6 +58,10 @@ impl<'a> PackageBuilder<'a> {
         })?;
         self.manifest.payload = PayloadSpec { total_size, files };
 
+        // Record the signing key so trust-on-first-use has something to pin.
+        // Written before validation and signing so it is covered by both.
+        self.manifest.signing_key = Some(key.public().to_hex());
+
         // Validate before signing. Signing an invalid manifest would produce a
         // package that is cryptographically sound and semantically broken —
         // the worst possible combination, because every client would accept

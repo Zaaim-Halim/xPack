@@ -13,7 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use xpack_core::manifest::{MAX_PAYLOAD_PATH_LEN, PAYLOAD_PREFIX};
+use xpack_core::manifest::{MAX_PAYLOAD_PATH_LEN, PAYLOAD_PREFIX, RESERVED_METADATA_DIR};
 use xpack_core::{Error, Result};
 
 /// Longest raw entry name accepted, including the `payload/` prefix.
@@ -124,6 +124,9 @@ fn validate_relative(relative: &str, reject: &impl Fn(&str) -> Error) -> Result<
     if components.is_empty() {
         return Err(reject("entry has no path components"));
     }
+    if components[0].eq_ignore_ascii_case(RESERVED_METADATA_DIR) {
+        return Err(reject("entry uses the reserved xPack metadata directory"));
+    }
 
     let rebuilt = components.join("/");
 
@@ -206,6 +209,15 @@ mod tests {
         rejected("payload//etc/passwd");
         rejected("payload/C:/Windows/evil.dll");
         rejected("payload/C:evil");
+    }
+
+    #[test]
+    fn rejects_entries_in_the_reserved_metadata_directory() {
+        // Otherwise a package could overwrite the record of which manifest a
+        // version was installed from.
+        rejected("payload/.xpack/manifest.json");
+        rejected("payload/.XPACK/manifest.sig");
+        ok("payload/.xpackage/data");
     }
 
     #[test]

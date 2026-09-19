@@ -53,6 +53,7 @@ fn template(platform: Platform) -> Manifest {
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
+        signing_key: None,
         payload: PayloadSpec::default(),
         created_at: None,
     }

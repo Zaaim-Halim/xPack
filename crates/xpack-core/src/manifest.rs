@@ -37,6 +37,14 @@ pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 1;
 /// Upper bound on a manifest document, to bound work before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 
+/// Directory inside an installed version reserved for xPack's own metadata.
+///
+/// Each installed version keeps the manifest and signature it was installed
+/// from, so it can later serve as a base for a differential update. A payload
+/// must therefore never be able to write here, or a package could forge the
+/// record of what it claims to be.
+pub const RESERVED_METADATA_DIR: &str = ".xpack";
+
 /// Longest payload path accepted, in bytes.
 ///
 /// Shared with the extractor so both layers enforce one rule. Two limits for
@@ -199,6 +207,22 @@ pub struct Manifest {
     pub update: UpdateSpec,
     /// Payload inventory.
     pub payload: PayloadSpec,
+    /// Hex-encoded public key the publisher declares as theirs.
+    ///
+    /// **This is not a trust input.** A key carried inside a package is
+    /// exactly as forgeable as the package around it: anyone can generate a
+    /// key, sign their own package with it, and declare it here. Verifying a
+    /// package against the key it ships with proves only that it is
+    /// internally consistent, which is worth nothing on its own.
+    ///
+    /// It exists so that trust-on-first-use has something to pin. That mode
+    /// accepts precisely this weakness — it trusts the first download and
+    /// nothing after it, exactly as SSH host keys do. Every later update must
+    /// verify against the pinned key, and an installation that already has
+    /// pinned keys ignores this field entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_key: Option<String>,
+
     /// RFC 3339 timestamp recorded at packaging time, for diagnostics only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
@@ -386,6 +410,16 @@ pub fn validate_relative_path(subject: &str, path: &str) -> Result<()> {
     if normalised.contains('\0') {
         return Err(Error::invalid(subject, format!("{path:?} contains a NUL byte")));
     }
+    if normalised
+        .split('/')
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(RESERVED_METADATA_DIR))
+    {
+        return Err(Error::invalid(
+            subject,
+            format!("{path:?} uses the reserved {RESERVED_METADATA_DIR:?} directory"),
+        ));
+    }
     Ok(())
 }
 
@@ -446,6 +480,7 @@ mod tests {
                 environment: BTreeMap::new(),
             },
             update: UpdateSpec::default(),
+            signing_key: None,
             payload: PayloadSpec {
                 total_size: 30,
                 files: vec![
@@ -497,6 +532,22 @@ mod tests {
         let mut m = sample();
         m.payload.files[0].path = "a/".repeat(MAX_PAYLOAD_PATH_LEN);
         assert!(m.validate().unwrap_err().to_string().contains("limit is"));
+    }
+
+    #[test]
+    fn rejects_payload_paths_inside_the_reserved_metadata_directory() {
+        // A package that could write here would be able to forge the record of
+        // which manifest a version was installed from.
+        for reserved in [".xpack/manifest.json", ".XPack/manifest.sig", ".xpack/anything"] {
+            let mut m = sample();
+            m.payload.files[0].path = reserved.into();
+            assert!(m.validate().is_err(), "{reserved:?} must be rejected");
+        }
+        // A name that merely starts with the same letters is fine.
+        let mut m = sample();
+        m.payload.files[0].path = ".xpackage/data".into();
+        m.launch.executable = "runtime/bin/java".into();
+        m.validate().expect("only the exact reserved name is blocked");
     }
 
     #[test]

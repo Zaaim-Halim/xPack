@@ -72,6 +72,27 @@ impl InstallPaths {
         self.versions_dir().join(version.to_directory_name())
     }
 
+    /// Directory inside a version holding xPack's own metadata.
+    ///
+    /// Payload files can never live here: the reserved name is rejected by
+    /// manifest validation and by the archive entry validator.
+    pub fn version_metadata_dir(&self, version: &Version) -> PathBuf {
+        self.version_dir(version).join(xpack_core_metadata_dir())
+    }
+
+    /// The manifest a version was installed from.
+    ///
+    /// Kept byte-identical to the package's own, so the signature beside it
+    /// still verifies and the version can serve as a differential update base.
+    pub fn version_manifest_file(&self, version: &Version) -> PathBuf {
+        self.version_metadata_dir(version).join(crate::manifest::MANIFEST_ENTRY)
+    }
+
+    /// The signature over [`Self::version_manifest_file`].
+    pub fn version_signature_file(&self, version: &Version) -> PathBuf {
+        self.version_metadata_dir(version).join(crate::manifest::SIGNATURE_ENTRY)
+    }
+
     /// Directory holding mutable installation state.
     pub fn state_dir(&self) -> PathBuf {
         self.root.join("state")
@@ -134,6 +155,10 @@ impl InstallPaths {
     pub fn is_installed(&self) -> bool {
         self.state_file().is_file()
     }
+}
+
+fn xpack_core_metadata_dir() -> &'static str {
+    crate::manifest::RESERVED_METADATA_DIR
 }
 
 /// The default per-user root that holds every xPack application directory.
