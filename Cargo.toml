@@ -6,6 +6,7 @@ members = [
     "crates/xpack-package",
     "crates/xpack-platform",
     "crates/xpack-install",
+    "crates/xpack-update",
     "crates/xpack-cli",
 ]
 

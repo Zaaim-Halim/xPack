@@ -1,0 +1,34 @@
+[package]
+name = "xpack-update"
+description = "Checking for, downloading and applying xPack updates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+xpack-core.workspace = true
+xpack-security.workspace = true
+xpack-package.workspace = true
+xpack-platform.workspace = true
+xpack-install.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq = { workspace = true, optional = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = ["https"]
+# The HTTPS transport pulls in rustls and therefore ring, which needs a C
+# toolchain for the target. Keeping it optional means the engine, the index
+# rules and any custom transport build anywhere, and lets a cross-check verify
+# the parts that contain the logic.
+https = ["dep:ureq"]
+
+[lints]
+workspace = true
