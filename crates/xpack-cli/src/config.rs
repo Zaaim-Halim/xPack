@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use xpack_core::manifest::{Application, FormatVersion, LaunchSpec, PayloadSpec, UpdateSpec};
+use xpack_core::manifest::{
+    Application, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec, UpdateSpec,
+};
 use xpack_core::{Manifest, Platform, Result, atomic};
 
 /// A project's packaging configuration.
@@ -25,6 +27,9 @@ pub(crate) struct ProjectConfig {
     /// Update configuration.
     #[serde(default)]
     pub(crate) update: UpdateSpec,
+    /// How a newly activated version proves it started.
+    #[serde(default)]
+    pub(crate) health: HealthSpec,
 }
 
 impl ProjectConfig {
@@ -44,6 +49,7 @@ impl ProjectConfig {
             platform: self.platform.unwrap_or(platform),
             launch: self.launch.clone(),
             update: self.update.clone(),
+            health: self.health.clone(),
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,

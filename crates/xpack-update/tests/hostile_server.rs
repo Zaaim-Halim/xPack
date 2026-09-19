@@ -93,6 +93,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
+        health: xpack_core::HealthSpec::default(),
         signing_key: None,
         payload: PayloadSpec::default(),
         created_at: None,

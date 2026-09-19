@@ -18,8 +18,8 @@ pub mod version;
 pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
-    Application, FormatVersion, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadFile, PayloadSpec,
-    SIGNATURE_ENTRY, UpdateSpec,
+    Application, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadFile,
+    PayloadSpec, SIGNATURE_ENTRY, UpdateSpec,
 };
 pub use paths::InstallPaths;
 pub use platform::{Arch, Os, Platform};

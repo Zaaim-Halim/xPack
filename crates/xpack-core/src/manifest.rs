@@ -136,6 +136,31 @@ impl LaunchSpec {
     }
 }
 
+/// How a newly activated version proves it works.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthSpec {
+    /// How long a version on probation has to prove it started.
+    ///
+    /// A version that is still running when this elapses is treated as
+    /// healthy. This is the only startup signal available without the
+    /// application cooperating, and it is a real one: the overwhelming
+    /// majority of broken updates fail immediately — a missing runtime, an
+    /// unreadable file, an incompatible library — not minutes later.
+    #[serde(default = "default_startup_timeout")]
+    pub startup_timeout_seconds: u64,
+}
+
+impl Default for HealthSpec {
+    fn default() -> Self {
+        Self { startup_timeout_seconds: default_startup_timeout() }
+    }
+}
+
+fn default_startup_timeout() -> u64 {
+    15
+}
+
 /// Where the updater looks for newer versions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -205,6 +230,9 @@ pub struct Manifest {
     /// Update configuration.
     #[serde(default)]
     pub update: UpdateSpec,
+    /// How a newly activated version proves it started successfully.
+    #[serde(default)]
+    pub health: HealthSpec,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -480,6 +508,7 @@ mod tests {
                 environment: BTreeMap::new(),
             },
             update: UpdateSpec::default(),
+            health: HealthSpec::default(),
             signing_key: None,
             payload: PayloadSpec {
                 total_size: 30,
