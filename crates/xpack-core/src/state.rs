@@ -31,6 +31,14 @@ use crate::version::Version;
 /// Format version of the state document itself.
 pub const STATE_FORMAT_VERSION: u32 = 1;
 
+/// How many times a version on probation may be launched before rollback.
+///
+/// Two, so that a single interruption — a power cut, a user closing the
+/// splash screen, an OS-initiated reboot — does not condemn a version that
+/// would have started perfectly well on the next attempt, while a version that
+/// genuinely fails to start is abandoned quickly.
+pub const MAX_ACTIVATION_ATTEMPTS: u32 = 2;
+
 /// How far an in-flight update had progressed.
 ///
 /// The value is persisted *before* the step it names is attempted, so
@@ -68,6 +76,18 @@ pub enum UpdatePhase {
         version: Version,
         /// Version to return to if the probation fails.
         rollback_to: Version,
+        /// How many times activation of `version` has been attempted.
+        ///
+        /// Without this counter the probation cannot terminate. Consider a
+        /// power cut between activating 1.2.0 and resolving its health check:
+        /// the next launch finds `PendingVerification` and has no way to tell
+        /// "this version crashes" from "the machine lost power". Retrying
+        /// unconditionally loops forever on a genuinely broken version;
+        /// rolling back unconditionally condemns a good version because of one
+        /// unrelated power cut. Counting attempts allows a bounded number of
+        /// retries and then a rollback, so the probation always ends.
+        #[serde(default)]
+        attempts: u32,
     },
     /// A rollback is in progress.
     RollingBack {
@@ -95,6 +115,24 @@ impl UpdatePhase {
     /// Returns `true` when no update is in flight.
     pub fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
+    }
+
+    /// Returns `true` when the probation has used up its retry budget.
+    ///
+    /// At this point the launcher must roll back instead of trying again.
+    pub fn attempts_exhausted(&self) -> bool {
+        matches!(self, Self::PendingVerification { attempts, .. } if *attempts >= MAX_ACTIVATION_ATTEMPTS)
+    }
+
+    /// Records one more activation attempt of a version on probation.
+    ///
+    /// Callers must persist the state *before* launching, not after. A
+    /// counter incremented after a successful launch never counts the crash
+    /// that prevented the increment from happening.
+    pub fn record_attempt(&mut self) {
+        if let Self::PendingVerification { attempts, .. } = self {
+            *attempts = attempts.saturating_add(1);
+        }
     }
 }
 
@@ -193,6 +231,14 @@ impl InstallState {
         self.versions.get(&version.to_string())
     }
 
+    /// Returns `true` when the version has proved healthy at least once.
+    ///
+    /// Only such a version is a valid rollback target: falling back to
+    /// something that has never run is not a recovery, it is a second gamble.
+    pub fn is_good(&self, version: &Version) -> bool {
+        self.record(version).is_some_and(|r| r.status == VersionStatus::Good)
+    }
+
     /// Returns `true` when the version failed a health check and is quarantined.
     ///
     /// Re-activating a known-bad version is how an update loop gets started, so
@@ -224,11 +270,13 @@ impl InstallState {
 
     /// Best rollback target: the newest healthy version that is not `exclude`.
     pub fn best_rollback_target(&self, exclude: &Version) -> Option<Version> {
+        // One rule on both paths: a rollback target must have proved healthy.
         // `previous_version` is the intended target, but it may itself have
-        // been quarantined by an earlier failure, so fall back to a scan.
+        // been quarantined by an earlier failure — or never have run at all —
+        // so it is held to exactly the same standard as the fallback scan.
         if let Some(previous) = &self.previous_version
             && previous != exclude
-            && !self.is_bad(previous)
+            && self.is_good(previous)
         {
             return Some(previous.clone());
         }
@@ -339,6 +387,62 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_previous_version_is_not_a_rollback_target_either() {
+        // The fast path and the fallback scan must apply the same rule. A
+        // version that has never run is not a recovery target, however it
+        // came to be recorded as `previous_version`.
+        let mut s = InstallState::new("com.example.app");
+        s.stage_version(&v("1.1.0"), None);
+        s.previous_version = Some(v("1.1.0"));
+        assert_eq!(s.best_rollback_target(&v("1.2.0")), None);
+    }
+
+    #[test]
+    fn probation_terminates_after_a_bounded_number_of_attempts() {
+        let mut phase = UpdatePhase::PendingVerification {
+            version: v("1.2.0"),
+            rollback_to: v("1.1.0"),
+            attempts: 0,
+        };
+        assert!(!phase.attempts_exhausted(), "a fresh probation must be retryable");
+
+        for _ in 0..MAX_ACTIVATION_ATTEMPTS {
+            phase.record_attempt();
+        }
+        assert!(phase.attempts_exhausted(), "probation must end rather than loop forever");
+    }
+
+    #[test]
+    fn recording_an_attempt_is_a_no_op_outside_probation() {
+        let mut phase = UpdatePhase::Idle;
+        phase.record_attempt();
+        assert_eq!(phase, UpdatePhase::Idle);
+        assert!(!phase.attempts_exhausted());
+    }
+
+    #[test]
+    fn attempt_counts_survive_a_restart() {
+        // The counter is only useful if it is durable: it exists precisely to
+        // survive the crash that interrupted the health check.
+        let phase = UpdatePhase::PendingVerification {
+            version: v("1.2.0"),
+            rollback_to: v("1.1.0"),
+            attempts: 1,
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        assert_eq!(serde_json::from_str::<UpdatePhase>(&json).unwrap(), phase);
+    }
+
+    #[test]
+    fn state_written_before_the_counter_existed_still_loads() {
+        // Forward compatibility within formatVersion 1: an older document has
+        // no `attempts` field and must default to zero, not fail to parse.
+        let json = r#"{"phase":"PENDING_VERIFICATION","version":"1.2.0","rollback_to":"1.1.0"}"#;
+        let phase: UpdatePhase = serde_json::from_str(json).unwrap();
+        assert!(matches!(phase, UpdatePhase::PendingVerification { attempts: 0, .. }));
+    }
+
+    #[test]
     fn rejects_state_from_a_newer_xpack() {
         let mut s = InstallState::new("com.example.app");
         s.state_format_version = STATE_FORMAT_VERSION + 1;
@@ -347,8 +451,11 @@ mod tests {
 
     #[test]
     fn phase_round_trips_through_json() {
-        let phase =
-            UpdatePhase::PendingVerification { version: v("1.2.0"), rollback_to: v("1.1.0") };
+        let phase = UpdatePhase::PendingVerification {
+            version: v("1.2.0"),
+            rollback_to: v("1.1.0"),
+            attempts: 0,
+        };
         let json = serde_json::to_string(&phase).unwrap();
         assert_eq!(serde_json::from_str::<UpdatePhase>(&json).unwrap(), phase);
     }
