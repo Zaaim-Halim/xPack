@@ -1112,6 +1112,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "xpack-launcher"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "xpack-core",
+ "xpack-install",
+ "xpack-package",
+ "xpack-platform",
+ "xpack-security",
+]
+
+[[package]]
 name = "xpack-package"
 version = "0.1.0"
 dependencies = [

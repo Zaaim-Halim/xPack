@@ -1,0 +1,28 @@
+[package]
+name = "xpack-launcher"
+description = "The small native binary that starts an installed application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-launcher"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+xpack-install.workspace = true
+xpack-platform.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+xpack-security.workspace = true
+xpack-package.workspace = true
+
+[lints]
+workspace = true

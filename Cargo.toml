@@ -8,6 +8,7 @@ members = [
     "crates/xpack-install",
     "crates/xpack-update",
     "crates/xpack-cli",
+    "crates/xpack-launcher",
 ]
 
 [workspace.package]
