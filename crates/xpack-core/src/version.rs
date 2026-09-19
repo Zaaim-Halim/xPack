@@ -95,6 +95,14 @@ mod tests {
     }
 
     #[test]
+    fn identifies_prereleases() {
+        assert!(Version::parse("1.2.0-rc.1").unwrap().is_prerelease());
+        assert!(!Version::parse("1.2.0").unwrap().is_prerelease());
+        // Build metadata alone is not a pre-release.
+        assert!(!Version::parse("1.2.0+build.7").unwrap().is_prerelease());
+    }
+
+    #[test]
     fn rejects_non_semver() {
         assert!(Version::parse("1.0").is_err());
         assert!(Version::parse("").is_err());

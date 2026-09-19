@@ -506,6 +506,59 @@ mod tests {
     }
 
     #[test]
+    fn health_predicates_distinguish_the_three_statuses() {
+        let mut s = InstallState::new("com.example.app");
+        let staged = v("1.0.0");
+        s.stage_version(&staged, None);
+        assert!(!s.is_good(&staged), "staged has not proved healthy");
+        assert!(!s.is_bad(&staged), "staged has not failed either");
+
+        s.mark_good(&staged);
+        assert!(s.is_good(&staged));
+        assert!(!s.is_bad(&staged));
+
+        s.mark_bad(&staged, "crashed on startup");
+        assert!(s.is_bad(&staged));
+        assert!(!s.is_good(&staged));
+        assert_eq!(
+            s.record(&staged).unwrap().failure_reason.as_deref(),
+            Some("crashed on startup")
+        );
+
+        // An unknown version is neither good nor bad.
+        assert!(!s.is_good(&v("9.9.9")));
+        assert!(!s.is_bad(&v("9.9.9")));
+    }
+
+    #[test]
+    fn marking_a_version_good_clears_an_earlier_failure_reason() {
+        let mut s = InstallState::new("com.example.app");
+        let ver = v("1.0.0");
+        s.stage_version(&ver, None);
+        s.mark_bad(&ver, "transient disk error");
+        s.mark_good(&ver);
+        assert!(s.record(&ver).unwrap().failure_reason.is_none());
+    }
+
+    #[test]
+    fn an_incomplete_install_has_no_active_version() {
+        let s = InstallState::new("com.example.app");
+        assert!(s.active().is_err());
+        assert!(s.update.is_idle());
+        assert_eq!(s.update.version(), None);
+    }
+
+    #[test]
+    fn each_phase_reports_the_version_it_concerns() {
+        assert_eq!(UpdatePhase::Downloading { version: v("1.2.0") }.version(), Some(&v("1.2.0")));
+        assert_eq!(UpdatePhase::Staged { version: v("1.2.0") }.version(), Some(&v("1.2.0")));
+        // A rollback is identified by the version being abandoned.
+        let rolling = UpdatePhase::RollingBack { from: v("1.2.0"), to: v("1.1.0") };
+        assert_eq!(rolling.version(), Some(&v("1.2.0")));
+        assert!(!rolling.is_idle());
+    }
+
+    #[test]
     fn phase_round_trips_through_json() {
         let phase = UpdatePhase::PendingVerification {
             version: v("1.2.0"),

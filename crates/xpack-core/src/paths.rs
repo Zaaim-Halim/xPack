@@ -17,6 +17,7 @@
 //! └── staging/              half-extracted versions, deleted on recovery
 //! ```
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -133,10 +134,31 @@ impl InstallPaths {
 /// Honours `XPACK_INSTALL_ROOT`, which the test suite and system integrators
 /// use to relocate installations without touching the user's real data.
 pub fn default_install_root() -> Result<PathBuf> {
-    if let Some(overridden) = std::env::var_os("XPACK_INSTALL_ROOT") {
-        let path = PathBuf::from(overridden);
-        if path.as_os_str().is_empty() {
-            return Err(Error::invalid("XPACK_INSTALL_ROOT", "must not be empty"));
+    install_root_from(std::env::var_os(INSTALL_ROOT_ENV).as_deref())
+}
+
+/// Name of the environment variable that relocates installations.
+pub const INSTALL_ROOT_ENV: &str = "XPACK_INSTALL_ROOT";
+
+/// Resolves the install root from an explicit override, or the user default.
+///
+/// The environment read is kept out of this function on purpose. Since Rust
+/// 2024 `std::env::set_var` is `unsafe`, and this workspace forbids unsafe
+/// code, so a function that reads the environment directly cannot be tested at
+/// all — its override and rejection branches would ship unexercised. Taking the
+/// value as an argument makes the logic pure and fully testable, and leaves the
+/// untestable part a single unconditional lookup.
+pub fn install_root_from(overridden: Option<&OsStr>) -> Result<PathBuf> {
+    if let Some(value) = overridden {
+        if value.is_empty() {
+            return Err(Error::invalid(INSTALL_ROOT_ENV, "must not be empty"));
+        }
+        let path = PathBuf::from(value);
+        if path.is_relative() {
+            return Err(Error::invalid(
+                INSTALL_ROOT_ENV,
+                format!("{} must be an absolute path", path.display()),
+            ));
         }
         return Ok(path);
     }
@@ -176,6 +198,54 @@ mod tests {
         let v = Version::parse("1.2.0").unwrap();
         assert_ne!(p.staging_dir(&v), p.version_dir(&v));
         assert!(!p.staging_dir(&v).starts_with(p.versions_dir()));
+    }
+
+    #[test]
+    fn an_override_relocates_the_install_root() {
+        let root = install_root_from(Some(OsStr::new("/opt/xpack-test"))).unwrap();
+        assert_eq!(root, Path::new("/opt/xpack-test"));
+    }
+
+    #[test]
+    fn an_empty_override_is_rejected_rather_than_silently_ignored() {
+        // An empty value would otherwise resolve to the process working
+        // directory, scattering installations wherever xpack happened to run.
+        let err = install_root_from(Some(OsStr::new(""))).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got {err}");
+    }
+
+    #[test]
+    fn a_relative_override_is_rejected() {
+        let err = install_root_from(Some(OsStr::new("relative/dir"))).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "got {err}");
+    }
+
+    #[test]
+    fn without_an_override_the_user_data_directory_is_used() {
+        let root = install_root_from(None).unwrap();
+        assert!(root.is_absolute());
+        assert!(root.ends_with("xpack"), "got {}", root.display());
+    }
+
+    #[test]
+    fn an_installation_is_recognised_only_once_state_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = InstallPaths::new(dir.path(), "com.example.app").unwrap();
+        assert!(!paths.is_installed());
+
+        std::fs::create_dir_all(paths.state_dir()).unwrap();
+        std::fs::write(paths.state_file(), b"{}").unwrap();
+        assert!(paths.is_installed());
+    }
+
+    #[test]
+    fn an_existing_application_directory_can_be_wrapped_directly() {
+        let paths = InstallPaths::from_application_dir("/opt/xpack/com.example.app");
+        assert_eq!(paths.root(), Path::new("/opt/xpack/com.example.app"));
+        assert!(paths.config_dir().starts_with(paths.root()));
+        assert!(paths.logs_dir().starts_with(paths.state_dir()));
+        assert!(paths.staging_root().starts_with(paths.root()));
+        assert!(paths.current_link().starts_with(paths.root()));
     }
 
     #[test]

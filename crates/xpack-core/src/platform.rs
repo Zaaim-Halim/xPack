@@ -199,6 +199,13 @@ mod tests {
     }
 
     #[test]
+    fn only_windows_executables_carry_an_extension() {
+        assert_eq!(Os::Windows.executable_suffix(), ".exe");
+        assert_eq!(Os::Linux.executable_suffix(), "");
+        assert_eq!(Os::Macos.executable_suffix(), "");
+    }
+
+    #[test]
     fn host_platform_is_detectable_on_supported_targets() {
         Platform::host().expect("test suite only runs on supported targets");
     }

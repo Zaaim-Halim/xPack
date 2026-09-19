@@ -112,6 +112,12 @@ mod tests {
     }
 
     #[test]
+    fn exposes_its_raw_bytes() {
+        let raw = [0x5au8; SHA256_LEN];
+        assert_eq!(Sha256Digest::from_bytes(raw).as_bytes(), &raw);
+    }
+
+    #[test]
     fn serialises_as_a_bare_hex_string() {
         let json = serde_json::to_string(&Sha256Digest::from_bytes([0u8; SHA256_LEN])).unwrap();
         assert_eq!(json, format!("\"{ZERO_HEX}\""));
