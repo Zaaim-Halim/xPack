@@ -1,1 +1,30 @@
+# Rust build output
 /target
+target/
+build/
+*.rs.bk
+*.pdb
+
+# Claude Code local configuration and working rules
+.claude/
+CLAUDE.md
+
+# Project documentation / specifications (kept local)
+docs/
+
+# Packaged artefacts produced by xpack itself
+*.xpkg
+
+# Signing keys must never enter version control
+*.key
+*.pem
+xpack-signing*.json
+
+# IDE / editor configuration (per-developer, machine-specific)
+.idea/
+.vscode/
+*.iml
+
+# OS noise
+.DS_Store
+Thumbs.db
