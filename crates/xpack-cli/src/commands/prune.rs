@@ -13,7 +13,7 @@ use super::Context;
 pub(crate) struct Args {
     /// Application to prune.
     #[arg(value_name = "APPLICATION_ID")]
-    application: String,
+    pub(crate) application: String,
 }
 
 /// Runs `xpack prune`.

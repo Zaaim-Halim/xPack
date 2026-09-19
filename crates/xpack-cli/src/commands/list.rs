@@ -14,7 +14,7 @@ use super::Context;
 pub(crate) struct Args {
     /// Application to list.
     #[arg(value_name = "APPLICATION_ID")]
-    application: String,
+    pub(crate) application: String,
 
     /// Emit machine-readable JSON.
     #[arg(long)]

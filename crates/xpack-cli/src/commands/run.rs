@@ -35,7 +35,7 @@ use super::Context;
 pub(crate) struct Args {
     /// Application to launch.
     #[arg(value_name = "APPLICATION_ID")]
-    application: String,
+    pub(crate) application: String,
 
     /// Arguments passed through to the application.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

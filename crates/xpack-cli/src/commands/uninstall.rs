@@ -13,7 +13,7 @@ use super::Context;
 pub(crate) struct Args {
     /// Application to remove.
     #[arg(value_name = "APPLICATION_ID")]
-    application: String,
+    pub(crate) application: String,
 
     /// Required, because this cannot be undone.
     #[arg(long)]

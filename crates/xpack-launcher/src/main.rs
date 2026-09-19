@@ -10,17 +10,28 @@ use std::process::ExitCode;
 use xpack_launcher::Launcher;
 
 fn main() -> ExitCode {
-    init_logging();
-
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     let launcher = match Launcher::discover() {
         Ok(launcher) => launcher,
         Err(error) => {
+            // Logging is not configured yet: without an installation there is
+            // nowhere to write, and this failure means there is no
+            // installation.
             eprintln!("xpack: {error}");
             return ExitCode::FAILURE;
         }
     };
+
+    // The console stays silent because this process shares a terminal with the
+    // application it starts, and the user is reading the application's output,
+    // not ours. Everything goes to the file instead — which is the only record
+    // that exists when a launcher rolls back an update nobody was watching.
+    xpack_log::init(&xpack_log::Config {
+        console: xpack_log::Console::Silent,
+        file: Some(launcher.paths()),
+        format: xpack_log::Format::Text,
+    });
 
     match launcher.launch(&arguments, true) {
         Ok(outcome) => {
@@ -39,21 +50,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Logs to standard error, quiet unless something goes wrong.
-///
-/// The launcher shares a terminal with the application it starts, so it must
-/// not add noise to output the user is reading.
-fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_env("XPACK_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("xpack_launcher=warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .without_time()
-        .with_target(false)
-        .try_init();
 }

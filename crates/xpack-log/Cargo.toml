@@ -1,6 +1,6 @@
 [package]
-name = "xpack-launcher"
-description = "The small native binary that starts an installed application."
+name = "xpack-log"
+description = "Shared logging setup for the xPack binaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,15 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "xpack-launcher"
-path = "src/main.rs"
-
 [dependencies]
 xpack-core.workspace = true
-xpack-install.workspace = true
-xpack-platform.workspace = true
 tracing.workspace = true
-xpack-log.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-xpack-security.workspace = true
-xpack-package.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

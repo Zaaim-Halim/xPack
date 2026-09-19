@@ -13,7 +13,7 @@ use super::Context;
 pub(crate) struct Args {
     /// Application to change.
     #[arg(value_name = "APPLICATION_ID")]
-    application: String,
+    pub(crate) application: String,
 
     /// Version to make active.
     #[arg(value_name = "VERSION")]

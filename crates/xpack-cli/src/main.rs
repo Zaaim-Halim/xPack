@@ -71,11 +71,45 @@ enum Command {
     Recover(commands::recover::Args),
 }
 
+impl Command {
+    /// The installation a command acts on, when it has one.
+    ///
+    /// Used to decide where logs go before any work starts. Commands that
+    /// operate on a package rather than an installation return `None`.
+    fn application_id(&self) -> Option<String> {
+        match self {
+            Self::Keygen(_) | Self::Pack(_) | Self::Inspect(_) | Self::Verify(_) => None,
+            Self::Install(a) => a.application_id(),
+            Self::List(a) => Some(a.application.clone()),
+            Self::Run(a) => Some(a.application.clone()),
+            Self::Activate(a) => Some(a.application.clone()),
+            Self::Rollback(a) => Some(a.application.clone()),
+            Self::Prune(a) => Some(a.application.clone()),
+            Self::Uninstall(a) => Some(a.application.clone()),
+            Self::Recover(a) => Some(a.application.clone()),
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
 
     let context = commands::Context { root: cli.root.clone() };
+
+    // Logging is configured once, here, because installing a subscriber is a
+    // one-time operation for the whole process: a later call is ignored, not
+    // applied. So the destination has to be decided before anything is logged,
+    // which means asking the command up front whether it has an installation.
+    // Commands that build or inspect a package do not, and log to the console
+    // alone.
+    let console =
+        if cli.verbose { xpack_log::Console::Verbose } else { xpack_log::Console::Normal };
+    let paths = cli.command.application_id().and_then(|id| context.paths(&id).ok());
+    xpack_log::init(&xpack_log::Config {
+        console,
+        file: paths.as_ref(),
+        format: xpack_log::Format::Text,
+    });
 
     let outcome = match &cli.command {
         Command::Keygen(a) => commands::keygen::run(a),
@@ -118,19 +152,4 @@ fn exit_code_for(error: &Error) -> std::process::ExitCode {
         Error::Locked(_) => std::process::ExitCode::from(4),
         _ => std::process::ExitCode::FAILURE,
     }
-}
-
-/// Sends logs to standard error so standard output stays pipeable.
-fn init_logging(verbose: bool) {
-    use tracing_subscriber::EnvFilter;
-
-    let default = if verbose { "xpack=debug" } else { "xpack=info" };
-    let filter = EnvFilter::try_from_env("XPACK_LOG").unwrap_or_else(|_| EnvFilter::new(default));
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .without_time()
-        .with_target(false)
-        .try_init();
 }

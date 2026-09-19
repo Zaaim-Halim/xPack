@@ -36,6 +36,23 @@ pub(crate) struct Args {
     allow_downgrade: bool,
 }
 
+impl Args {
+    /// The installation this command will act on.
+    ///
+    /// Read from the package, unverified, because the installation is not
+    /// known any other way and a log destination has to be chosen before any
+    /// work begins.
+    ///
+    /// Using unverified data here is safe precisely because of what it is used
+    /// for: at worst a log lands in the wrong directory. It cannot affect what
+    /// gets installed, because the install path reads the package again and
+    /// verifies it before trusting anything.
+    pub(crate) fn application_id(&self) -> Option<String> {
+        let mut reader = PackageReader::open(&self.package).ok()?;
+        Some(reader.peek_manifest_unverified().ok()?.application.id)
+    }
+}
+
 /// Runs `xpack install`.
 pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // The application id decides which installation this belongs to, so it has

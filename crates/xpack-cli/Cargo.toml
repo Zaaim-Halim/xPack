@@ -22,7 +22,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+xpack-log.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
