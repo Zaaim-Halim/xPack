@@ -24,6 +24,18 @@ fn write_payload(dir: &Path, version: &str, runtime_bytes: &[u8]) -> PathBuf {
     std::fs::write(root.join("runtime/lib/small.so"), b"unchanging support library").unwrap();
     std::fs::write(root.join("application/app.jar"), format!("application code for {version}"))
         .unwrap();
+
+    // An executable that does not change between releases, so it is reused
+    // rather than carried — which is exactly the file whose mode a reuse
+    // path could quietly drop.
+    std::fs::create_dir_all(root.join("runtime/bin")).unwrap();
+    let launcher = root.join("runtime/bin/java");
+    std::fs::write(&launcher, b"#!/bin/sh\nexec true\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     root
 }
 
@@ -171,7 +183,7 @@ fn the_unchanged_runtime_is_not_carried_in_the_delta() {
     let (_, built) = world.build_delta();
 
     assert_eq!(built.changed, 1, "only the application file changed");
-    assert_eq!(built.reused, 2, "both runtime files should be reused");
+    assert_eq!(built.reused, 3, "every runtime file should be reused");
     assert!(
         built.size * 10 < built.full_size,
         "the delta is {} bytes against a full package of {}; it should be far smaller",
@@ -300,4 +312,38 @@ fn a_full_package_is_not_accepted_as_a_delta() {
         .unwrap()
         .verify_delta_with_keys(&[world.key.public()]);
     assert!(result.is_err(), "a package with no delta plan must not verify as a delta");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_reused_executable_keeps_its_permission_bits() {
+    // A reused file is adopted from the installed version rather than
+    // written out, and adopting it must still leave the mode the manifest
+    // asks for. Losing the executable bit here would install an application
+    // that verifies perfectly and cannot start.
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new();
+    let (path, _) = world.build_delta();
+
+    let assembled = world.root.join("assembled");
+    world.open_delta(&path).assemble_to(&assembled, &world.installed_base).unwrap();
+
+    let mode = std::fs::metadata(assembled.join("runtime/bin/java")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "the executable bit was lost: mode {mode:o}");
+}
+
+#[test]
+fn adopting_a_reused_file_does_not_disturb_the_version_it_came_from() {
+    // Whatever mechanism the filesystem allowed, the installed version this
+    // was assembled against has to be exactly as it was: it is still the
+    // version a user is running, and still the one a rollback returns to.
+    let world = World::new();
+    let before = tree(&world.installed_base);
+
+    let (path, _) = world.build_delta();
+    let assembled = world.root.join("assembled");
+    world.open_delta(&path).assemble_to(&assembled, &world.installed_base).unwrap();
+
+    assert_eq!(tree(&world.installed_base), before, "the base version was modified");
 }

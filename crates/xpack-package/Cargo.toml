@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+xpack-platform.workspace = true
 xpack-core.workspace = true
 xpack-security.workspace = true
 serde.workspace = true

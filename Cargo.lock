@@ -1664,6 +1664,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "xpack-core",
+ "xpack-platform",
  "xpack-security",
  "zip",
 ]

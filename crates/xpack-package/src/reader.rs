@@ -650,6 +650,95 @@ pub(crate) fn write_verified_entry(
     apply_mode(&target, expected.mode)
 }
 
+/// Adopts a file that is already on disk, instead of writing its bytes again.
+///
+/// Used where a delta reuses a file from the version already installed. The
+/// file is hashed against the target manifest *before* anything adopts it,
+/// so the guarantee is the one the streaming path gives: a tampered file on
+/// disk fails the digest and the assembly fails with it. What changes is
+/// only how the bytes get to the new path — a clone where the filesystem has
+/// them, a copy where it does not.
+///
+/// # Why a hard link is refused when the modes differ
+///
+/// A hard link is one file under two names, including its permission bits.
+/// Setting the mode the manifest asks for would change the old version's
+/// copy too. Where the modes already agree there is nothing to change and
+/// nothing to break; where they do not, this falls back rather than reach
+/// into a version it was not asked to modify.
+pub(crate) fn place_verified_entry(
+    source: &Path,
+    sharer: &xpack_platform::sharing::Sharer,
+    safe: &SafePath,
+    expected: &xpack_core::PayloadFile,
+    destination: &Path,
+    verified_dirs: &mut BTreeSet<PathBuf>,
+) -> Result<xpack_platform::sharing::Placement> {
+    use xpack_platform::sharing::Sharing;
+
+    let target = safe.resolve(destination);
+    let parent = atomic::parent_dir(&target)?;
+    atomic::create_dir_all(parent)?;
+    ensure_no_symlinked_component(destination, safe, verified_dirs)?;
+
+    // Before the file is adopted, never after. Everything this function is
+    // allowed to do rests on the bytes being the ones the signed manifest
+    // describes.
+    let (actual, size) = {
+        let mut reader = BufReader::new(File::open(source).map_err(|e| Error::io(source, e))?);
+        xpack_security::sha256_reader(&mut reader)?
+    };
+    if size != expected.size {
+        return Err(Error::Integrity(format!(
+            "{:?} is {size} bytes on disk but the manifest declares {}",
+            safe.as_str(),
+            expected.size
+        )));
+    }
+    xpack_security::verify_digest(safe.as_str(), actual, expected.sha256)?;
+
+    // Same rule as the streaming path: two manifest entries that resolve to
+    // one file on this filesystem must be refused rather than folded.
+    if target.symlink_metadata().is_ok() {
+        return Err(Error::Integrity(format!(
+            "{:?} collides with another payload entry on this filesystem; \
+             two manifest entries resolve to the same file",
+            safe.as_str()
+        )));
+    }
+
+    // A link would carry the source's mode with it. Only where they already
+    // agree is there nothing for `apply_mode` to change on a file belonging
+    // to another version.
+    let sharer = if sharer.sharing() == Sharing::Aliasing && !modes_agree(source, expected) {
+        &xpack_platform::sharing::Sharer::safe()
+    } else {
+        sharer
+    };
+
+    let placement = sharer.place(source, &target)?;
+    apply_mode(&target, expected.mode)?;
+    Ok(placement)
+}
+
+/// Whether a file already carries the permission bits the manifest asks for.
+#[cfg(unix)]
+fn modes_agree(source: &Path, expected: &xpack_core::PayloadFile) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::metadata(source) else {
+        return false;
+    };
+    metadata.permissions().mode() & 0o777 == expected.mode.unwrap_or(0o644) & 0o777
+}
+
+/// Windows records no mode, so there is none to disagree about.
+#[cfg(not(unix))]
+fn modes_agree(source: &Path, expected: &xpack_core::PayloadFile) -> bool {
+    let _ = (source, expected);
+    true
+}
+
 /// Restores the recorded permission bits.
 ///
 /// Without this the executable bit is lost and the launcher fails with a

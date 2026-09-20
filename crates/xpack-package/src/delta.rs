@@ -228,6 +228,10 @@ impl VerifiedDelta {
         let mut written: u64 = 0;
         let mut assembled = 0usize;
         let mut reused = 0usize;
+        // One per assembly, so the filesystem is asked what it supports once
+        // rather than once per file.
+        let sharer = xpack_platform::sharing::Sharer::safe();
+        let mut sharing_storage = 0usize;
         let mut verified_dirs = std::collections::BTreeSet::new();
 
         for expected in &declared {
@@ -255,16 +259,29 @@ impl VerifiedDelta {
                 write_verified_entry(&mut entry, &safe, expected, destination, &mut verified_dirs)?;
             } else {
                 let source = join_relative(base_dir, &expected.path);
-                let mut file = std::fs::File::open(&source).map_err(|e| {
-                    Error::invalid(
+                if !source.is_file() {
+                    return Err(Error::invalid(
                         "delta",
                         format!(
-                            "{} is needed from the installed version and cannot be read: {e}",
+                            "{} is needed from the installed version and is not there",
                             source.display()
                         ),
-                    )
-                })?;
-                write_verified_entry(&mut file, &safe, expected, destination, &mut verified_dirs)?;
+                    ));
+                }
+                // Adopted rather than copied. The bytes are already on this
+                // disk and identical, so writing them again buys nothing but
+                // a second copy of a runtime the user is keeping anyway.
+                let placement = crate::reader::place_verified_entry(
+                    &source,
+                    &sharer,
+                    &safe,
+                    expected,
+                    destination,
+                    &mut verified_dirs,
+                )?;
+                if placement.shares_storage() {
+                    sharing_storage += 1;
+                }
                 reused += 1;
             }
 
@@ -292,6 +309,9 @@ impl VerifiedDelta {
             destination = %destination.display(),
             files = assembled,
             reused,
+            // How many of the reused files cost no disk, which is the whole
+            // reason for adopting them rather than copying.
+            sharing_storage,
             downloaded = assembled - reused,
             "delta assembled and verified"
         );
