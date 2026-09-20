@@ -14,6 +14,7 @@ docs/
 
 # Packaged artefacts produced by xpack itself
 *.xpkg
+*.xpkgd
 
 # Signing keys must never enter version control
 *.key
