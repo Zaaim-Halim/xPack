@@ -1,0 +1,33 @@
+[package]
+name = "xpack-installer"
+description = "The self-contained installer that puts an xPack application on a machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-installer"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+xpack-security.workspace = true
+xpack-package.workspace = true
+xpack-platform.workspace = true
+xpack-install.workspace = true
+xpack-log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+tempfile.workspace = true
+clap.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

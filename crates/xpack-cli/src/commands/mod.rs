@@ -4,6 +4,7 @@ pub(crate) mod activate;
 pub(crate) mod index;
 pub(crate) mod inspect;
 pub(crate) mod install;
+pub(crate) mod installer;
 pub(crate) mod keygen;
 pub(crate) mod list;
 pub(crate) mod pack;
@@ -102,6 +103,22 @@ pub(crate) fn default_updater() -> Option<std::path::PathBuf> {
 /// The `xpack-uninstaller` binary sitting beside this executable, if there is one.
 pub(crate) fn default_uninstaller() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-uninstaller")
+}
+
+/// Finds a named executable next to this one, or explains that it is missing.
+///
+/// Used where the binary is required rather than optional: building an
+/// installer without the launcher would produce an application with no entry
+/// point, and the failure has to name what is missing and where it was sought.
+pub(crate) fn sibling_binary_required(name: &str) -> xpack_core::Result<std::path::PathBuf> {
+    sibling_binary(name).ok_or_else(|| {
+        xpack_core::Error::invalid(
+            "binary",
+            format!(
+                "{name} was not found beside this executable; build the workspace first, or                  pass it explicitly"
+            ),
+        )
+    })
 }
 
 /// Finds a named executable next to this one.

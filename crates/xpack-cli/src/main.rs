@@ -52,6 +52,8 @@ enum Command {
     Pack(commands::pack::Args),
     /// Write the update index a server publishes.
     Index(commands::index::Args),
+    /// Build a self-contained installer from a package.
+    Installer(commands::installer::Args),
     /// Describe a package without trusting it.
     Inspect(commands::inspect::Args),
     /// Check a package's signature against a key.
@@ -88,6 +90,7 @@ impl Command {
             Self::Keygen(_)
             | Self::Pack(_)
             | Self::Index(_)
+            | Self::Installer(_)
             | Self::Inspect(_)
             | Self::Verify(_) => None,
             Self::Install(a) => a.application_id(),
@@ -127,6 +130,7 @@ fn main() -> std::process::ExitCode {
         Command::Keygen(a) => commands::keygen::run(a),
         Command::Pack(a) => commands::pack::run(a),
         Command::Index(a) => commands::index::run(a),
+        Command::Installer(a) => commands::installer::run(a),
         Command::Inspect(a) => commands::inspect::run(a),
         Command::Verify(a) => commands::verify::run(a),
         Command::Install(a) => commands::install::run(a, &context),

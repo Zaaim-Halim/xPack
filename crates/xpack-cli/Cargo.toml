@@ -21,6 +21,7 @@ xpack-install.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 xpack-update.workspace = true
+xpack-installer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

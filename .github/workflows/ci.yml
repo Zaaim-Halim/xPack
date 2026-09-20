@@ -250,5 +250,5 @@ jobs:
       # is narrower and stated as such: the code compiles for them. The TLS
       # stack needs a C cross-toolchain, so the transport-independent engine is
       # what gets checked here.
-      - run: cargo check -p xpack-core -p xpack-security -p xpack-package -p xpack-platform -p xpack-install -p xpack-launcher -p xpack-log --all-targets --target ${{ matrix.target }}
+      - run: cargo check -p xpack-core -p xpack-security -p xpack-package -p xpack-platform -p xpack-install -p xpack-launcher -p xpack-uninstaller -p xpack-installer -p xpack-log --all-targets --target ${{ matrix.target }}
       - run: cargo check -p xpack-update --no-default-features --target ${{ matrix.target }}

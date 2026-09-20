@@ -1323,6 +1323,7 @@ dependencies = [
  "tracing",
  "xpack-core",
  "xpack-install",
+ "xpack-installer",
  "xpack-log",
  "xpack-package",
  "xpack-platform",
@@ -1352,6 +1353,24 @@ dependencies = [
  "tracing",
  "winreg",
  "xpack-core",
+ "xpack-package",
+ "xpack-platform",
+ "xpack-security",
+ "zip",
+]
+
+[[package]]
+name = "xpack-installer"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "xpack-core",
+ "xpack-install",
+ "xpack-log",
  "xpack-package",
  "xpack-platform",
  "xpack-security",

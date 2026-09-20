@@ -640,3 +640,118 @@ fn a_stray_private_key_anywhere_in_the_payload_is_refused() {
     assert!(!out.status.success(), "a stray private key must be refused");
     assert!(stderr(&out).contains("private signing key"), "{}", stderr(&out));
 }
+
+// --- the bootstrap installer ---------------------------------------------
+
+/// The `xpack-installer` stub built alongside this test.
+fn installer_stub() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_xpack")).parent().unwrap().join("xpack-installer")
+}
+
+#[test]
+fn an_installer_installs_an_application_that_then_runs() {
+    // The whole point of the installer, asserted by running it and then
+    // running what it installed. Everything else about this crate can be
+    // right and this still be broken.
+    if !installer_stub().is_file() {
+        // `cargo test -p xpack-cli` alone does not build sibling binaries.
+        eprintln!("skipping: the xpack-installer stub is not built");
+        return;
+    }
+
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let built = fixture.run(&[
+        "installer",
+        &package,
+        "--out",
+        "Demo-installer",
+        "--stub",
+        &installer_stub().to_string_lossy(),
+        "--json",
+    ]);
+    assert!(built.status.success(), "building the installer failed: {}", stderr(&built));
+
+    let report: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert_eq!(report["application"], "com.example.demo");
+    assert!(report["size"].as_u64().is_some_and(|n| n > 0));
+
+    // Run it. The layout differs per platform, so ask the report where the
+    // executable is rather than assuming.
+    let installer = match report["layout"].as_str() {
+        Some("bundle") => {
+            let mut found = None;
+            let macos = fixture.path().join("Demo-installer/Contents/MacOS");
+            for entry in std::fs::read_dir(&macos).unwrap() {
+                found = Some(entry.unwrap().path());
+            }
+            found.expect("a bundle executable")
+        }
+        _ => fixture.path().join("Demo-installer"),
+    };
+
+    let root = fixture.path().join("installed");
+    let ran = Command::new(&installer)
+        .current_dir(fixture.path())
+        .args(["--root", &root.to_string_lossy()])
+        .output()
+        .expect("the installer should run");
+    assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
+
+    // And now the application itself.
+    let launcher = root.join("com.example.demo/xpack-launcher");
+    assert!(launcher.is_file(), "no launcher was installed");
+
+    let app =
+        Command::new(&launcher).arg("hello").output().expect("the installed launcher should run");
+    assert!(app.status.success(), "the installed application failed: {}", stderr(&app));
+    assert!(
+        String::from_utf8_lossy(&app.stdout).contains("args=hello"),
+        "the application did not receive its arguments: {}",
+        String::from_utf8_lossy(&app.stdout)
+    );
+}
+
+#[test]
+fn a_dry_run_installs_nothing() {
+    if !installer_stub().is_file() {
+        eprintln!("skipping: the xpack-installer stub is not built");
+        return;
+    }
+
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let built = fixture.run(&[
+        "installer",
+        &package,
+        "--out",
+        "Demo-installer",
+        "--stub",
+        &installer_stub().to_string_lossy(),
+    ]);
+    assert!(built.status.success(), "{}", stderr(&built));
+
+    let installer = if fixture.path().join("Demo-installer/Contents").is_dir() {
+        std::fs::read_dir(fixture.path().join("Demo-installer/Contents/MacOS"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+    } else {
+        fixture.path().join("Demo-installer")
+    };
+
+    let root = fixture.path().join("installed");
+    let ran = Command::new(&installer)
+        .args(["--root", &root.to_string_lossy(), "--dry-run"])
+        .output()
+        .expect("the installer should run");
+
+    assert!(ran.status.success(), "{}", stderr(&ran));
+    assert!(!root.exists(), "a dry run created {}", root.display());
+}

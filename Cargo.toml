@@ -9,6 +9,7 @@ members = [
     "crates/xpack-update",
     "crates/xpack-updater",
     "crates/xpack-uninstaller",
+    "crates/xpack-installer",
     "crates/xpack-cli",
     "crates/xpack-launcher",
     "crates/xpack-log",
@@ -31,6 +32,7 @@ xpack-install = { path = "crates/xpack-install", version = "0.1.0" }
 xpack-update = { path = "crates/xpack-update", version = "0.1.0" }
 xpack-updater = { path = "crates/xpack-updater", version = "0.1.0" }
 xpack-uninstaller = { path = "crates/xpack-uninstaller", version = "0.1.0" }
+xpack-installer = { path = "crates/xpack-installer", version = "0.1.0" }
 xpack-log = { path = "crates/xpack-log", version = "0.1.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
