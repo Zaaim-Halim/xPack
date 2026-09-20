@@ -19,6 +19,11 @@ xpack-package.workspace = true
 xpack-platform.workspace = true
 xpack-install.workspace = true
 clap.workspace = true
+editpe.workspace = true
+# Branded copies are made somewhere that cleans itself up, so a failed build
+# leaves no half-edited executables behind.
+tempfile.workspace = true
+image.workspace = true
 indicatif.workspace = true
 xpack-update.workspace = true
 xpack-installer.workspace = true
@@ -28,6 +33,9 @@ tracing.workspace = true
 xpack-log.workspace = true
 
 [dev-dependencies]
+# The branding test reads back what was written with the same reader that
+# wrote it, rather than a shape re-declared in the test.
+editpe.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
 # The end-to-end tests parse the index the CLI writes with the *updater's* own

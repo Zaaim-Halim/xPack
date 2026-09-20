@@ -107,6 +107,26 @@ no earlier version.
 Attaching can be turned off with `-Dxpack.attach=false`, at the cost of having
 to supply earlier packages yourself through `<deltaFromFiles>`.
 
+## Windows icons and names
+
+On Windows the icon Explorer draws and the name Task Manager shows live
+inside the executable. Everywhere else they do not exist there at all — the
+`.app` bundle and the `.desktop` entry carry them, from the icon the manifest
+already names — so this is one platform's problem and not a gap on the
+others.
+
+```xml
+<icon>${project.basedir}/src/main/resources/icon.png</icon>
+```
+
+`xpack:installer` then rewrites the installer, launcher, updater and
+uninstaller it ships: each gets the application's name, the version, the
+publisher, and a description saying which of them it is. A `.png` is expanded
+into the sizes Windows chooses between, so the same file can serve
+`<desktop><icon>` rather than being a second one to keep in step.
+
+Nothing is rewritten on macOS or Linux, and the flag is ignored there.
+
 ## Applications that do not bundle a runtime
 
 Some applications should use the interpreter the machine already has.

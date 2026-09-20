@@ -46,6 +46,16 @@ jobs:
       # contain the file. They run on the machine of whoever edits the CLI,
       # which is where the drift is introduced. Nothing to fix if you see
       # them skip.
+      # The branding tests rewrite the resource section of a real Windows
+      # executable, so they need one to practise on and are skipped where
+      # there is none. The Windows runner has just built several: any of
+      # them is a PE, and using the CLI's own binary means the fixture is
+      # always current rather than checked in and forgotten.
+      - name: Point the branding tests at a Windows executable
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "XPACK_TEST_PE=$PWD/target/debug/xpack.exe" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --workspace --all-targets
 

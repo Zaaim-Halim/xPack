@@ -20,6 +20,7 @@
 //! retry a signature mismatch, and a monitoring system should treat it
 //! differently from a full disk.
 
+mod branding;
 mod commands;
 mod config;
 mod output;

@@ -65,6 +65,14 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", default_value = ".")]
     out_dir: PathBuf,
 
+    /// Icon for the Windows executables, as `.png` or `.ico`.
+    ///
+    /// Ignored on macOS and Linux, where an executable carries no icon: the
+    /// `.app` bundle and the `.desktop` entry supply one instead, from the
+    /// icon the manifest already names.
+    #[arg(long, value_name = "FILE")]
+    icon: Option<PathBuf>,
+
     /// Do not make the installed version active.
     #[arg(long)]
     no_activate: bool,
@@ -118,12 +126,25 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         None => super::sibling_binary_required("xpack-installer")?,
     };
     let binaries = resolve_binaries(args, manifest.platform.os)?;
-    let payload = xpack_installer::bundle::build(&plan, &args.package, &binaries)?;
+
+    // Branded before they are embedded, and the stub before the payload is
+    // appended: rewriting a resource section moves bytes, so doing it to the
+    // stub afterwards would leave the trailer pointing into the wrong place.
+    let workshop = tempfile::tempdir().map_err(|e| Error::io(Path::new("temporary"), e))?;
+    let branded = brand_for_windows(&manifest, &binaries, args.icon.as_deref(), workshop.path())?;
+    let binaries = branded.as_ref().unwrap_or(&binaries);
+
+    let payload = xpack_installer::bundle::build(&plan, &args.package, binaries)?;
 
     let target = manifest.platform.os;
     let output = match &args.out {
         Some(path) => path.clone(),
         None => args.out_dir.join(default_name(&manifest, target)),
+    };
+
+    let stub = match brand_stub(&manifest, &stub, args.icon.as_deref(), workshop.path())? {
+        Some(branded) => branded,
+        None => stub,
     };
 
     let layout = match target {
@@ -176,6 +197,94 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     }
 
     super::success()
+}
+
+/// Gives the runtime executables the application's name and icon.
+///
+/// Windows only: an executable carries an icon and a display name there and
+/// nowhere else, so on the other platforms this is not a gap to fill but a
+/// question that does not arise.
+///
+/// Returns `None` when there is nothing to do, so the caller keeps using the
+/// originals rather than copies of them.
+fn brand_for_windows(
+    manifest: &xpack_core::Manifest,
+    binaries: &[PathBuf],
+    icon: Option<&Path>,
+    workshop: &Path,
+) -> Result<Option<Vec<PathBuf>>> {
+    if manifest.platform.os != Os::Windows {
+        return Ok(None);
+    }
+
+    let names = xpack_core::BinaryNames::from_display_name(&manifest.application.name);
+    let mut branded = Vec::with_capacity(binaries.len());
+
+    for source in binaries {
+        let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        // Named for what it will be called once installed, not for what it
+        // is called in the distribution: that is the name a user sees in
+        // Task Manager beside the process.
+        let (installed, role) = match stem {
+            "xpack-launcher" => (names.launcher(), "Console launcher"),
+            "xpack-launcherw" => (names.windowed_launcher(), "Launcher"),
+            "xpack-updater" => (names.updater(), "Updater"),
+            "xpack-uninstaller" => (names.uninstaller(), "Uninstaller"),
+            // An unknown binary is carried through unbranded rather than
+            // guessed at. A wrong name on a process is worse than none.
+            _ => {
+                branded.push(source.clone());
+                continue;
+            }
+        };
+
+        let destination = workshop.join(format!("{installed}.exe"));
+        std::fs::copy(source, &destination).map_err(|e| Error::io(source, e))?;
+        crate::branding::apply(
+            &destination,
+            &crate::branding::Branding {
+                name: &manifest.application.name,
+                description: format!("{} {}", manifest.application.name, role.to_lowercase()),
+                original_file_name: format!("{installed}.exe"),
+                version: &manifest.application.version,
+                publisher: manifest.application.publisher.as_deref(),
+            },
+            icon,
+        )?;
+        branded.push(destination);
+    }
+    Ok(Some(branded))
+}
+
+/// Gives the installer itself the application's name and icon.
+///
+/// This is the executable a user downloads and double-clicks, so it is the
+/// one whose icon they see before anything of the application exists.
+fn brand_stub(
+    manifest: &xpack_core::Manifest,
+    stub: &Path,
+    icon: Option<&Path>,
+    workshop: &Path,
+) -> Result<Option<PathBuf>> {
+    if manifest.platform.os != Os::Windows {
+        return Ok(None);
+    }
+
+    let display = installer_display_name(&manifest.application.name);
+    let destination = workshop.join(format!("{display}.exe"));
+    std::fs::copy(stub, &destination).map_err(|e| Error::io(stub, e))?;
+    crate::branding::apply(
+        &destination,
+        &crate::branding::Branding {
+            name: &manifest.application.name,
+            description: display.clone(),
+            original_file_name: format!("{display}.exe"),
+            version: &manifest.application.version,
+            publisher: manifest.application.publisher.as_deref(),
+        },
+        icon,
+    )?;
+    Ok(Some(destination))
 }
 
 /// The runtime binaries to ship, defaulting to those beside this executable.

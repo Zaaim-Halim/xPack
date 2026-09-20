@@ -3,6 +3,7 @@ package io.xpack;
 import io.xpack.internal.Json;
 import io.xpack.internal.Target;
 import java.io.IOException;
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -36,6 +37,20 @@ public class InstallerMojo extends AbstractXPackMojo {
     @Parameter
     private Map<String, String> targetBinaries = new LinkedHashMap<>();
 
+    /**
+     * Icon for the Windows executables, as a `.png` or an `.ico`.
+     *
+     * <p>Windows only, and not because of a gap elsewhere: an executable
+     * carries an icon on that platform and on no other, so on macOS and
+     * Linux the `.app` bundle and the `.desktop` entry supply one instead,
+     * from the icon the manifest already names.
+     *
+     * <p>A `.png` serves both, so this can be the same file as
+     * {@code <desktop><icon>} rather than a second one to keep in step.
+     */
+    @Parameter(property = "xpack.icon")
+    private File icon;
+
     /** Leaves the installed version inactive, for an installer that only stages. */
     @Parameter(property = "xpack.installer.noActivate", defaultValue = "false")
     private boolean noActivate;
@@ -63,6 +78,13 @@ public class InstallerMojo extends AbstractXPackMojo {
             arguments.add(distDirectory.toString());
             if (noActivate) {
                 arguments.add("--no-activate");
+            }
+            if (icon != null) {
+                if (!icon.isFile()) {
+                    throw new MojoExecutionException("no icon at " + icon);
+                }
+                arguments.add("--icon");
+                arguments.add(icon.toString());
             }
             addCrossBuildBinaries(arguments, target);
 
