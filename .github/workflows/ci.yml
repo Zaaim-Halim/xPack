@@ -51,10 +51,14 @@ jobs:
       # there is none. The Windows runner has just built several: any of
       # them is a PE, and using the CLI's own binary means the fixture is
       # always current rather than checked in and forgotten.
+      # `github.workspace` rather than `$PWD`: under bash on a Windows
+      # runner that is an MSYS path like /d/a/repo, which Rust cannot
+      # resolve, so the tests would find no file and skip — silently, and
+      # for ever, because a skip is not a failure.
       - name: Point the branding tests at a Windows executable
         if: runner.os == 'Windows'
         shell: bash
-        run: echo "XPACK_TEST_PE=$PWD/target/debug/xpack.exe" >> "$GITHUB_ENV"
+        run: echo 'XPACK_TEST_PE=${{ github.workspace }}\target\debug\xpack.exe' >> "$GITHUB_ENV"
 
       - name: Test
         run: cargo test --workspace --all-targets
