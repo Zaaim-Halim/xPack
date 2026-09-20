@@ -34,6 +34,11 @@ public class RuntimeMojo extends AbstractXPackMojo {
             getLog().info("xpack: skipped");
             return;
         }
+        if (!runtime.isBundled()) {
+            getLog().info("xpack: no runtime is bundled; the application will start "
+                    + runtime.getCommand() + " from the PATH");
+            return;
+        }
 
         Layout layout = layout();
         for (Target target : targets()) {

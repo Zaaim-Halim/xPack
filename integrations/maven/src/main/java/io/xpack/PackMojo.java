@@ -10,12 +10,33 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.project.MavenProjectHelper;
 
 /** Builds one signed package per target. */
 @Mojo(name = "pack", defaultPhase = LifecyclePhase.PACKAGE, threadSafe = true)
 public class PackMojo extends AbstractXPackMojo {
+
+    /**
+     * Whether each package is attached to the project.
+     *
+     * <p>Attached, `mvn install` and `mvn deploy` publish the packages beside
+     * the jar, one per platform, distinguished by a classifier. That makes
+     * the repository the release archive — which is what lets a later release
+     * build a differential update against this one without anybody keeping
+     * artefacts by hand.
+     *
+     * <p>It also means a deploy uploads tens of megabytes per platform, so it
+     * can be turned off for a build that has somewhere else to put them.
+     */
+    @Parameter(property = "xpack.attach", defaultValue = "true")
+    private boolean attach;
+
+    @Component
+    private MavenProjectHelper projectHelper;
 
     @Override
     public void execute() throws MojoExecutionException {
@@ -68,7 +89,18 @@ public class PackMojo extends AbstractXPackMojo {
                     + "  " + Json.number(result, "files") + " files, "
                     + human(Json.number(result, "size"))
                     + ", signed by " + Json.string(result, "signedBy"));
-            getLog().info("xpack: " + Json.string(result, "package"));
+            Path built = Path.of(Json.string(result, "package"));
+            getLog().info("xpack: " + built);
+
+            if (attach) {
+                // Classified by platform, because a release publishes one of
+                // these per platform and they differ in nothing else a
+                // repository can see.
+                projectHelper.attachArtifact(project, PACKAGE_TYPE, target.id(), built.toFile());
+            }
         }
     }
+
+    /** The artifact type a package is published under. */
+    public static final String PACKAGE_TYPE = "xpkg";
 }

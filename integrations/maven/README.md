@@ -25,10 +25,104 @@ place for a security fix to be missed.
 | `xpack:payload` | `package` | Copies the jar and its runtime dependencies into the payload |
 | `xpack:manifest` | `package` | Writes `xpack.json` |
 | `xpack:pack` | `package` | Builds a signed `.xpkg` |
-| `xpack:delta` | `verify` | Builds differential updates against a published release |
+| `xpack:delta` | `verify` | Builds differential updates against releases in the repository |
 | `xpack:index` | `deploy` | Writes the documents an update server publishes |
-| `xpack:installer` | `package` | Builds the artefact a user runs on a bare machine |
+| `xpack:installer` | — | Builds the artefact a user runs on a bare machine |
 | `xpack:run` | — | Installs into a throwaway root and launches; the developer loop |
+
+## Two cadences
+
+An installer is downloaded once, by a new user. A package and its deltas are
+what every existing user receives. The goals are bound accordingly.
+
+**Every release** — bound to the lifecycle, so `mvn deploy` does the whole
+thing:
+
+```
+xpack:runtime → jar:jar → xpack:payload → xpack:manifest → xpack:pack
+                                        → xpack:delta  (verify)
+                                        → xpack:index  (deploy)
+```
+
+**Occasionally** — run by hand when you want a new installer, typically once
+per major release or when the xPack binaries themselves change:
+
+```sh
+mvn xpack:installer
+```
+
+`xpack:installer` is deliberately not bound to a phase. An installer carries
+the whole package plus the runtime binaries and changes almost never; building
+one on every commit is tens of megabytes of nothing.
+
+## The runtime is shipped once, not every release
+
+`xpack:pack` puts a full runtime in every package — a package is
+self-contained and signed as a whole, so it cannot reference one it does not
+carry. That sounds like it means shipping 50 MB per release. It does not.
+
+`xpack:delta` builds a differential update: the files whose contents changed,
+and nothing else. The rest is reused from the version already on the user's
+disk and re-hashed against the new release's signed manifest as it is copied.
+A release that changed one jar measures:
+
+```
+xpack: delta 1.0.0 -> 1.1.0 (linux-arm64)  1 changed, 95 reused, 23.8 KiB
+```
+
+23.8 KiB, against a 36 MB package. The runtime cost nothing, because `jlink`
+is deterministic: re-linking it every build produces byte-identical files, so
+the delta sees no change. Upgrade the JDK and the runtime ships once, which is
+correct.
+
+The earlier packages come from the repository. `xpack:pack` attaches each one
+to the project, so `mvn deploy` publishes them beside the jar with the
+platform as a classifier, and the next release resolves them back:
+
+```xml
+<!-- the default: build deltas from the last three releases -->
+<lastReleases>3</lastReleases>
+```
+
+A user further behind than that downloads the full package once, which is the
+right outcome rather than a failure.
+
+**A build fails if it should have produced a delta and did not.** A delta is
+an optimisation for the *client* — one that fails at install time falls back
+to the full package and nothing breaks. A *publisher* shipping none is a
+different thing: every user on the previous release downloads the whole
+runtime again, on a release whose build log said success. So an unreachable
+repository, or an earlier release whose package was never published, stops
+the build:
+
+```
+no published package for 1.0.0 (linux-arm64), so users of those releases
+would download the whole package again. Publish them, narrow <lastReleases>,
+or set -Dxpack.delta.required=false.
+```
+
+Having nothing to build from is not that, and never fails: a first release has
+no earlier version.
+
+Attaching can be turned off with `-Dxpack.attach=false`, at the cost of having
+to supply earlier packages yourself through `<deltaFromFiles>`.
+
+## Applications that do not bundle a runtime
+
+Some applications should use the interpreter the machine already has.
+
+```xml
+<runtime>
+  <bundled>false</bundled>
+  <command>java</command>
+</runtime>
+```
+
+The launch executable becomes a bare name, which the operating system looks up
+on `PATH` when the application starts. The package is then the application
+alone — 5 KiB rather than 36 MB — and the application is at the mercy of
+whichever version it finds, and of whether it is there at all. That is the
+trade; bundling exists to avoid it.
 
 ## Quickstart
 
@@ -56,6 +150,8 @@ and a signing key from `xpack keygen --out xpack-signing.json`.
         <goal>payload</goal>
         <goal>manifest</goal>
         <goal>pack</goal>
+        <goal>delta</goal>
+        <goal>index</goal>
       </goals>
     </execution>
   </executions>

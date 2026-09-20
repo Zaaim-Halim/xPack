@@ -58,6 +58,8 @@
               <goal>payload</goal>
               <goal>manifest</goal>
               <goal>pack</goal>
+              <goal>delta</goal>
+              <goal>index</goal>
             </goals>
           </execution>
         </executions>

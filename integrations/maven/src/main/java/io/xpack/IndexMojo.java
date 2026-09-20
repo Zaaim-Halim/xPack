@@ -38,7 +38,14 @@ public class IndexMojo extends AbstractXPackMojo {
     @Parameter(property = "xpack.index.releaseNotes")
     private String releaseNotes;
 
-    /** Deltas to offer beside the full packages. */
+    /**
+     * Deltas to offer beside the full packages, named directly.
+     *
+     * <p>Left empty, every delta {@code xpack:delta} produced is offered.
+     * Publishing a full package while quietly omitting the deltas built for
+     * it is a saving thrown away, and the kind of omission nobody notices
+     * because everything still works.
+     */
     @Parameter
     private List<File> deltas = new ArrayList<>();
 
@@ -49,10 +56,11 @@ public class IndexMojo extends AbstractXPackMojo {
             return;
         }
 
-        List<Path> packages = packages();
+        List<Path> packages =
+                releaseArtefacts(".xpkg").stream().map(Artefact::file).toList();
         if (packages.isEmpty()) {
-            throw new MojoExecutionException(
-                    "no .xpkg files in " + distDirectory + "; run xpack:pack first");
+            throw new MojoExecutionException("no packages for " + releaseVersion() + " in "
+                    + distDirectory + "; run xpack:pack first");
         }
         if (rollout != null && (rollout < 0 || rollout > 100)) {
             throw new MojoExecutionException("rollout must be between 0 and 100");
@@ -78,7 +86,7 @@ public class IndexMojo extends AbstractXPackMojo {
             arguments.add("--release-notes");
             arguments.add(releaseNotes);
         }
-        for (File delta : deltas) {
+        for (Path delta : deltasToPublish()) {
             arguments.add("--delta");
             arguments.add(delta.toString());
         }
@@ -91,15 +99,24 @@ public class IndexMojo extends AbstractXPackMojo {
         }
     }
 
-    private List<Path> packages() throws MojoExecutionException {
-        Path dist = distDirectory.toPath();
-        if (!Files.isDirectory(dist)) {
-            return List.of();
+    /** The deltas to offer: those named, or everything the build produced. */
+    private List<Path> deltasToPublish() throws MojoExecutionException {
+        if (!deltas.isEmpty()) {
+            List<Path> named = new ArrayList<>();
+            for (File delta : deltas) {
+                Path path = delta.toPath();
+                if (!Files.isRegularFile(path)) {
+                    throw new MojoExecutionException("no delta at " + path);
+                }
+                named.add(path);
+            }
+            return named;
         }
-        try (Stream<Path> files = Files.list(dist)) {
-            return files.filter(p -> p.getFileName().toString().endsWith(".xpkg")).sorted().toList();
-        } catch (IOException e) {
-            throw new MojoExecutionException("could not list " + dist, e);
-        }
+        // Every delta this release produced. One left over from an earlier
+        // release targets a version that is not being indexed, and the
+        // command line refuses those rather than publishing something no
+        // client could apply.
+        return releaseArtefacts(".xpkgd").stream().map(Artefact::file).toList();
     }
+
 }

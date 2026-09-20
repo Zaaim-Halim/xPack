@@ -3,7 +3,9 @@ package io.xpack;
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
 import io.xpack.config.RuntimeSpec;
+import io.xpack.internal.Json;
 import io.xpack.internal.Layout;
+import io.xpack.internal.ManifestWriter;
 import io.xpack.internal.Target;
 import io.xpack.internal.XPackCli;
 import java.io.File;
@@ -52,6 +54,10 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     /** The matching public key, needed by goals that install or index. */
     @Parameter(property = "xpack.publicKey")
     protected File publicKey;
+
+    /** Overrides the version taken from the project. */
+    @Parameter(property = "xpack.version")
+    protected String version;
 
     // -------------------------------------------------------------- identity
 
@@ -217,6 +223,77 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
             return project.getName();
         }
         return project.getArtifactId();
+    }
+
+    /**
+     * The version this build is releasing, as a manifest would spell it.
+     *
+     * <p>Normalised, because a Maven version is not always a semantic one and
+     * the manifest carries the normalised form. Comparing an artefact against
+     * the raw project version would find nothing for a project at `1.2`.
+     */
+    protected String releaseVersion() throws MojoExecutionException {
+        try {
+            return ManifestWriter.normaliseVersion(
+                    version != null && !version.isBlank() ? version : project.getVersion());
+        } catch (IllegalArgumentException e) {
+            throw new MojoExecutionException(e.getMessage(), e);
+        }
+    }
+
+    /** One artefact in the distribution directory, and what it says it is. */
+    protected record Artefact(Path file, String platform, String version) {}
+
+    /**
+     * Artefacts belonging to *this* release, by what each one declares.
+     *
+     * <p>The distribution directory is not emptied between builds, so after
+     * releasing 1.1.0 it still holds 1.0.0's package from the last one.
+     * Publishing both would be refused — two packages cannot be the same
+     * release on the same channel — and choosing between them by filename
+     * would be a guess. Each is asked instead.
+     *
+     * <p>Not filtered by deleting the older ones: the directory is
+     * configurable, so a build could be pointed at somewhere holding a
+     * publisher's whole release history, and clearing that would be a
+     * catastrophe caused by a default.
+     *
+     * @param suffix {@code .xpkg} for packages, {@code .xpkgd} for deltas
+     */
+    protected List<Artefact> releaseArtefacts(String suffix) throws MojoExecutionException {
+        Path dist = distDirectory.toPath();
+        if (!Files.isDirectory(dist)) {
+            return List.of();
+        }
+
+        List<Path> candidates;
+        try (var files = Files.list(dist)) {
+            candidates = files.filter(p -> p.getFileName().toString().endsWith(suffix))
+                    .sorted()
+                    .toList();
+        } catch (java.io.IOException e) {
+            throw new MojoExecutionException("could not list " + dist, e);
+        }
+
+        String wantedVersion = releaseVersion();
+        String wantedApplication = applicationId();
+        List<Artefact> mine = new ArrayList<>();
+        for (Path candidate : candidates) {
+            Map<String, Object> described =
+                    cli().json("inspect", List.of(candidate.toString()));
+            Map<String, Object> application = Json.object(described, "application");
+            if (!wantedApplication.equals(Json.string(application, "id"))) {
+                continue;
+            }
+            String found = Json.string(application, "version");
+            if (!wantedVersion.equals(found)) {
+                getLog().debug("xpack: ignoring " + candidate.getFileName()
+                        + ", which is version " + found);
+                continue;
+            }
+            mine.add(new Artefact(candidate, Json.platform(described), found));
+        }
+        return mine;
     }
 
     protected Path signingKeyPath() throws MojoExecutionException {

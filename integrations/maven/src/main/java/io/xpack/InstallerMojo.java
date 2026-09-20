@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 
@@ -22,7 +21,10 @@ import org.apache.maven.plugins.annotations.Parameter;
  * binaries, because the installer <em>is</em> one of those binaries with a
  * payload attached. There is no flag that substitutes for having them.
  */
-@Mojo(name = "installer", defaultPhase = LifecyclePhase.PACKAGE, threadSafe = true)
+// No default phase on purpose. An installer carries the whole package plus
+// the runtime binaries and changes almost never, so building one on every
+// commit is tens of megabytes of nothing. Binding it means naming a phase.
+@Mojo(name = "installer", threadSafe = true)
 public class InstallerMojo extends AbstractXPackMojo {
 
     /**
@@ -45,15 +47,15 @@ public class InstallerMojo extends AbstractXPackMojo {
             return;
         }
 
-        List<Path> packages = packages();
+        List<Artefact> packages = releaseArtefacts(".xpkg");
         if (packages.isEmpty()) {
-            throw new MojoExecutionException(
-                    "no .xpkg files in " + distDirectory + "; run xpack:pack first");
+            throw new MojoExecutionException("no packages for " + releaseVersion() + " in "
+                    + distDirectory + "; run xpack:pack first");
         }
 
-        for (Path pkg : packages) {
-            Map<String, Object> described = cli().json("inspect", List.of(pkg.toString()));
-            Target target = Target.parse(Json.platform(described));
+        for (Artefact artefact : packages) {
+            Path pkg = artefact.file();
+            Target target = Target.parse(artefact.platform());
 
             List<String> arguments = new ArrayList<>();
             arguments.add(pkg.toString());
@@ -102,18 +104,6 @@ public class InstallerMojo extends AbstractXPackMojo {
         if (target.os() == Target.Os.WINDOWS) {
             arguments.add("--binary");
             arguments.add(binary(home, "xpack-launcherw").toString());
-        }
-    }
-
-    private List<Path> packages() throws MojoExecutionException {
-        Path dist = distDirectory.toPath();
-        if (!Files.isDirectory(dist)) {
-            return List.of();
-        }
-        try (Stream<Path> files = Files.list(dist)) {
-            return files.filter(p -> p.getFileName().toString().endsWith(".xpkg")).sorted().toList();
-        } catch (IOException e) {
-            throw new MojoExecutionException("could not list " + dist, e);
         }
     }
 }

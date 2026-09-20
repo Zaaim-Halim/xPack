@@ -1,5 +1,6 @@
 package io.xpack;
 
+import io.xpack.internal.LaunchExecutable;
 import io.xpack.internal.Layout;
 import io.xpack.internal.ManifestWriter;
 import io.xpack.internal.Target;
@@ -24,10 +25,6 @@ import org.apache.maven.plugins.annotations.Parameter;
 @Mojo(name = "manifest", defaultPhase = LifecyclePhase.PACKAGE, threadSafe = true)
 public class ManifestMojo extends AbstractXPackMojo {
 
-    /** Overrides the version taken from the project. */
-    @Parameter(property = "xpack.version")
-    private String version;
-
     @Override
     public void execute() throws MojoExecutionException {
         if (skip) {
@@ -38,11 +35,13 @@ public class ManifestMojo extends AbstractXPackMojo {
         Layout layout = layout();
         for (Target target : targets()) {
             Path payload = layout.payload(target);
-            String executable = target.findBundledJava(payload, runtimeDirectory);
-            if (executable == null) {
-                throw new MojoExecutionException(
-                        "no bundled interpreter under " + layout.runtime(target)
-                                + ". Run xpack:runtime before xpack:manifest.");
+            String executable;
+            try {
+                executable = LaunchExecutable.resolve(
+                        runtime.isBundled(), runtime.getCommand(), target, payload,
+                        runtimeDirectory);
+            } catch (IllegalStateException e) {
+                throw new MojoExecutionException(e.getMessage(), e);
             }
 
             String manifest;
@@ -50,7 +49,7 @@ public class ManifestMojo extends AbstractXPackMojo {
                 manifest = new ManifestWriter()
                         .id(applicationId())
                         .name(applicationName())
-                        .version(version != null ? version : project.getVersion())
+                        .version(releaseVersion())
                         .description(description)
                         .publisher(publisherName())
                         .target(target)

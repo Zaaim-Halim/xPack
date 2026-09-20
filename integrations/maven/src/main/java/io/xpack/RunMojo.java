@@ -99,25 +99,14 @@ public class RunMojo extends AbstractXPackMojo {
         }
     }
 
+    /** This release's package for the platform the build is running on. */
     private Path packageFor(Target host) throws MojoExecutionException {
-        Path dist = distDirectory.toPath();
-        if (!Files.isDirectory(dist)) {
-            throw new MojoExecutionException("no packages in " + dist + "; run xpack:pack first");
-        }
-        List<Path> candidates;
-        try (Stream<Path> files = Files.list(dist)) {
-            candidates = files.filter(p -> p.getFileName().toString().endsWith(".xpkg"))
-                    .sorted().toList();
-        } catch (IOException e) {
-            throw new MojoExecutionException("could not list " + dist, e);
-        }
-        for (Path candidate : candidates) {
-            Map<String, Object> described = cli().json("inspect", List.of(candidate.toString()));
-            if (host.id().equals(Json.platform(described))) {
-                return candidate;
+        for (Artefact artefact : releaseArtefacts(".xpkg")) {
+            if (host.id().equals(artefact.platform())) {
+                return artefact.file();
             }
         }
-        throw new MojoExecutionException(
-                "nothing built for " + host.id() + ", so there is nothing to run here");
+        throw new MojoExecutionException("nothing built for " + host.id()
+                + " at version " + releaseVersion() + ", so there is nothing to run here");
     }
 }
