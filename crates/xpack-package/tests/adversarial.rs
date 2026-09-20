@@ -453,7 +453,7 @@ fn a_package_for_another_platform_is_refused() {
 }
 
 #[test]
-fn the_builder_refuses_a_payload_containing_a_symlink() {
+fn the_builder_refuses_a_symlink_that_leaves_the_payload() {
     #[cfg(unix)]
     {
         let dir = tempfile::tempdir().unwrap();
@@ -465,6 +465,100 @@ fn the_builder_refuses_a_payload_containing_a_symlink() {
             .build(&dir.path().join("out.xpkg"), &KeyPair::generate().unwrap())
             .unwrap_err();
         assert!(err.to_string().contains("symbolic link"), "got {err}");
+        assert!(err.to_string().contains("outside the payload"), "got {err}");
+    }
+}
+
+/// A relative link that resolves back inside the payload after climbing out of
+/// its own directory is still contained, and must be packaged, not refused.
+#[test]
+fn a_symlink_inside_the_payload_is_packaged_as_the_file_it_points_at() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload-src");
+        payload_tree(&payload);
+
+        // The shape `jlink` produces: one real licence file, and a link to it
+        // from every other module's directory.
+        fs::create_dir_all(payload.join("legal/java.base")).unwrap();
+        fs::create_dir_all(payload.join("legal/java.desktop")).unwrap();
+        fs::write(payload.join("legal/java.base/LICENSE"), b"the licence text").unwrap();
+        std::os::unix::fs::symlink(
+            "../java.base/LICENSE",
+            payload.join("legal/java.desktop/LICENSE"),
+        )
+        .unwrap();
+
+        let key = KeyPair::generate().unwrap();
+        let pkg = dir.path().join("out.xpkg");
+        PackageBuilder::new(&payload, template(host())).build(&pkg, &key).unwrap();
+
+        let mut verified = PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap();
+        let dest = dir.path().join("extracted");
+        verified.extract_to(&dest).unwrap();
+
+        let extracted = dest.join("legal/java.desktop/LICENSE");
+        let metadata = fs::symlink_metadata(&extracted).unwrap();
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "the link must be materialised, never stored as a link"
+        );
+        assert_eq!(fs::read(&extracted).unwrap(), b"the licence text");
+    }
+}
+
+#[test]
+fn the_builder_refuses_a_symlink_to_a_directory_inside_the_payload() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload-src");
+        payload_tree(&payload);
+        std::os::unix::fs::symlink("../application", payload.join("runtime/also-application"))
+            .unwrap();
+
+        let err = PackageBuilder::new(&payload, template(host()))
+            .build(&dir.path().join("out.xpkg"), &KeyPair::generate().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "got {err}");
+    }
+}
+
+#[test]
+fn the_builder_refuses_a_symlink_that_resolves_to_nothing() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload-src");
+        payload_tree(&payload);
+        std::os::unix::fs::symlink("gone", payload.join("dangling")).unwrap();
+
+        let err = PackageBuilder::new(&payload, template(host()))
+            .build(&dir.path().join("out.xpkg"), &KeyPair::generate().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("does not resolve"), "got {err}");
+    }
+}
+
+/// Materialising a link must not cost reproducibility: the bytes it
+/// contributes come from the target, which does not change between builds.
+#[test]
+fn a_payload_containing_a_symlink_still_builds_reproducibly() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload-src");
+        payload_tree(&payload);
+        std::os::unix::fs::symlink("app.jar", payload.join("application/app-link.jar")).unwrap();
+
+        let key = KeyPair::generate().unwrap();
+        let first = dir.path().join("first.xpkg");
+        let second = dir.path().join("second.xpkg");
+        PackageBuilder::new(&payload, template(host())).build(&first, &key).unwrap();
+        PackageBuilder::new(&payload, template(host())).build(&second, &key).unwrap();
+
+        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
     }
 }
 

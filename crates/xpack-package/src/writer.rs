@@ -108,6 +108,12 @@ impl<'a> PackageBuilder<'a> {
     /// Walks the payload tree, hashing every file.
     fn collect_payload(&self) -> Result<Vec<PayloadFile>> {
         let mut files = Vec::new();
+        // Resolved once, and compared against resolved link targets, because
+        // the root itself is often reached through a link: on macOS the
+        // per-user temporary directory is one, so a textual comparison would
+        // call every link in a payload built there an escape.
+        let payload_root =
+            self.payload_root.canonicalize().map_err(|e| Error::io(self.payload_root, e))?;
 
         for entry in
             walkdir::WalkDir::new(self.payload_root).follow_links(false).sort_by_file_name()
@@ -120,20 +126,18 @@ impl<'a> PackageBuilder<'a> {
             if file_type.is_dir() {
                 continue;
             }
-            // Symlinks are refused rather than followed or stored. Following
-            // one would silently pull in a file from outside the payload;
-            // storing one would hand the extractor an arbitrary write
-            // primitive on the target machine.
+            // A symlink is stored as the regular file it points at, never as a
+            // link: an entry the extractor saw as a link would be an arbitrary
+            // write primitive on the target machine. Reading through it here
+            // keeps that property while letting a payload contain one.
+            //
+            // This is what makes a bundled runtime packageable at all. `jlink`
+            // emits an image in which every module's licence files are links to
+            // the copies in `java.base`, so refusing links outright refuses
+            // every JDK built the standard way.
             if file_type.is_symlink() {
-                return Err(Error::invalid(
-                    "payload",
-                    format!(
-                        "{} is a symbolic link; xPack packages must contain regular files only",
-                        entry.path().display()
-                    ),
-                ));
-            }
-            if !file_type.is_file() {
+                ensure_link_stays_inside(&payload_root, entry.path())?;
+            } else if !file_type.is_file() {
                 return Err(Error::invalid(
                     "payload",
                     format!("{} is not a regular file", entry.path().display()),
@@ -404,6 +408,53 @@ fn unix_mode(path: &Path) -> Result<Option<u32>> {
     // safe default; publishers targeting Unix should build on Unix or on CI.
     let _ = path;
     Ok(None)
+}
+
+/// Accepts a symlink only when it resolves to a regular file inside the payload.
+///
+/// Everything downstream reads through the link — `File::open` and
+/// `fs::metadata` both follow one — so an accepted link is hashed, recorded and
+/// stored as an ordinary file and the archive never contains a link entry. That
+/// leaves the extractor's own refusal of link entries untouched.
+///
+/// A link that leaves the payload is refused. Following one would pull a file
+/// off the packaging machine into a package the publisher never assembled and
+/// will not think to review, which is how a key, a credential or a host
+/// configuration file gets published. A link that does not resolve, or that
+/// resolves to something other than a regular file, is refused for the same
+/// reason the walk refuses those directly: the manifest can only describe bytes.
+fn ensure_link_stays_inside(payload_root: &Path, link: &Path) -> Result<()> {
+    let target = link.canonicalize().map_err(|e| {
+        Error::invalid(
+            "payload",
+            format!("{} is a symbolic link that does not resolve: {e}", link.display()),
+        )
+    })?;
+
+    if !target.starts_with(payload_root) {
+        return Err(Error::invalid(
+            "payload",
+            format!(
+                "{} is a symbolic link to {}, which is outside the payload; xPack packages \
+                 only files the payload itself contains",
+                link.display(),
+                target.display()
+            ),
+        ));
+    }
+
+    if !target.is_file() {
+        return Err(Error::invalid(
+            "payload",
+            format!(
+                "{} is a symbolic link to {}, which is not a regular file",
+                link.display(),
+                target.display()
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn zip_error(e: &zip::result::ZipError) -> Error {
