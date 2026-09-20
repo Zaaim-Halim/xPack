@@ -50,6 +50,8 @@ enum Behaviour {
     ReportsThenRuns,
     /// Keeps running but never reports — the case the report exists to catch.
     RunsWithoutReporting,
+    /// Writes the installation directory it was told about, then exits.
+    RecordsWhereItLives,
 }
 
 #[cfg(unix)]
@@ -66,6 +68,14 @@ fn script(behaviour: Behaviour, version: &str) -> String {
         Behaviour::RunsWithoutReporting => {
             format!("#!/bin/sh\necho {version} running but silent\nsleep 30\n")
         }
+        // Writing *into* the directory proves two things at once: that the
+        // variable was set, and that it names somewhere that actually exists.
+        Behaviour::RecordsWhereItLives => concat!(
+            "#!/bin/sh\n",
+            "printf '%s' \"$XPACK_APPLICATION_DIR\" > \"$XPACK_APPLICATION_DIR/observed-dir\"\n",
+            "exit 0\n"
+        )
+        .to_string(),
     }
 }
 
@@ -82,6 +92,20 @@ fn build_with(
     behaviour: Behaviour,
     timeout: u64,
     require_report: bool,
+) -> PathBuf {
+    build_all(dir, key, version, behaviour, timeout, require_report, BTreeMap::new())
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn build_all(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    behaviour: Behaviour,
+    timeout: u64,
+    require_report: bool,
+    manifest_environment: BTreeMap<String, String>,
 ) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
@@ -107,7 +131,7 @@ fn build_with(
             executable: "bin/app".into(),
             arguments: vec![],
             working_directory: None,
-            environment: BTreeMap::new(),
+            environment: manifest_environment,
         },
         update: UpdateSpec::default(),
         health: HealthSpec {
@@ -910,4 +934,52 @@ fn a_requirement_still_stands_when_the_required_version_merely_went_missing() {
         message.contains("2.0.0") && message.contains("required"),
         "a missing requirement was silently ignored: {message}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_application_is_told_where_its_installation_is() {
+    // Without this an application can only reach its own installation by
+    // walking up from its working directory, past the version directory —
+    // two levels that nothing in the layout promises to keep stable.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::RecordsWhereItLives, 5);
+
+    Launcher::for_application_dir(world.paths.root()).launch(&[], true).unwrap();
+
+    let observed = std::fs::read_to_string(world.paths.root().join("observed-dir")).unwrap();
+    assert_eq!(std::path::Path::new(&observed), world.paths.root());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_manifest_cannot_lie_to_the_application_about_where_it_lives() {
+    // The manifest's environment is applied first and the launcher's last, so
+    // a package cannot point its own application at another installation —
+    // which is the same rule that stops one redirecting the health report.
+    let world = World::new();
+    let mut hostile = BTreeMap::new();
+    hostile.insert("XPACK_APPLICATION_DIR".to_string(), "/somewhere/else".to_string());
+
+    let package = build_all(
+        world.dir.path(),
+        &world.key,
+        "1.0.0",
+        Behaviour::RecordsWhereItLives,
+        5,
+        false,
+        hostile,
+    );
+    let lock = InstallLock::acquire(&world.paths).unwrap();
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(world.key.public())).unwrap();
+    Installer::new(&lock)
+        .install(&mut verified, &InstallOptions { activate: true, ..Default::default() })
+        .unwrap();
+    drop(lock);
+
+    Launcher::for_application_dir(world.paths.root()).launch(&[], true).unwrap();
+
+    let observed = std::fs::read_to_string(world.paths.root().join("observed-dir")).unwrap();
+    assert_eq!(std::path::Path::new(&observed), world.paths.root());
 }

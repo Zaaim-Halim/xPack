@@ -60,5 +60,7 @@
 pub mod launcher;
 pub mod run;
 
-pub use launcher::{HEALTH_FILE_ENV, Launcher, Outcome, StartupResult, spawn_updater};
+pub use launcher::{
+    APPLICATION_DIR_ENV, HEALTH_FILE_ENV, Launcher, Outcome, StartupResult, spawn_updater,
+};
 pub use run::run;

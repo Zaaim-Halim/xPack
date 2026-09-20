@@ -17,6 +17,19 @@ use xpack_platform::{InstallLock, LaunchRequest, launch};
 /// this workspace does not permit.
 pub const HEALTH_FILE_ENV: &str = "XPACK_HEALTH_FILE";
 
+/// Where the application's installation is, told to the application itself.
+///
+/// The same variable the runtime binaries read to decide which installation
+/// they belong to, which is deliberate: an application that spawns
+/// `xpack-updater` to show its own progress passes it down, and the updater
+/// works on the installation that started it rather than on whichever one it
+/// would have found by itself.
+///
+/// Without it an application can only reach its own installation by walking
+/// up from its working directory — two levels, past the version directory —
+/// which no part of the layout promises to keep stable.
+pub const APPLICATION_DIR_ENV: &str = xpack_core::paths::APPLICATION_DIR_ENV;
+
 /// How often a probationary process is checked for having exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -220,7 +233,11 @@ impl Launcher {
 
         let request = LaunchRequest::new(self.paths.version_dir(&version), manifest.launch.clone())
             .with_user_arguments(arguments.to_vec())
-            .with_launcher_environment(HEALTH_FILE_ENV, health_file.display().to_string());
+            .with_launcher_environment(HEALTH_FILE_ENV, health_file.display().to_string())
+            .with_launcher_environment(
+                APPLICATION_DIR_ENV,
+                self.paths.root().display().to_string(),
+            );
         let mut child = launch(&request)?;
 
         if !probation {
