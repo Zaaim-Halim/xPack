@@ -105,6 +105,30 @@ impl PackageReader {
         self.finish_verification(&manifest_bytes, signature, signing_key)
     }
 
+    /// Reads which version a delta applies to, without verifying anything.
+    ///
+    /// For the publishing side, which is deciding what to put in an index and
+    /// has no trust store to check against. A client never uses this: it reads
+    /// the base from a delta only after the signature over the accompanying
+    /// manifest has been verified.
+    pub fn peek_delta_base_unverified(&mut self) -> Result<xpack_core::Version> {
+        Ok(self.read_delta_plan()?.base_version)
+    }
+
+    /// Verifies a delta against the installation's pinned keys.
+    pub fn verify_delta(mut self, trust: &TrustStore) -> Result<crate::delta::VerifiedDelta> {
+        let manifest_bytes = self.read_manifest_bytes()?;
+        let signature = self.read_signature()?;
+        let signing_key = trust
+            .verify(&manifest_bytes, &signature)
+            .map_err(|e| Error::Integrity(format!("{}: {e}", self.path.display())))?;
+
+        let plan = self.read_delta_plan()?;
+        let package =
+            self.finish_verification_inner(&manifest_bytes, signature, signing_key, false)?;
+        Ok(crate::delta::VerifiedDelta::new(package, plan))
+    }
+
     /// Verifies a **delta** package against an explicit key list.
     ///
     /// The signature is checked over the manifest bytes before anything else

@@ -26,6 +26,28 @@ pub enum TrustDecision {
     OnFirstUse,
 }
 
+/// Opens a delta and verifies it against the installation's pinned keys.
+///
+/// There is no trust *decision* here, and there cannot be one. A delta only
+/// applies to a version already installed, so the keys were pinned when that
+/// version was installed — and a delta arriving at an installation that trusts
+/// nothing is an attempt to establish trust through a path that was never
+/// meant to, which is refused rather than accommodated.
+pub fn open_and_verify_delta(
+    delta: &Path,
+    lock: &InstallLock,
+) -> Result<xpack_package::VerifiedDelta> {
+    let store = TrustStore::load_or_empty(&lock.paths().trust_file())?;
+    if store.is_empty() {
+        return Err(Error::Integrity(
+            "this installation trusts no signing keys, so a delta cannot be verified against \
+             the version it claims to update"
+                .to_string(),
+        ));
+    }
+    PackageReader::open(delta)?.verify_delta(&store)
+}
+
 /// Opens a package and verifies it according to `decision`.
 ///
 /// Pins the key *before* verifying, so the same trust store governs this

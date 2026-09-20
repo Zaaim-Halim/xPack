@@ -84,7 +84,13 @@ fn index_url() -> String {
 fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     std::fs::create_dir_all(payload.join("bin")).unwrap();
+    std::fs::create_dir_all(payload.join("runtime")).unwrap();
     std::fs::write(payload.join("bin/app"), format!("#!/bin/sh\necho {version}\n")).unwrap();
+    // Byte-identical across versions, standing in for a bundled runtime. A
+    // payload where every file changes would let a delta carry all of it and
+    // never read the installed version, which is exactly the path these tests
+    // exist to exercise.
+    std::fs::write(payload.join("runtime/lib.bin"), b"a runtime that never changes").unwrap();
 
     let manifest = Manifest {
         format_version: FormatVersion::CURRENT,
@@ -700,4 +706,176 @@ fn a_fully_published_release_needs_no_identifier() {
     Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
 
     assert_eq!(world.lock().load_state().unwrap().value.rollout_id, None);
+}
+
+// --- deltas --------------------------------------------------------------
+//
+// A delta is an optimisation, so the tests that matter are not "it is
+// smaller" — they are "it produces the same installation" and "when it cannot
+// be used, the update still happens".
+
+/// An index offering a delta from `from` alongside the full package.
+fn index_with_delta(
+    version: &str,
+    size: u64,
+    from: &str,
+    delta_file: &str,
+    delta_size: u64,
+) -> Vec<u8> {
+    format!(
+        r#"{{"application":"com.example.demo","version":"{version}",
+            "platform":{{"os":"{}","arch":"{}"}},"channel":"stable",
+            "package":{{"file":"demo-{version}.xpkg","size":{size}}},
+            "deltas":[{{"from":"{from}","file":"{delta_file}","size":{delta_size}}}]}}"#,
+        Platform::host().unwrap().os,
+        Platform::host().unwrap().arch
+    )
+    .into_bytes()
+}
+
+/// An installation on 1.0.0, with 1.1.0 and a real delta served.
+fn delta_world() -> (World, Fixture, PathBuf) {
+    let world = World::new();
+    let base = world.dir.path().join("demo-1.0.0.xpkg");
+    let target = build_package(world.dir.path(), &world.key, "1.1.0");
+
+    let delta_path = world.dir.path().join("1.0.0-to-1.1.0.xpkgd");
+    xpack_package::delta::build(&base, &target, &delta_path).expect("the delta should build");
+
+    let full_size = std::fs::metadata(&target).unwrap().len();
+    let delta_size = std::fs::metadata(&delta_path).unwrap().len();
+
+    let fixture = Fixture::default();
+    fixture.serve(
+        &index_url(),
+        index_with_delta("1.1.0", full_size, "1.0.0", "1.0.0-to-1.1.0.xpkgd", delta_size),
+    );
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &target);
+    fixture.serve_file(&format!("{BASE}/1.0.0-to-1.1.0.xpkgd"), &delta_path);
+    (world, fixture, delta_path)
+}
+
+#[test]
+fn a_delta_is_used_when_one_is_offered_for_the_installed_version() {
+    let (world, fixture, _) = delta_world();
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+    assert!(fixture.was_fetched(&format!("{BASE}/1.0.0-to-1.1.0.xpkgd")), "the delta was not used");
+    assert!(
+        !fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")),
+        "the full package was downloaded even though the delta worked"
+    );
+}
+
+#[test]
+fn a_delta_update_installs_the_same_files_as_a_full_one() {
+    // The claim that makes deltas safe to prefer at all.
+    let (world, fixture, _) = delta_world();
+    Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    let from_delta = world.paths.version_dir(&Version::parse("1.1.0").unwrap());
+
+    // Install the same release the ordinary way, elsewhere, and compare.
+    let plain = World::new();
+    let target = build_package(plain.dir.path(), &plain.key, "1.1.0");
+    let other = Fixture::default();
+    let size = std::fs::metadata(&target).unwrap().len();
+    other.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
+    other.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &target);
+    Updater::new(&plain.paths, &other).update(BASE, &options()).unwrap();
+    let from_full = plain.paths.version_dir(&Version::parse("1.1.0").unwrap());
+
+    // The payload only. `.xpack/` holds the signed manifest, and these two
+    // installations were signed by different keys, so it differs by design.
+    let read = |root: &std::path::Path| -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(root).unwrap().to_string_lossy().to_string();
+            if rel.starts_with(".xpack") {
+                continue;
+            }
+            out.insert(rel, std::fs::read(entry.path()).unwrap());
+        }
+        out
+    };
+    assert_eq!(read(&from_delta), read(&from_full), "a delta install differs from a full one");
+}
+
+#[test]
+fn a_corrupt_delta_falls_back_to_the_full_package() {
+    // The property that makes a delta safe to offer: it can never be the
+    // reason an update does not happen.
+    let (world, fixture, _) = delta_world();
+    fixture.serve(&format!("{BASE}/1.0.0-to-1.1.0.xpkgd"), b"not an archive at all".to_vec());
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()), "the update should still happen");
+    assert!(
+        fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")),
+        "the full package was not fetched after the delta failed"
+    );
+}
+
+#[test]
+fn a_delta_signed_by_another_key_falls_back_rather_than_failing() {
+    let (world, fixture, _) = delta_world();
+
+    // A delta for the same versions, signed by someone else entirely.
+    let attacker = KeyPair::generate().unwrap();
+    let evil_dir = tempfile::tempdir().unwrap();
+    let evil_base = build_package(evil_dir.path(), &attacker, "1.0.0");
+    let evil_target = build_package(evil_dir.path(), &attacker, "1.1.0");
+    let evil_delta = evil_dir.path().join("evil.xpkgd");
+    xpack_package::delta::build(&evil_base, &evil_target, &evil_delta).unwrap();
+    fixture.serve_file(&format!("{BASE}/1.0.0-to-1.1.0.xpkgd"), &evil_delta);
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+    assert!(
+        fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")),
+        "an unsigned-for-us delta must fall back, not install"
+    );
+}
+
+#[test]
+fn a_delta_for_a_version_that_is_not_installed_is_ignored() {
+    // The index offers a delta from 0.9.0; 1.0.0 is installed. Downloading it
+    // would waste the user's bandwidth on something that cannot apply.
+    let world = World::new();
+    let target = build_package(world.dir.path(), &world.key, "1.1.0");
+    let size = std::fs::metadata(&target).unwrap().len();
+
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_with_delta("1.1.0", size, "0.9.0", "other.xpkgd", 10));
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &target);
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+    assert!(
+        !fixture.was_fetched(&format!("{BASE}/other.xpkgd")),
+        "an inapplicable delta was fetched"
+    );
+}
+
+#[test]
+fn a_delta_whose_base_was_pruned_falls_back() {
+    // `prune` removes old versions, and a delta needs its base on disk.
+    let (world, fixture, _) = delta_world();
+    let base_dir = world.paths.version_dir(&Version::parse("1.0.0").unwrap());
+    // The file the delta expects to reuse rather than carry.
+    std::fs::remove_file(base_dir.join("runtime/lib.bin")).unwrap();
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+    assert!(fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")));
 }

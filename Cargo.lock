@@ -1464,6 +1464,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "ureq",
+ "walkdir",
  "xpack-core",
  "xpack-install",
  "xpack-package",

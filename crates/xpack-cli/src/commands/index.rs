@@ -42,10 +42,10 @@ use std::process::ExitCode;
 
 use clap::Args as ClapArgs;
 use serde::Serialize;
-use xpack_core::{Error, Manifest, Result};
+use xpack_core::{Error, Manifest, Platform, Result};
 use xpack_package::PackageReader;
 use xpack_security::sha256_reader;
-use xpack_update::index::{PackageRef, UpdateIndex};
+use xpack_update::index::{DeltaRef, PackageRef, UpdateIndex};
 
 /// Arguments for `xpack index`.
 #[derive(ClapArgs)]
@@ -69,6 +69,16 @@ pub(crate) struct Args {
     /// URL of the release notes, recorded in every index written.
     #[arg(long, value_name = "URL")]
     release_notes: Option<String>,
+
+    /// Deltas to offer beside the full package.
+    ///
+    /// Repeatable. Each is matched to the platform and version it targets, so
+    /// one run can publish every platform's deltas at once. A delta for a
+    /// release that is not being indexed is an error rather than a silent
+    /// omission — publishing an index that fails to mention a delta the
+    /// publisher built is a saving quietly thrown away.
+    #[arg(long = "delta", value_name = "FILE")]
+    deltas: Vec<PathBuf>,
 
     /// Offer this release to only a percentage of installations, 0 to 100.
     ///
@@ -115,7 +125,13 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         described.push(describe(path, key.as_ref())?);
     }
 
+    let mut deltas = Vec::new();
+    for path in &args.deltas {
+        deltas.push(describe_delta(path)?);
+    }
+
     ensure_one_application(&described)?;
+    ensure_every_delta_has_a_release(&deltas, &described)?;
     check_for_url_collisions(&described);
 
     // Every refusal happens before the first write. A run that fails must
@@ -125,7 +141,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
 
     let mut written = Vec::new();
     for (package, path) in described.iter().zip(targets) {
-        written.push(write_index(package, path, args)?);
+        written.push(write_index(package, path, args, &deltas)?);
     }
 
     if args.json {
@@ -186,6 +202,74 @@ fn describe(path: &std::path::Path, key: Option<&xpack_security::PublicKey>) -> 
         .to_string();
 
     Ok(Described { file_name, manifest, sha256, size })
+}
+
+/// Everything read out of one delta file.
+struct DescribedDelta {
+    file_name: String,
+    application: String,
+    platform: Platform,
+    base: xpack_core::Version,
+    target: xpack_core::Version,
+    sha256: xpack_core::digest::Sha256Digest,
+    size: u64,
+}
+
+/// Reads a delta's own manifest and hashes its bytes.
+///
+/// Unverified, exactly as a package is here: this decides what to publish, and
+/// what makes the result trustworthy is the signature the client checks.
+fn describe_delta(path: &std::path::Path) -> Result<DescribedDelta> {
+    let mut reader = PackageReader::open(path)?;
+    let manifest = reader.peek_manifest_unverified()?;
+    let base = reader.peek_delta_base_unverified()?;
+
+    let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
+    let (sha256, size) = sha256_reader(&mut std::io::BufReader::new(file))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::invalid("delta", format!("{} has no file name", path.display())))?
+        .to_string();
+
+    Ok(DescribedDelta {
+        file_name,
+        application: manifest.application.id,
+        platform: manifest.platform,
+        base,
+        target: manifest.application.version,
+        sha256,
+        size,
+    })
+}
+
+/// Refuses a delta whose release is not being published in this run.
+///
+/// The realistic mistake is indexing last release's deltas with this
+/// release's package, which produces an index offering a delta no client can
+/// use — and which fails only after every one of them has downloaded it.
+fn ensure_every_delta_has_a_release(
+    deltas: &[DescribedDelta],
+    packages: &[Described],
+) -> Result<()> {
+    for delta in deltas {
+        let matched = packages.iter().any(|p| {
+            p.manifest.platform == delta.platform
+                && p.manifest.application.version == delta.target
+                && p.manifest.application.id == delta.application
+        });
+        if !matched {
+            return Err(Error::invalid(
+                "delta",
+                format!(
+                    "{} rebuilds {} {} for {}, which is not among the packages being indexed",
+                    delta.file_name, delta.application, delta.target, delta.platform
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a mixed set of applications.
@@ -317,7 +401,12 @@ fn resolve_targets(packages: &[Described], out_dir: &std::path::Path) -> Result<
 }
 
 /// Writes one platform's index to an already-resolved path.
-fn write_index(package: &Described, path: PathBuf, args: &Args) -> Result<Written> {
+fn write_index(
+    package: &Described,
+    path: PathBuf,
+    args: &Args,
+    deltas: &[DescribedDelta],
+) -> Result<Written> {
     let manifest = &package.manifest;
     let channel = manifest.update.channel.clone();
 
@@ -333,6 +422,23 @@ fn write_index(package: &Described, path: PathBuf, args: &Args) -> Result<Writte
         },
         release_notes: args.release_notes.clone(),
         rollout: args.rollout,
+        // Only the ones that rebuild *this* platform's release. A delta is
+        // built from one published package to another, so it belongs to
+        // exactly one index.
+        deltas: deltas
+            .iter()
+            .filter(|d| {
+                d.platform == manifest.platform
+                    && d.target == manifest.application.version
+                    && d.application == manifest.application.id
+            })
+            .map(|d| DeltaRef {
+                from: d.base.clone(),
+                file: d.file_name.clone(),
+                size: d.size,
+                sha256: Some(d.sha256),
+            })
+            .collect(),
     };
 
     // The layout mirrors what the updater fetches: one directory per platform,

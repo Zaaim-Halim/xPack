@@ -24,6 +24,26 @@ pub struct PackageRef {
     pub sha256: Option<Sha256Digest>,
 }
 
+/// A delta the server offers, and the version it applies to.
+///
+/// Every field is **attacker-controlled**, exactly as [`PackageRef`] is. A
+/// delta is chosen from this, downloaded and then verified against the
+/// publisher's signature over the target manifest; nothing here is trusted
+/// further than deciding what to fetch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeltaRef {
+    /// The installed version this delta rebuilds from.
+    pub from: Version,
+    /// Path or URL fragment, relative to the index.
+    pub file: String,
+    /// Claimed size in bytes.
+    pub size: u64,
+    /// Claimed SHA-256 of the delta file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Sha256Digest>,
+}
+
 /// What an update server publishes.
 ///
 /// # This document is not a trust input
@@ -55,6 +75,14 @@ pub struct UpdateIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_notes: Option<String>,
 
+    /// Deltas the server offers, keyed by the version each applies to.
+    ///
+    /// Purely an optimisation. An index with none, or with none matching the
+    /// installed version, updates by the full package exactly as before — and
+    /// so does one whose delta turns out to be unusable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deltas: Vec<DeltaRef>,
+
     /// Percentage of installations this release is offered to, 0 to 100.
     ///
     /// Absent means fully published, which is what every index written before
@@ -73,6 +101,20 @@ fn default_channel() -> String {
 }
 
 impl UpdateIndex {
+    /// The delta that rebuilds this release from `installed`, if one is offered.
+    ///
+    /// Matched on an exact version. A delta is built from one specific
+    /// published package to another, so "close enough" does not exist: the
+    /// files it omits are precisely the ones that version has.
+    ///
+    /// The first match wins, and a duplicate is not an error — the index is
+    /// untrusted and every candidate is verified after download anyway, so a
+    /// server repeating itself costs a wasted attempt at worst, and rejecting
+    /// the whole index over it would deny an update for a cosmetic fault.
+    pub fn delta_from(&self, installed: &Version) -> Option<&DeltaRef> {
+        self.deltas.iter().find(|delta| &delta.from == installed)
+    }
+
     /// Parses an index document, bounded before allocation.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > MAX_INDEX_BYTES {

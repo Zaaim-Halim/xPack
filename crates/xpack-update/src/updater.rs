@@ -87,6 +87,49 @@ pub struct UpdateOptions {
     pub respect_rollout: bool,
 }
 
+/// Which artefact an attempt fetches.
+///
+/// A delta and a full package are the same operation — download a file,
+/// verify it against the publisher's signature, install it — differing only in
+/// what turns the file into a version directory. Modelling the difference as a
+/// value rather than a second code path is what keeps the download rules, the
+/// lock windows and the phase writes identical for both.
+#[derive(Debug, Clone, Copy)]
+enum Fetch<'a> {
+    /// The whole package.
+    Full,
+    /// A delta, rebuilt against the version already installed.
+    Delta(&'a crate::index::DeltaRef),
+}
+
+impl Fetch<'_> {
+    /// The file to request, relative to the index.
+    fn file<'i>(self, index: &'i UpdateIndex) -> &'i str
+    where
+        Self: 'i,
+    {
+        match self {
+            Self::Full => &index.package.file,
+            Self::Delta(delta) => &delta.file,
+        }
+    }
+
+    /// The size the index claims, which bounds the download.
+    fn size(self, index: &UpdateIndex) -> u64 {
+        match self {
+            Self::Full => index.package.size,
+            Self::Delta(delta) => delta.size,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Full => "package",
+            Self::Delta(_) => "delta",
+        }
+    }
+}
+
 /// An update the server offers and this installation would accept.
 #[derive(Debug, Clone)]
 pub struct Available {
@@ -221,6 +264,48 @@ impl<'a> Updater<'a> {
             return Ok(None);
         }
 
+        // A delta only exists for the version actually installed, and state
+        // is what says which that is. Asking the index first would let
+        // whoever serves it choose which directory gets read.
+        let installed = state.current_version.clone();
+        let chosen = installed.as_ref().and_then(|version| index.delta_from(version));
+
+        if let Some(delta) = chosen {
+            match self.attempt(&index, base_url, options, Fetch::Delta(delta)) {
+                Ok(outcome) => return Ok(outcome),
+                Err(error) => {
+                    // Never fatal. A delta is an optimisation: a pruned base, a
+                    // file that no longer hashes, a malformed archive or a
+                    // server serving nonsense all end the same way — fetch the
+                    // whole package, which needs nothing from this machine.
+                    tracing::warn!(
+                        %error,
+                        from = %delta.from,
+                        to = %index.version,
+                        "the delta could not be used; falling back to the full package"
+                    );
+                }
+            }
+        }
+
+        self.attempt(&index, base_url, options, Fetch::Full)
+    }
+
+    /// One download-and-install attempt, for a delta or the full package.
+    ///
+    /// Self-contained on purpose: it takes its own download lease and leaves
+    /// the phase clear however it ends, so a failed delta attempt is followed
+    /// by a full one starting from exactly the state it would have found if
+    /// the delta had never been offered.
+    fn attempt(
+        &self,
+        index: &UpdateIndex,
+        base_url: &str,
+        options: &UpdateOptions,
+        fetch: Fetch<'_>,
+    ) -> Result<Option<Version>> {
+        let application = self.application_id()?;
+
         // --- Window 2 -----------------------------------------------------
         // The lease is taken here, before this window closes, so that recovery
         // in another process can never see `Downloading` with a free lease
@@ -251,7 +336,7 @@ impl<'a> Updater<'a> {
         };
 
         // --- Unlocked: the download ---------------------------------------
-        let downloaded = match self.download(&index, base_url) {
+        let downloaded = match self.download(index, base_url, fetch) {
             Ok(path) => path,
             Err(e) => {
                 // The lease is still held, so this reset cannot race a
@@ -263,7 +348,7 @@ impl<'a> Updater<'a> {
 
         // --- Window 3 -----------------------------------------------------
         let lock = self.lock()?;
-        let result = self.finish(&lock, &index, &downloaded, options);
+        let result = self.finish(&lock, index, &downloaded, options, fetch);
 
         // Released only after the installation lock is held again, closing the
         // window in the other direction.
@@ -280,6 +365,7 @@ impl<'a> Updater<'a> {
         index: &UpdateIndex,
         downloaded: &std::path::Path,
         options: &UpdateOptions,
+        fetch: Fetch<'_>,
     ) -> Result<Option<Version>> {
         let application = self.application_id()?;
         let mut state = lock.load_or_new_state(&application)?;
@@ -323,27 +409,52 @@ impl<'a> Updater<'a> {
         lock.save_state(&state)?;
         self.progress.report(&ProgressEvent::Verifying { version: index.version.clone() });
 
-        let verify = open_and_verify(downloaded, lock, &TrustDecision::UsePinned);
-        let mut verified = match verify {
-            Ok(package) => package,
-            Err(e) => {
-                // A package that fails verification is not retried; it is
-                // destroyed. Leaving it on disk invites a later code path to
-                // find it and treat it as trustworthy.
-                let _ = atomic::remove_file_if_exists(downloaded);
-                self.clear_phase(lock)?;
-                return Err(e);
-            }
+        // A delta and a package verify against the same pinned keys and the
+        // same signature over the same manifest; only the shape of what was
+        // downloaded differs.
+        let mut delta = None;
+        let mut package = None;
+        let produced = match fetch {
+            Fetch::Full => match open_and_verify(downloaded, lock, &TrustDecision::UsePinned) {
+                Ok(p) => {
+                    let version = p.manifest().application.version.clone();
+                    package = Some(p);
+                    version
+                }
+                Err(e) => {
+                    // A package that fails verification is not retried; it is
+                    // destroyed. Leaving it on disk invites a later code path
+                    // to find it and treat it as trustworthy.
+                    let _ = atomic::remove_file_if_exists(downloaded);
+                    self.clear_phase(lock)?;
+                    return Err(e);
+                }
+            },
+            Fetch::Delta(_) => match xpack_install::open_and_verify_delta(downloaded, lock) {
+                Ok(d) => {
+                    let version = d.manifest().application.version.clone();
+                    delta = Some(d);
+                    version
+                }
+                Err(e) => {
+                    let _ = atomic::remove_file_if_exists(downloaded);
+                    self.clear_phase(lock)?;
+                    return Err(e);
+                }
+            },
         };
 
         // The index said one thing; the signed manifest says what is true.
-        if verified.manifest().application.version != index.version {
+        // Checked for a delta too: the manifest it carries is the target's, so
+        // a delta claiming to produce a version it does not is caught here
+        // rather than after assembling the wrong tree.
+        if produced != index.version {
             let _ = atomic::remove_file_if_exists(downloaded);
             self.clear_phase(lock)?;
             return Err(Error::Integrity(format!(
-                "the index offered {} but the signed package contains {}",
+                "the index offered {} but the signed {} contains {produced}",
                 index.version,
-                verified.manifest().application.version
+                fetch.describe()
             )));
         }
 
@@ -370,8 +481,22 @@ impl<'a> Updater<'a> {
             desktop_roots: None,
         };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
-        let outcome =
-            installer.install_with_progress(&mut verified, &install_options, self.progress)?;
+
+        let outcome = if let Some(delta) = delta.as_mut() {
+            // The base is the version state says is installed, and the delta's
+            // own claim is checked against it inside `DeltaSource`. Reading the
+            // base from the delta instead would let the server pick the
+            // directory that gets rebuilt from.
+            let base_version = state.current_version.clone().ok_or_else(|| {
+                Error::invalid("update", "a delta cannot apply: nothing is installed")
+            })?;
+            let base_dir = self.paths.version_dir(&base_version);
+            let mut source = xpack_install::DeltaSource::new(delta, &base_version, base_dir)?;
+            installer.install_from_with_progress(&mut source, &install_options, self.progress)?
+        } else {
+            let package = package.as_mut().expect("one of the two was verified above");
+            installer.install_from_with_progress(package, &install_options, self.progress)?
+        };
 
         atomic::remove_file_if_exists(downloaded)?;
         tracing::info!(version = %outcome.version, "update installed");
@@ -438,7 +563,12 @@ impl<'a> Updater<'a> {
     /// Writes no state: it runs with the installation lock released, so the
     /// phase it would write could not be trusted by the time it landed. The
     /// phase is set before this is called and resolved after it returns.
-    fn download(&self, index: &UpdateIndex, base_url: &str) -> Result<std::path::PathBuf> {
+    fn download(
+        &self,
+        index: &UpdateIndex,
+        base_url: &str,
+        fetch: Fetch<'_>,
+    ) -> Result<std::path::PathBuf> {
         let downloads = self.paths.downloads_dir();
         atomic::create_dir_all(&downloads)?;
 
@@ -455,19 +585,19 @@ impl<'a> Updater<'a> {
         // A declared size of zero is either a broken publisher or a hostile
         // server buying itself the absolute ceiling to write with. Neither is
         // worth accepting: the index must say how big the package is.
-        if index.package.size == 0 {
-            return Err(Error::Transport(
-                "the update index declares no package size; refusing to download an unbounded \
-                 response"
-                    .to_string(),
-            ));
+        if fetch.size(index) == 0 {
+            return Err(Error::Transport(format!(
+                "the update index declares no size for the {}; refusing to download an \
+                 unbounded response",
+                fetch.describe()
+            )));
         }
-        let limit = index.package.size.min(MAX_PACKAGE_BYTES);
-        let url = package_url(base_url, &index.package.file);
+        let limit = fetch.size(index).min(MAX_PACKAGE_BYTES);
+        let url = package_url(base_url, fetch.file(index));
 
         self.progress.report(&ProgressEvent::DownloadStarted {
             version: index.version.clone(),
-            total_bytes: declared_size(index.package.size),
+            total_bytes: declared_size(fetch.size(index)),
         });
 
         let result = (|| -> Result<u64> {

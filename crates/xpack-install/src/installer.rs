@@ -87,6 +87,104 @@ pub struct Installed {
     pub recovery: RecoveryReport,
 }
 
+/// Where an installed version's files come from.
+///
+/// A full package extracts; a delta assembles from the version already on
+/// disk. Everything *else* about installing — recovery, the downgrade rule,
+/// staging, promotion, the phase writes, activation, the desktop entry — is
+/// identical, and a second copy of it for deltas is how the two would come to
+/// disagree about something that matters.
+///
+/// Both sources verify every byte against the same signed manifest before it
+/// reaches staging, which is why the rest of the install path does not need to
+/// know which one it was handed.
+pub trait InstallSource {
+    /// The signed manifest describing the version.
+    fn manifest(&self) -> &xpack_core::Manifest;
+
+    /// The exact bytes the signature was verified over.
+    fn manifest_bytes(&self) -> &[u8];
+
+    /// The signature over those bytes.
+    fn signature(&self) -> &xpack_security::Signature;
+
+    /// Writes the version's files into `staging`, verifying every one.
+    fn materialise(&mut self, staging: &Path, progress: &dyn ProgressReporter) -> Result<()>;
+
+    /// Refuses a version built for a different platform.
+    ///
+    /// Defaulted, because the answer is a property of the signed manifest and
+    /// not of how the files arrive.
+    fn ensure_installable_on(&self, host: Platform) -> Result<()> {
+        let package = self.manifest().platform;
+        if package.accepts(host) {
+            return Ok(());
+        }
+        Err(Error::PlatformMismatch { package: package.to_string(), host: host.to_string() })
+    }
+}
+
+impl InstallSource for VerifiedPackage {
+    fn manifest(&self) -> &xpack_core::Manifest {
+        Self::manifest(self)
+    }
+
+    fn manifest_bytes(&self) -> &[u8] {
+        Self::manifest_bytes(self)
+    }
+
+    fn signature(&self) -> &xpack_security::Signature {
+        Self::signature(self)
+    }
+
+    fn materialise(&mut self, staging: &Path, progress: &dyn ProgressReporter) -> Result<()> {
+        self.extract_to_with_progress(staging, progress)
+    }
+}
+
+/// A delta, together with the installed version it rebuilds from.
+///
+/// Holding the base directory here rather than passing it separately means a
+/// delta cannot reach the install path without one.
+pub struct DeltaSource<'a> {
+    delta: &'a mut xpack_package::VerifiedDelta,
+    base_dir: PathBuf,
+}
+
+impl<'a> DeltaSource<'a> {
+    /// Pairs a verified delta with the directory of the version it applies to.
+    ///
+    /// The installed version is supplied by the caller from **state**, and the
+    /// delta's own claim is checked against it — never the reverse, or
+    /// whoever served the index would choose which directory is read.
+    pub fn new(
+        delta: &'a mut xpack_package::VerifiedDelta,
+        installed: &Version,
+        base_dir: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        delta.ensure_applies_to(installed)?;
+        Ok(Self { delta, base_dir: base_dir.into() })
+    }
+}
+
+impl InstallSource for DeltaSource<'_> {
+    fn manifest(&self) -> &xpack_core::Manifest {
+        self.delta.manifest()
+    }
+
+    fn manifest_bytes(&self) -> &[u8] {
+        self.delta.manifest_bytes()
+    }
+
+    fn signature(&self) -> &xpack_security::Signature {
+        self.delta.signature()
+    }
+
+    fn materialise(&mut self, staging: &Path, progress: &dyn ProgressReporter) -> Result<()> {
+        self.delta.assemble_to_with_progress(staging, &self.base_dir, progress)
+    }
+}
+
 /// Drives an installation. Every method runs under the lock it borrows.
 #[derive(Debug)]
 pub struct Installer<'lock> {
@@ -118,6 +216,15 @@ impl<'lock> Installer<'lock> {
         self.install_with_progress(package, options, &NoProgress)
     }
 
+    /// Installs from any verified source: a full package or an assembled delta.
+    pub fn install_from(
+        &self,
+        source: &mut dyn InstallSource,
+        options: &InstallOptions,
+    ) -> Result<Installed> {
+        self.install_from_with_progress(source, options, &NoProgress)
+    }
+
     /// Installs, reporting extraction and activation as they happen.
     ///
     /// [`Self::install`] is this with a reporter that discards everything, so
@@ -126,6 +233,16 @@ impl<'lock> Installer<'lock> {
     pub fn install_with_progress(
         &self,
         package: &mut VerifiedPackage,
+        options: &InstallOptions,
+        progress: &dyn ProgressReporter,
+    ) -> Result<Installed> {
+        self.install_from_with_progress(package, options, progress)
+    }
+
+    /// Installs from any verified source, reporting progress.
+    pub fn install_from_with_progress(
+        &self,
+        package: &mut dyn InstallSource,
         options: &InstallOptions,
         progress: &dyn ProgressReporter,
     ) -> Result<Installed> {
@@ -192,7 +309,7 @@ impl<'lock> Installer<'lock> {
         self.lock.save_state(&state)?;
 
         let staging = paths.staging_dir(&version);
-        package.extract_to_with_progress(&staging, progress)?;
+        package.materialise(&staging, progress)?;
         write_version_metadata(&staging, package)?;
 
         self.promote(&staging, &version, &state)?;
@@ -673,7 +790,7 @@ impl<'lock> Installer<'lock> {
 /// The manifest bytes are written verbatim. Re-serialising a parsed manifest
 /// would produce different bytes and the signature beside them would no longer
 /// verify.
-fn write_version_metadata(staging: &std::path::Path, package: &VerifiedPackage) -> Result<()> {
+fn write_version_metadata(staging: &std::path::Path, package: &dyn InstallSource) -> Result<()> {
     let dir = staging.join(xpack_core::manifest::RESERVED_METADATA_DIR);
     atomic::create_dir_all(&dir)?;
     atomic::write(&dir.join(xpack_core::manifest::MANIFEST_ENTRY), package.manifest_bytes())?;

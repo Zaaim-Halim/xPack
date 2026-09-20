@@ -47,10 +47,11 @@ pub mod recovery;
 pub mod trust;
 
 pub use installer::{
-    InstallOptions, Installed, Installer, LauncherOutcome, Removal, uninstall, uninstall_with_roots,
+    DeltaSource, InstallOptions, InstallSource, Installed, Installer, LauncherOutcome, Removal,
+    uninstall, uninstall_with_roots,
 };
 pub use integration::{Entry as DesktopEntry, Outcome as DesktopOutcome};
 pub use recovery::RecoveryReport;
-pub use trust::{TrustDecision, open_and_verify};
+pub use trust::{TrustDecision, open_and_verify, open_and_verify_delta};
 
 pub use xpack_platform::InstallLock;
