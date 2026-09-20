@@ -1,0 +1,265 @@
+name: Release
+
+# Publishes the binaries. Everything else that distributes xPack — an install
+# script, a Homebrew formula, a Maven artifact, a container image — is a thin
+# wrapper over the archives this workflow attaches to a GitHub Release, so this
+# is the one place that has to be right.
+#
+# Every target is built on a runner of its own architecture. Nothing here
+# cross-compiles: the C in `ring` needs a cross toolchain that is a standing
+# source of breakage, and a Windows binary cannot be linked anywhere but
+# Windows anyway. Renting five machines is cheaper than maintaining that.
+
+on:
+  push:
+    tags: ["v*"]
+  # A dry run builds and verifies everything and publishes nothing, so the
+  # release path can be exercised without spending a version number on it.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build / ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing must not hide whether the others are fine.
+      fail-fast: false
+      matrix:
+        include:
+          # Linux links against musl so the binaries do not inherit the build
+          # host's glibc version. A launcher that ships to end users has to run
+          # on whatever distribution they happen to have, including Alpine and
+          # anything older than this runner.
+          - platform: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          # `ubuntu-24.04-arm` is free for public repositories only. On a
+          # private repository this job will not find a runner; build it on an
+          # arm64 machine and upload by hand, or pay for the runner.
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+          - platform: macos-x64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - platform: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - platform: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+
+      # `ring` compiles C for the target, so a musl build needs a musl C
+      # compiler. If this job ever fails, this is the first place to look: the
+      # cause is the toolchain rather than anything in this repository.
+      - name: Install musl tooling
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tagged="${GITHUB_REF_NAME#v}"
+            # A tag that disagrees with the workspace version would publish
+            # archives whose names promise something the binaries inside do
+            # not report, which is the kind of thing nobody notices until a
+            # bug report cites the wrong version.
+            if [ "$tagged" != "$declared" ]; then
+              echo "tag v$tagged does not match the workspace version $declared" >&2
+              exit 1
+            fi
+            echo "version=$tagged" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$declared-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --locked, so a release is built from the dependency versions that were
+      # tested rather than whatever resolved on the day.
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Check the Linux binaries are actually static
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+            path="target/${{ matrix.target }}/release/$bin"
+            file "$path"
+            if ldd "$path" 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "$bin is dynamically linked; it would not run on a different libc" >&2
+              ldd "$path" || true
+              exit 1
+            fi
+          done
+
+      # Every binary an installation needs, in one directory. That is not a
+      # tidiness choice: `xpack install` and `xpack installer` find the
+      # launcher, updater and uninstaller beside the `xpack` they were run
+      # from, so an archive holding only the CLI would pack fine and fail to
+      # install.
+      - name: Stage the archive
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          name="xpack-$version-${{ matrix.platform }}"
+          out="target/${{ matrix.target }}/release"
+          suffix=""
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            suffix=".exe"
+          fi
+
+          mkdir -p "staging/$name"
+          for bin in xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+            cp "$out/$bin$suffix" "staging/$name/"
+          done
+          # Only Windows distinguishes a windowed build, and only Windows
+          # needs one: it is the launcher for an application with no console
+          # to report to.
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            cp "$out/xpack-launcherw$suffix" "staging/$name/"
+          fi
+          cp LICENSE "staging/$name/" 2>/dev/null || true
+
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every target is built natively, so every one of them can be run
+          # here. A release that ships a binary nobody executed is a release
+          # that finds out on a user's machine.
+          "staging/${{ steps.stage.outputs.name }}/xpack" --version
+
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.stage.outputs.name }}"
+          mkdir -p dist
+          cd staging
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "../dist/$name.zip" "$name" >/dev/null
+          else
+            tar czf "../dist/$name.tar.gz" "$name"
+          fi
+          cd ..
+          ls -la dist
+
+      - name: Checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+            cat "$f.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    # A dry run stops here. Everything above it has already proved the
+    # archives can be built, which is the part that breaks.
+    if: github.ref_type == 'tag'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+
+      - name: Collect the archives and their checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find incoming -type f -name '*.tar.gz' -exec mv {} dist/ \;
+          find incoming -type f -name '*.zip' -exec mv {} dist/ \;
+          # One SHA256SUMS beside the archives, in the format `sha256sum -c`
+          # reads, so verifying a download needs no tooling beyond coreutils.
+          find incoming -type f -name '*.sha256' -exec cat {} + | sort -k2 > dist/SHA256SUMS
+          rm -rf incoming
+          echo "publishing:"
+          ls -la dist
+          cat dist/SHA256SUMS
+
+      # The GitHub CLI is preinstalled on the runner. Using it rather than a
+      # third-party action keeps the release step free of code this project
+      # has not read, which matters more than usual for a tool whose whole job
+      # is deciding what a user's machine is allowed to run.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(cat <<EOF
+          ## Installing
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          \`\`\`
+
+          Or download the archive for your platform below, unpack it, and put
+          the directory on your \`PATH\`. Keep the binaries together: the CLI
+          finds the launcher, updater and uninstaller beside itself.
+
+          ## Verifying a download
+
+          \`\`\`sh
+          sha256sum -c SHA256SUMS --ignore-missing
+          \`\`\`
+
+          Linux binaries are statically linked against musl and run on any
+          distribution, including Alpine. macOS and Windows builds are not
+          code signed yet, so a browser download will be quarantined; fetching
+          with \`curl\` is not.
+          EOF
+          )
+          gh release create "$GITHUB_REF_NAME" \
+            --title "xPack $version" \
+            --notes "$notes" \
+            --verify-tag \
+            dist/*
