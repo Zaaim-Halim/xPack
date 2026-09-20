@@ -67,6 +67,11 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         allow_downgrade: args.allow_downgrade,
         activate: !args.no_activate,
         launcher: super::default_launcher(),
+        gui_launcher: if xpack_core::HAS_WINDOWED_LAUNCHER {
+            super::default_gui_launcher()
+        } else {
+            None
+        },
         updater: super::default_updater(),
         uninstaller: super::default_uninstaller(),
     };

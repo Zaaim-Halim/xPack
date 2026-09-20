@@ -119,6 +119,12 @@ fn remove(paths: &InstallPaths, relocated: bool, executable: &std::path::Path) -
         }
     };
 
+    if let xpack_install::DesktopOutcome::Done(entries) = &removal.desktop {
+        for entry in entries {
+            eprintln!("Removed the desktop entry at {}", entry.display());
+        }
+    }
+
     if removal.is_complete() {
         eprintln!("Removed {}", removal.root.display());
     } else {

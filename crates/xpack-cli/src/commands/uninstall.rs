@@ -40,6 +40,11 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     crate::output::field("application", &args.application);
     crate::output::field("root", removal.root.display());
     crate::output::field("removed", removal.is_complete());
+    if let xpack_install::DesktopOutcome::Done(entries) = &removal.desktop {
+        for entry in entries {
+            crate::output::field("desktop entry removed", entry.display());
+        }
+    }
 
     if !removal.is_complete() {
         eprintln!();

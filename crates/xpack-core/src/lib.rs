@@ -19,10 +19,13 @@ pub mod version;
 pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
-    Application, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadFile,
-    PayloadSpec, SIGNATURE_ENTRY, UpdateSpec,
+    Application, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY, Manifest,
+    PayloadFile, PayloadSpec, SIGNATURE_ENTRY, UpdateSpec,
 };
-pub use paths::InstallPaths;
+pub use paths::{
+    HAS_WINDOWED_LAUNCHER, InstallPaths, WINDOWS_MAX_PATH, ensure_launch_paths_fit,
+    host_launch_path_limit,
+};
 pub use platform::{Arch, Os, Platform};
 pub use progress::{JsonProgress, NoProgress, ProgressEvent, ProgressReporter, STREAM_SCHEMA};
 pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};

@@ -67,6 +67,13 @@ pub struct UpdateOptions {
     /// matters for the case where an update is also the first install, so the
     /// resulting installation is not left without an entry point.
     pub launcher: Option<std::path::PathBuf>,
+    /// Windowed launcher to place beside the console one, if it has none.
+    ///
+    /// Only meaningful on Windows. Carried for the same reason as the
+    /// launcher: an update that turns out to be a first install must not
+    /// produce an installation missing a binary every later install would
+    /// have placed.
+    pub gui_launcher: Option<std::path::PathBuf>,
 }
 
 /// An update the server offers and this installation would accept.
@@ -331,8 +338,12 @@ impl<'a> Updater<'a> {
             allow_downgrade: options.allow_downgrade,
             activate: options.activate,
             launcher: options.launcher.clone(),
+            gui_launcher: options.gui_launcher.clone(),
             updater: options.updater.clone(),
             uninstaller: options.uninstaller.clone(),
+            // The user's real directories. An update is a real installation,
+            // not a test, and the entry it refreshes is the one in their menu.
+            desktop_roots: None,
         };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
         let outcome =

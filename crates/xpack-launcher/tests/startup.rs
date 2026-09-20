@@ -115,6 +115,7 @@ fn build_with(
             require_startup_report: require_report,
         },
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };
@@ -344,6 +345,7 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
         update: UpdateSpec::default(),
         health: HealthSpec { startup_timeout_seconds: 30, ..Default::default() },
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };
@@ -428,6 +430,7 @@ fn each_probationary_start_is_counted_before_the_application_runs() {
         update: UpdateSpec::default(),
         health: HealthSpec { startup_timeout_seconds: 5, ..Default::default() },
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };
@@ -498,6 +501,7 @@ fn arguments_reach_the_application_unchanged() {
         update: UpdateSpec::default(),
         health: HealthSpec::default(),
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };
@@ -777,6 +781,7 @@ fn build_mandatory(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviou
         update: UpdateSpec { mandatory: true, ..UpdateSpec::default() },
         health: HealthSpec { startup_timeout_seconds: 1, ..Default::default() },
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };

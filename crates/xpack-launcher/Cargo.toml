@@ -12,6 +12,14 @@ authors.workspace = true
 name = "xpack-launcher"
 path = "src/main.rs"
 
+# The same program linked for the Windows subsystem, so a desktop shortcut can
+# open an application without a console window appearing behind it. Built on
+# every platform to keep one build graph; installed only on Windows, where the
+# subsystem attribute means anything.
+[[bin]]
+name = "xpack-launcherw"
+path = "src/bin/launcherw.rs"
+
 [dependencies]
 xpack-core.workspace = true
 xpack-install.workspace = true

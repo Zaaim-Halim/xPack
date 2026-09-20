@@ -142,6 +142,7 @@ impl<'a> BackgroundUpdater<'a> {
             allow_downgrade: false,
             activate: false,
             launcher: None,
+            gui_launcher: None,
             updater: None,
             uninstaller: None,
         };

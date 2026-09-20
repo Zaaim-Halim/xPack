@@ -234,6 +234,11 @@ fn restrict_to_owner(path: &Path) -> Result<()> {
         .map_err(|e| Error::io(path, e))
 }
 
+// The signature has to match the Unix version, which genuinely can fail, so
+// this one returns a `Result` it never uses. Clippy is right that the wrapper
+// is unnecessary *here*; removing it would split the two into different
+// signatures and push the platform branch out to every caller.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn restrict_to_owner(_path: &Path) -> Result<()> {
     Ok(())

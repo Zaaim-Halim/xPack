@@ -503,6 +503,9 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
         .map_err(|e| Error::io(path, e))
 }
 
+// Mirrors the Unix version's signature, which can genuinely fail. Splitting
+// the two would move the platform branch out to the call site.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     let _ = (path, mode);

@@ -39,6 +39,22 @@ pub struct InstallOptions {
     /// Without a launcher the installation is complete and correct but has no
     /// entry point, which is only useful when something else provides one.
     pub launcher: Option<PathBuf>,
+    /// Where desktop entries are written, when the manifest asks for one.
+    ///
+    /// `None` uses the directories belonging to the user running this, which
+    /// is what every real installation wants. A test supplies a temporary
+    /// directory instead — without this, a test whose manifest asked for a
+    /// shortcut would write a real entry into the developer's own application
+    /// menu and leave it there.
+    pub desktop_roots: Option<crate::integration::Roots>,
+    /// Windowed launcher to place beside the console one, if any.
+    ///
+    /// Only meaningful on Windows, where a console build opened from a
+    /// shortcut shows an empty console window behind the application. The
+    /// caller decides whether to supply one; this crate does not consult the
+    /// host platform, so a cross-platform bootstrap installer stays in charge
+    /// of what it ships.
+    pub gui_launcher: Option<PathBuf>,
 }
 
 /// What installing a launcher did.
@@ -59,10 +75,14 @@ pub struct Installed {
     pub activated: bool,
     /// What happened to the launcher, if one was supplied.
     pub launcher: Option<LauncherOutcome>,
+    /// What happened to the windowed launcher, if one was supplied.
+    pub gui_launcher: Option<LauncherOutcome>,
     /// What happened to the background updater, if one was supplied.
     pub updater: Option<LauncherOutcome>,
     /// What happened to the uninstaller, if one was supplied.
     pub uninstaller: Option<LauncherOutcome>,
+    /// What happened to the desktop entry the manifest asked for.
+    pub desktop: crate::integration::Outcome,
     /// What recovery cleaned up beforehand.
     pub recovery: RecoveryReport,
 }
@@ -119,6 +139,17 @@ impl<'lock> Installer<'lock> {
         // package into another's directory would corrupt both.
         self.ensure_same_application(&manifest.application.id)?;
         package.ensure_installable_on(Platform::host()?)?;
+
+        // Checked here rather than at launch. Windows cannot start a program
+        // from a path longer than `MAX_PATH`, however well the package
+        // extracted, so a version that lands too deep installs cleanly and
+        // then cannot be opened. Refusing now reports it while the user is
+        // still watching the install they asked for.
+        xpack_core::ensure_launch_paths_fit(
+            &paths.version_dir(&version),
+            &manifest.launch,
+            xpack_core::host_launch_path_limit(),
+        )?;
 
         let mut state = self.load_state()?;
 
@@ -190,6 +221,10 @@ impl<'lock> Installer<'lock> {
             Some(source) => Some(self.install_launcher(source)?),
             None => None,
         };
+        let gui_launcher = match &options.gui_launcher {
+            Some(source) => Some(self.install_gui_launcher(source)?),
+            None => None,
+        };
         let updater = match &options.updater {
             Some(source) => Some(self.install_updater(source)?),
             None => None,
@@ -198,6 +233,14 @@ impl<'lock> Installer<'lock> {
             Some(source) => Some(self.install_uninstaller(source)?),
             None => None,
         };
+
+        // After the binaries, because the entry points at one of them, and a
+        // shortcut to a launcher that is not there yet would be broken for as
+        // long as the window between the two writes lasted.
+        //
+        // Never fails the install: see the integration module for why.
+        let desktop =
+            self.update_desktop_entry(&manifest, &version, options.desktop_roots.as_ref());
 
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
@@ -210,7 +253,16 @@ impl<'lock> Installer<'lock> {
             false
         };
 
-        Ok(Installed { version, activated, launcher, updater, uninstaller, recovery: report })
+        Ok(Installed {
+            version,
+            activated,
+            launcher,
+            gui_launcher,
+            updater,
+            uninstaller,
+            desktop,
+            recovery: report,
+        })
     }
 
     /// Moves a fully verified staging tree into place.
@@ -444,6 +496,69 @@ impl<'lock> Installer<'lock> {
         Self::install_binary(source, &self.lock.paths().launcher_file(), "launcher")
     }
 
+    /// Creates or refreshes the desktop entry the manifest asked for.
+    ///
+    /// Run on every install, not only the first. The entry records the
+    /// version, and on Windows the installed size, so an update that left the
+    /// old entry in place would leave the installed-apps list describing a
+    /// version that is no longer there.
+    ///
+    /// Returns an outcome rather than a `Result` so that a caller cannot fail
+    /// an otherwise perfect installation with `?` because a menu entry could
+    /// not be written.
+    fn update_desktop_entry(
+        &self,
+        manifest: &xpack_core::Manifest,
+        version: &Version,
+        roots: Option<&crate::integration::Roots>,
+    ) -> crate::integration::Outcome {
+        let paths = self.lock.paths();
+        let Some(mut entry) = crate::integration::Entry::from_manifest(manifest, paths) else {
+            return crate::integration::Outcome::NotRequested;
+        };
+
+        // The launcher the entry names has to be on disk. A shortcut to a
+        // missing executable is worse than no shortcut: it looks correct, and
+        // it fails with "no such file" naming a path the user can see.
+        //
+        // This is reachable without contrivance. `--no-launcher` installs
+        // neither build, and the background updater supplies neither, so an
+        // installation that never had the windowed build would otherwise have
+        // its entry rewritten to point at it by an update nobody watched.
+        //
+        // The same rule `update_current_link` applies to `current`.
+        match resolve_entry_target(&entry, paths) {
+            Some(target) => entry.target = target,
+            None => {
+                return crate::integration::Outcome::Failed(format!(
+                    "{} is not installed, so a desktop entry would point at nothing",
+                    entry.target.display()
+                ));
+            }
+        }
+
+        // The icon is copied out of the version directory first, because the
+        // entry points at the copy: a version directory is replaced by the
+        // next update and an entry pointing into one goes stale.
+        entry.icon = crate::integration::place_icon(paths, manifest, version);
+
+        let outcome = match roots {
+            Some(roots) => crate::integration::install_into(&entry, roots),
+            None => crate::integration::install(&entry),
+        };
+        outcome.log("install");
+        outcome
+    }
+
+    /// Places the windowed launcher in the installation root.
+    ///
+    /// Same rule as the console build, and it is the build a desktop shortcut
+    /// points at, so replacing it would break every shortcut that resolved
+    /// while the file was gone.
+    pub fn install_gui_launcher(&self, source: &Path) -> Result<LauncherOutcome> {
+        Self::install_binary(source, &self.lock.paths().gui_launcher_file(), "windowed launcher")
+    }
+
     /// Places the background updater in the installation root.
     ///
     /// Same rule as the launcher, and for a sharper version of the same
@@ -582,6 +697,8 @@ fn set_executable(path: &Path) -> Result<()> {
         .map_err(|e| Error::io(path, e))
 }
 
+// Mirrors the Unix version's signature, which genuinely can fail.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn set_executable(path: &Path) -> Result<()> {
     let _ = path;
@@ -597,6 +714,8 @@ pub struct Removal {
     pub root_removed: bool,
     /// Entries still present in the root, when it could not be removed.
     pub remaining: Vec<PathBuf>,
+    /// What happened to the desktop entry, if there was one.
+    pub desktop: crate::integration::Outcome,
 }
 
 impl Removal {
@@ -647,8 +766,25 @@ impl Removal {
 /// Application data. It lives wherever the application chose to put it, which
 /// xPack does not know and will not guess at.
 pub fn uninstall(lock: InstallLock) -> Result<Removal> {
+    uninstall_with_roots(lock, None)
+}
+
+/// Removes an installation, writing desktop changes under explicit roots.
+///
+/// See [`InstallOptions::desktop_roots`] for why this exists.
+pub fn uninstall_with_roots(
+    lock: InstallLock,
+    desktop_roots: Option<&crate::integration::Roots>,
+) -> Result<Removal> {
     let paths = lock.paths().clone();
     let root = paths.root().to_path_buf();
+
+    // Resolved *before* state is cleared and the versions are deleted. The
+    // Start-Menu shortcut and the macOS bundle are named after the display
+    // name, which lives in the installed manifest — read it afterwards and
+    // there is nothing left to read it from, and the entry is orphaned in the
+    // user's menu with no way to find it again.
+    let desktop_entry = desktop_entry_for_removal(&lock);
 
     // Cleared and persisted before anything is deleted, so an interruption
     // cannot leave state describing versions that no longer exist.
@@ -670,13 +806,36 @@ pub fn uninstall(lock: InstallLock) -> Result<Removal> {
     // and not the directory it names.
     atomic::remove_file_if_exists(&paths.current_link())?;
     atomic::remove_file_if_exists(&paths.launcher_file())?;
+    atomic::remove_file_if_exists(&paths.gui_launcher_file())?;
     atomic::remove_file_if_exists(&paths.updater_file())?;
     atomic::remove_file_if_exists(&paths.uninstaller_file())?;
+
+    // The icon copied into the root for the desktop entry, at the exact path
+    // the manifest implies rather than anything matching `icon.*`. Globbing
+    // would delete a user's own `icon.jpg` from the root, which this function
+    // promises never to do — such a file is reported in `remaining` instead.
+    if let Some(icon) = desktop_entry.as_ref().and_then(|entry| entry.icon.clone()) {
+        atomic::remove_file_if_exists(&icon)?;
+    }
 
     // The pinned signing keys. Leaving these behind is the consequential part
     // of an incomplete uninstall: a later reinstall would silently inherit a
     // trust decision the user believes they revoked.
     atomic::remove_dir_all_if_exists(&paths.config_dir())?;
+
+    // Before the lock is released, so it cannot race an install that starts
+    // the moment the lock is free and recreates the entry we are removing.
+    let desktop = match &desktop_entry {
+        Some(entry) => {
+            let outcome = match desktop_roots {
+                Some(roots) => crate::integration::remove_from(entry, roots),
+                None => crate::integration::remove(entry),
+            };
+            outcome.log("uninstall");
+            outcome
+        }
+        None => crate::integration::Outcome::NothingToDo,
+    };
 
     // Releases the lock and closes the handle to the file inside `state/`.
     // Everything after this point runs unlocked, which is why it is ordered
@@ -700,7 +859,46 @@ pub fn uninstall(lock: InstallLock) -> Result<Removal> {
         );
     }
     tracing::info!(root = %root.display(), root_removed, "installation removed");
-    Ok(Removal { root, root_removed, remaining })
+    Ok(Removal { root, root_removed, remaining, desktop })
+}
+
+/// Picks a launcher that actually exists for a desktop entry to point at.
+///
+/// Prefers the one the manifest implies, and falls back to the other build
+/// rather than giving up: on Windows a console window behind the application
+/// is a nuisance, while a shortcut to a missing file is broken. Returns `None`
+/// only when neither build is installed, which is what `--no-launcher`
+/// produces and is the case that must not create an entry at all.
+fn resolve_entry_target(
+    entry: &crate::integration::Entry,
+    paths: &xpack_core::InstallPaths,
+) -> Option<PathBuf> {
+    [entry.target.clone(), paths.launcher_file(), paths.gui_launcher_file()]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// Rebuilds the desktop entry an installation would have created.
+///
+/// Read from the active version's own manifest, because that is where the
+/// display name the entry is named after lives.
+///
+/// # Why a failure here is silent
+///
+/// An installation with no active version, or whose manifest has already been
+/// removed by a partial earlier uninstall, has nothing to rebuild from. There
+/// is then no way to know what the entry was called, and guessing would risk
+/// deleting a different application's shortcut. Reporting it as nothing to do
+/// and leaving the entry is the safe failure.
+fn desktop_entry_for_removal(lock: &InstallLock) -> Option<crate::integration::Entry> {
+    let paths = lock.paths();
+    let id = paths.application_id()?;
+    let state = lock.load_or_new_state(id).ok()?;
+    let version = state.current_version.clone().or_else(|| state.previous_version.clone())?;
+
+    let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
+    let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
+    crate::integration::Entry::from_manifest(&manifest, paths)
 }
 
 /// Lists a directory's entries, treating an unreadable directory as empty.

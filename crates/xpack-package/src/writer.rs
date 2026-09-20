@@ -211,6 +211,8 @@ fn unix_mode(path: &Path) -> Result<Option<u32>> {
     Ok(Some(metadata.permissions().mode() & 0o777))
 }
 
+// Mirrors the Unix version's signature, which reads metadata and can fail.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn unix_mode(path: &Path) -> Result<Option<u32>> {
     // Windows has no Unix mode bits to record. Packages built on Windows for a

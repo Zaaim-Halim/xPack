@@ -899,3 +899,199 @@ fn recovery_clears_a_download_whose_lease_is_gone() {
     let state = lock.load_state().unwrap().value;
     assert!(state.update.is_idle(), "got {:?}", state.update);
 }
+
+// --- desktop integration ------------------------------------------------
+//
+// The entry is the only thing xPack writes outside the installation root, so
+// these tests pass explicit roots inside a temporary directory. A test that
+// used the real ones would leave an entry in the menu of whoever ran the
+// suite.
+
+/// Builds a manifest asking for a desktop entry, with an icon in the payload.
+fn wants_a_shortcut() -> xpack_core::DesktopSpec {
+    xpack_core::DesktopSpec {
+        shortcut: true,
+        icon: Some("data.txt".into()),
+        categories: vec!["Utility".into()],
+        terminal: false,
+    }
+}
+
+#[test]
+fn a_package_that_asks_for_no_entry_gets_none() {
+    // The default, and the one that must never surprise a user by writing
+    // into their application menu.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let desktop = common::desktop_roots(dir.path());
+    let options = InstallOptions {
+        activate: true,
+        desktop_roots: Some(desktop.clone()),
+        ..Default::default()
+    };
+    let installed = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    assert_eq!(installed.desktop, xpack_install::DesktopOutcome::NotRequested);
+    assert!(!desktop.data.exists(), "something was written to the data directory");
+    assert!(!desktop.home.exists(), "something was written to the home directory");
+}
+
+#[test]
+fn a_package_that_asks_for_an_entry_gets_one_and_an_icon_beside_the_launcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let desktop = common::desktop_roots(dir.path());
+    let options = InstallOptions {
+        activate: true,
+        // An entry is only created when there is a launcher for it to point
+        // at; see the test below that asserts the refusal.
+        launcher: Some(common::fake_binary(dir.path(), "launcher")),
+        desktop_roots: Some(desktop.clone()),
+        ..Default::default()
+    };
+
+    let package = common::build_package_with(dir.path(), &key, "1.0.0", &wants_a_shortcut());
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    let installed = Installer::new(&lock).install(&mut verified, &options).unwrap();
+
+    let created = match &installed.desktop {
+        xpack_install::DesktopOutcome::Done(paths) => paths.clone(),
+        other => panic!("expected an entry to be created, got {other:?}"),
+    };
+    assert!(!created.is_empty());
+    for path in &created {
+        assert!(path.exists(), "{} was reported but does not exist", path.display());
+    }
+
+    // The icon is copied out of the version directory, because that directory
+    // is replaced by the next update and the entry must not point into it.
+    let icon = paths.root().join("icon.txt");
+    assert!(icon.is_file(), "the icon was not copied into the installation root");
+    assert!(!icon.starts_with(paths.versions_dir()));
+}
+
+#[test]
+fn uninstalling_takes_the_desktop_entry_and_the_icon_with_it() {
+    // A stale entry whose target no longer exists is the classic uninstaller
+    // failure, so this asserts on absence rather than on a return value.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let desktop = common::desktop_roots(dir.path());
+
+    let created = {
+        let lock = InstallLock::acquire(&paths).unwrap();
+        let options = InstallOptions {
+            activate: true,
+            launcher: Some(common::fake_binary(dir.path(), "launcher")),
+            desktop_roots: Some(desktop.clone()),
+            ..Default::default()
+        };
+        let package = common::build_package_with(dir.path(), &key, "1.0.0", &wants_a_shortcut());
+        let mut verified =
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+        let installed = Installer::new(&lock).install(&mut verified, &options).unwrap();
+        match installed.desktop {
+            xpack_install::DesktopOutcome::Done(paths) => paths,
+            other => panic!("expected an entry, got {other:?}"),
+        }
+    };
+
+    let lock = InstallLock::acquire(&paths).unwrap();
+    let removal = xpack_install::uninstall_with_roots(lock, Some(&desktop)).unwrap();
+
+    for path in &created {
+        assert!(!path.exists(), "{} survived the uninstall", path.display());
+    }
+    assert!(removal.is_complete(), "the root was not empty afterwards: {:?}", removal.remaining);
+}
+
+#[test]
+fn an_installation_with_no_launcher_gets_no_desktop_entry() {
+    // A shortcut to a missing executable is worse than no shortcut: it looks
+    // correct and fails with "no such file" naming a path the user can see.
+    // Reachable from `xpack install --no-launcher`, and from the background
+    // updater, which supplies no launcher on any staged update.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let desktop = common::desktop_roots(dir.path());
+    let options = InstallOptions {
+        activate: true,
+        desktop_roots: Some(desktop.clone()),
+        // No launcher and no windowed launcher, which is what --no-launcher does.
+        ..Default::default()
+    };
+
+    let package = common::build_package_with(dir.path(), &key, "1.0.0", &wants_a_shortcut());
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    let installed = Installer::new(&lock).install(&mut verified, &options).unwrap();
+
+    // Reported as a failure, not as "the manifest asked for nothing": the
+    // manifest did ask, and the caller is entitled to know it did not happen.
+    match &installed.desktop {
+        xpack_install::DesktopOutcome::Failed(reason) => {
+            assert!(reason.contains("not installed"), "got {reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // And nothing was written into the user's menu directories.
+    assert!(!desktop.data.exists(), "an entry was written to the data directory");
+    assert!(!desktop.home.exists(), "an entry was written to the home directory");
+
+    // The installation itself is still perfectly good.
+    assert!(installed.activated);
+}
+
+#[test]
+fn a_users_own_file_in_the_root_is_reported_rather_than_deleted() {
+    // `uninstall` promises to remove only what xPack put there. An earlier
+    // version of the icon cleanup matched any `icon.*` in the root, which
+    // would have deleted a user's own file.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let desktop = common::desktop_roots(dir.path());
+
+    {
+        let lock = InstallLock::acquire(&paths).unwrap();
+        let options = InstallOptions {
+            activate: true,
+            launcher: Some(common::fake_binary(dir.path(), "launcher")),
+            desktop_roots: Some(desktop.clone()),
+            ..Default::default()
+        };
+        let package = common::build_package_with(dir.path(), &key, "1.0.0", &wants_a_shortcut());
+        let mut verified =
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+        Installer::new(&lock).install(&mut verified, &options).unwrap();
+    }
+
+    let theirs = paths.root().join("icon.jpg");
+    std::fs::write(&theirs, b"a file the user put here").unwrap();
+
+    let lock = InstallLock::acquire(&paths).unwrap();
+    let removal = xpack_install::uninstall_with_roots(lock, Some(&desktop)).unwrap();
+
+    assert!(theirs.is_file(), "a file xPack did not create was deleted");
+    assert!(!removal.is_complete(), "the root should not be reported as removed");
+    assert!(
+        removal.remaining.iter().any(|p| p == &theirs),
+        "the leftover was not reported: {:?}",
+        removal.remaining
+    );
+
+    // The icon xPack itself copied in is gone, though.
+    assert!(!paths.root().join("icon.txt").exists(), "xPack's own icon survived");
+}

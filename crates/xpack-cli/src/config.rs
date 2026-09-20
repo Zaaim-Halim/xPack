@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use xpack_core::manifest::{
-    Application, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec, UpdateSpec,
+    Application, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec, UpdateSpec,
 };
 use xpack_core::{Manifest, Platform, Result, atomic};
 
@@ -30,6 +30,9 @@ pub(crate) struct ProjectConfig {
     /// How a newly activated version proves it started.
     #[serde(default)]
     pub(crate) health: HealthSpec,
+    /// How the application appears in the user's desktop environment.
+    #[serde(default)]
+    pub(crate) desktop: DesktopSpec,
 }
 
 impl ProjectConfig {
@@ -50,6 +53,7 @@ impl ProjectConfig {
             launch: self.launch.clone(),
             update: self.update.clone(),
             health: self.health.clone(),
+            desktop: self.desktop.clone(),
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,

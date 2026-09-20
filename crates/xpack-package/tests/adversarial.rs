@@ -55,6 +55,7 @@ fn template(platform: Platform) -> Manifest {
         update: UpdateSpec::default(),
         health: xpack_core::HealthSpec::default(),
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     }

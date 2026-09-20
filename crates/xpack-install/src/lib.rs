@@ -19,6 +19,15 @@
 //! launcher identifies its application by its own location. Where that binary
 //! comes from is the caller's decision; see [`InstallOptions::launcher`].
 //!
+//! # Desktop integration
+//!
+//! A package may ask to appear in the user's application menu. That is the
+//! only thing this crate writes outside the installation root, it is always
+//! per-user, and it happens only when the signed manifest asks for it. See
+//! [`integration`], where the three platforms' very different mechanisms —
+//! a Start-Menu shortcut, a `.desktop` entry, an application bundle — are
+//! rendered from one description.
+//!
 //! # Uninstall and user data
 //!
 //! [`uninstall`] removes the installation root and nothing else. xPack does
@@ -33,10 +42,14 @@
 //! [`Removal::remaining`] rather than described as removed.
 
 pub mod installer;
+pub mod integration;
 pub mod recovery;
 pub mod trust;
 
-pub use installer::{InstallOptions, Installed, Installer, LauncherOutcome, Removal, uninstall};
+pub use installer::{
+    InstallOptions, Installed, Installer, LauncherOutcome, Removal, uninstall, uninstall_with_roots,
+};
+pub use integration::{Entry as DesktopEntry, Outcome as DesktopOutcome};
 pub use recovery::RecoveryReport;
 pub use trust::{TrustDecision, open_and_verify};
 

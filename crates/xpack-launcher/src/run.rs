@@ -1,0 +1,107 @@
+//! The body both launcher binaries share.
+//!
+//! Two executables are installed on Windows and they differ in exactly one
+//! way: the subsystem they are linked for. Everything they *do* is here, so
+//! the console build and the windowed build cannot drift apart.
+//!
+//! # Why two binaries
+//!
+//! A Windows executable declares at link time whether it is a console program
+//! or a windowed one, and the choice cannot be made at runtime. A console
+//! build opened from a Start-Menu shortcut gets a console allocated for it,
+//! and an empty black window sits behind the user's application for as long as
+//! it runs. A windowed build never gets one — but it also has no standard
+//! output, so a user who runs it from a terminal sees nothing at all.
+//!
+//! Neither is right for both uses, so both are shipped: shortcuts point at the
+//! windowed build, terminals and scripts keep the console one. On Unix the
+//! distinction does not exist and only the one binary is installed.
+//!
+//! # Nothing here may use `println!` or `eprintln!`
+//!
+//! In a windowed build there is no standard error to write to.
+//! `GetStdHandle` returns null, the write fails, and `eprintln!` **panics** on
+//! a failed write — which, with `panic = "abort"` in the release profile, ends
+//! the process. A launcher that aborts because it tried to report an error is
+//! a launcher that loses the user's application.
+//!
+//! So every message goes through the `report!` macro below, which writes
+//! through `io::Write` and discards the error. On a console build it prints;
+//! on a windowed build it silently does nothing and the log file carries the
+//! record instead.
+
+use std::io::Write;
+use std::process::ExitCode;
+
+use crate::Launcher;
+
+/// Writes one line to standard error, and never fails if there is none.
+///
+/// The discarded error is the whole point. See the module documentation.
+macro_rules! report {
+    ($($arg:tt)*) => {{
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, $($arg)*);
+    }};
+}
+
+/// Runs a launcher binary from start to finish.
+///
+/// Returns the exit code the process should end with, rather than exiting
+/// itself, so that both `main` functions stay one line long and this stays
+/// testable.
+pub fn run() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+
+    let launcher = match Launcher::discover() {
+        Ok(launcher) => launcher,
+        Err(error) => {
+            // Logging is not configured yet: without an installation there is
+            // nowhere to write, and this failure means there is no
+            // installation. On a windowed build this line goes nowhere, which
+            // is the accepted cost of having no console — the alternative is a
+            // message box, which needs Win32 calls this workspace forbids.
+            report!("xpack: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The console stays silent because this process shares a terminal with the
+    // application it starts, and the user is reading the application's output,
+    // not ours. Everything goes to the file instead — which is the only record
+    // that exists when a launcher rolls back an update nobody was watching,
+    // and on a windowed build it is the only record that can exist at all.
+    xpack_log::init(&xpack_log::Config {
+        console: xpack_log::Console::Silent,
+        file: Some(launcher.paths()),
+        format: xpack_log::Format::Text,
+    });
+
+    // Started before the application, so a slow network never delays opening
+    // it, and deliberately not waited on. Whatever it finds takes effect the
+    // next time the application starts.
+    crate::spawn_updater(launcher.paths());
+
+    match launcher.launch(&arguments, true) {
+        Ok(outcome) => {
+            if let Some(target) = &outcome.rolled_back_to {
+                // Logged as well as printed, because a windowed build has
+                // nowhere to print and this is the one message a user most
+                // needs to be able to find afterwards.
+                tracing::warn!(%target, "this version failed to start; rolled back");
+                report!("xpack: this version failed to start; rolled back to {target}");
+                report!("xpack: start the application again to run it");
+                return ExitCode::FAILURE;
+            }
+            match outcome.exit_code {
+                Some(0) | None => ExitCode::SUCCESS,
+                Some(code) => u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from),
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "the application could not be started");
+            report!("xpack: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}

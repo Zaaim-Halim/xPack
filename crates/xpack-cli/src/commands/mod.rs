@@ -85,6 +85,14 @@ pub(crate) fn default_launcher() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-launcher")
 }
 
+/// The `xpack-launcherw` binary sitting beside this executable, if there is one.
+///
+/// The windowed build, which only Windows distinguishes. Callers decide
+/// whether to place it; this only finds it.
+pub(crate) fn default_gui_launcher() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-launcherw")
+}
+
 /// The `xpack-updater` binary sitting beside this executable, if there is one.
 pub(crate) fn default_updater() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-updater")

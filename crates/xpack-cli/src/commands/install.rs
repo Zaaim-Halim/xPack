@@ -92,14 +92,25 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let launcher = resolve_launcher(args)?;
     // The updater follows the launcher: an installation with an entry point
     // but no way to learn about updates is only half of what was asked for.
+    // Only placed where it means something. On Unix the windowed build is an
+    // exact duplicate of the console one, and installing it would double the
+    // launcher bytes in every installation to no effect.
+    let gui_launcher = if args.no_launcher || !xpack_core::HAS_WINDOWED_LAUNCHER {
+        None
+    } else {
+        super::default_gui_launcher()
+    };
     let updater = if args.no_launcher { None } else { super::default_updater() };
     let uninstaller = if args.no_launcher { None } else { super::default_uninstaller() };
     let options = InstallOptions {
         allow_downgrade: args.allow_downgrade,
         activate: !args.no_activate,
         launcher,
+        gui_launcher,
         updater,
         uninstaller,
+        // The user's own directories: this is a real installation.
+        desktop_roots: None,
     };
     let installed = Installer::new(&lock).install(&mut verified, &options)?;
 
@@ -113,6 +124,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     crate::output::field("active", installed.activated);
     crate::output::field("location", lock.paths().version_dir(&installed.version).display());
     report_binary("launcher", installed.launcher, &lock.paths().launcher_file());
+    report_binary("windowed launcher", installed.gui_launcher, &lock.paths().gui_launcher_file());
     report_binary("updater", installed.updater, &lock.paths().updater_file());
     report_binary("uninstaller", installed.uninstaller, &lock.paths().uninstaller_file());
 

@@ -200,6 +200,32 @@ impl InstallPaths {
         self.root.join(format!("xpack-launcher{}", std::env::consts::EXE_SUFFIX))
     }
 
+    /// The windowed launcher, for platforms that distinguish one.
+    ///
+    /// Windows fixes at link time whether an executable is a console program
+    /// or a windowed one, and the choice cannot be made when the program runs.
+    /// A console build opened from a shortcut has a console allocated for it,
+    /// and an empty black window sits behind the user's application for as
+    /// long as it runs.
+    ///
+    /// So two builds of the same program are installed there, differing in
+    /// that one attribute, and shortcuts point at this one. Unix has no such
+    /// distinction, and this file is not installed on it.
+    pub fn gui_launcher_file(&self) -> PathBuf {
+        self.root.join(format!("xpack-launcherw{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    /// The launcher a desktop shortcut should point at.
+    ///
+    /// The windowed build where one exists, the ordinary launcher elsewhere.
+    ///
+    /// Written with `cfg!` rather than `#[cfg]` deliberately: both arms are
+    /// compiled on every platform, so the Windows arm cannot rot unnoticed on
+    /// a machine that never builds for Windows.
+    pub fn shortcut_target(&self) -> PathBuf {
+        if HAS_WINDOWED_LAUNCHER { self.gui_launcher_file() } else { self.launcher_file() }
+    }
+
     /// The background updater binary for this installation.
     ///
     /// Beside the launcher, and found the same way: it resolves its own
@@ -232,6 +258,100 @@ impl InstallPaths {
 
 fn xpack_core_metadata_dir() -> &'static str {
     crate::manifest::RESERVED_METADATA_DIR
+}
+
+/// Whether this platform installs a separate windowed launcher.
+pub const HAS_WINDOWED_LAUNCHER: bool = cfg!(windows);
+
+/// The longest path Windows accepts where a long path cannot be used.
+///
+/// Rust's standard library rewrites long absolute paths into the `\\?\`
+/// verbatim form before handing them to the file APIs, so reading, writing and
+/// renaming a payload file work well past this limit. Two things escape that
+/// rewrite, and both are things the launcher does:
+///
+/// * `CreateProcessW` does not accept a verbatim path for the executable.
+/// * `SetCurrentDirectory` does not accept one either, and `std` strips the
+///   prefix back off before setting a child's working directory for exactly
+///   that reason.
+///
+/// So a package can extract perfectly and still be impossible to start. The
+/// value is `MAX_PATH` less one for the terminating null the API counts.
+pub const WINDOWS_MAX_PATH: usize = 259;
+
+/// The path-length ceiling this platform imposes on launching, if any.
+pub fn host_launch_path_limit() -> Option<usize> {
+    if cfg!(windows) { Some(WINDOWS_MAX_PATH) } else { None }
+}
+
+/// Refuses a version whose launch paths would be too long to start.
+///
+/// Checked when a version is installed rather than when it is launched. Both
+/// would be correct, and failing at install time is far kinder: the user
+/// learns while they are watching, with the package still in front of them,
+/// instead of discovering months later that an update they never saw arrive
+/// cannot be opened.
+///
+/// # Why the limit is a parameter
+///
+/// The same reason [`install_root_from`] takes its override as one. A function
+/// that read `cfg!(windows)` internally could only ever be tested on Windows,
+/// so the branch that matters would ship unexercised on the machine this is
+/// developed on. Passing the limit in makes the rule pure and testable
+/// everywhere, and leaves [`host_launch_path_limit`] as the single untestable
+/// lookup.
+///
+/// # What is not checked
+///
+/// Payload files the application opens for itself. xPack extracts them
+/// through `std`, which handles long paths, and whether an application can
+/// then read its own data files is a property of that application. Checking
+/// them here would reject packages that work.
+pub fn ensure_launch_paths_fit(
+    version_dir: &Path,
+    launch: &crate::manifest::LaunchSpec,
+    limit: Option<usize>,
+) -> Result<()> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+
+    // A bare executable name is resolved on `PATH` by the operating system and
+    // never becomes a path under the installation, so its length is not ours.
+    if launch.is_bundled() {
+        let executable = join_relative(version_dir, &launch.executable);
+        check_one(&executable, limit, "launch.executable")?;
+    }
+
+    let working_directory = match &launch.working_directory {
+        Some(relative) => join_relative(version_dir, relative),
+        None => version_dir.to_path_buf(),
+    };
+    check_one(&working_directory, limit, "launch.workingDirectory")
+}
+
+/// Joins a manifest-relative path, which always uses `/`, onto a directory.
+fn join_relative(base: &Path, relative: &str) -> PathBuf {
+    let mut joined = base.to_path_buf();
+    for component in relative.replace('\\', "/").split('/') {
+        joined.push(component);
+    }
+    joined
+}
+
+fn check_one(path: &Path, limit: usize, what: &str) -> Result<()> {
+    let length = path.as_os_str().len();
+    if length <= limit {
+        return Ok(());
+    }
+    Err(Error::invalid(
+        what,
+        format!(
+            "resolves to a {length}-character path, and this platform cannot start a program \
+             from one longer than {limit}: {}",
+            path.display()
+        ),
+    ))
 }
 
 /// The default per-user root that holds every xPack application directory.
@@ -357,6 +477,90 @@ mod tests {
         assert!(paths.logs_dir().starts_with(paths.state_dir()));
         assert!(paths.staging_root().starts_with(paths.root()));
         assert!(paths.current_link().starts_with(paths.root()));
+    }
+
+    fn launch_spec(
+        executable: &str,
+        working_directory: Option<&str>,
+    ) -> crate::manifest::LaunchSpec {
+        crate::manifest::LaunchSpec {
+            executable: executable.to_string(),
+            arguments: Vec::new(),
+            working_directory: working_directory.map(str::to_string),
+            environment: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_launch_path_within_the_limit_is_accepted() {
+        let dir = Path::new("/opt/xpack/com.example.app/versions/1.0.0");
+        let spec = launch_spec("bin/app", None);
+        assert!(ensure_launch_paths_fit(dir, &spec, Some(WINDOWS_MAX_PATH)).is_ok());
+    }
+
+    #[test]
+    fn a_bundled_executable_past_the_limit_is_refused() {
+        // The package extracts perfectly and cannot be started: `CreateProcessW`
+        // takes no verbatim path, so this has to fail while someone is watching.
+        let dir = Path::new("/opt/xpack/com.example.app/versions/1.0.0");
+        let spec = launch_spec(&format!("{}/app", "deep".repeat(80)), None);
+
+        let err = ensure_launch_paths_fit(dir, &spec, Some(WINDOWS_MAX_PATH)).unwrap_err();
+        assert!(err.to_string().contains("launch.executable"), "got {err}");
+        assert!(err.to_string().contains("cannot start a program"), "got {err}");
+    }
+
+    #[test]
+    fn a_working_directory_past_the_limit_is_refused() {
+        let dir = Path::new("/opt/xpack/com.example.app/versions/1.0.0");
+        let spec = launch_spec("app", Some(&"nested/".repeat(50)));
+
+        let err = ensure_launch_paths_fit(dir, &spec, Some(WINDOWS_MAX_PATH)).unwrap_err();
+        assert!(err.to_string().contains("workingDirectory"), "got {err}");
+    }
+
+    #[test]
+    fn a_system_executable_is_not_measured_against_the_limit() {
+        // A bare name is resolved on PATH by the operating system and never
+        // becomes a path under the installation. The two cases below share a
+        // version directory that only just fits, so the *only* difference
+        // between passing and failing is whether the executable is bundled.
+        let dir = PathBuf::from("/opt").join("a".repeat(WINDOWS_MAX_PATH - 5));
+        assert_eq!(dir.as_os_str().len(), WINDOWS_MAX_PATH);
+
+        let system = launch_spec("java", None);
+        assert!(ensure_launch_paths_fit(&dir, &system, Some(WINDOWS_MAX_PATH)).is_ok());
+
+        let bundled = launch_spec("bin/app", None);
+        let err = ensure_launch_paths_fit(&dir, &bundled, Some(WINDOWS_MAX_PATH)).unwrap_err();
+        assert!(err.to_string().contains("launch.executable"), "got {err}");
+    }
+
+    #[test]
+    fn without_a_limit_nothing_is_refused() {
+        // Unix has no such ceiling, and imposing one there would reject
+        // packages that work perfectly.
+        let dir = Path::new("/opt/xpack/com.example.app/versions/1.0.0");
+        let spec = launch_spec(&format!("{}/app", "deep".repeat(200)), None);
+        assert!(ensure_launch_paths_fit(dir, &spec, None).is_ok());
+    }
+
+    #[test]
+    fn the_shortcut_points_at_a_launcher_this_platform_installs() {
+        let p = paths();
+        let target = p.shortcut_target();
+        assert!(target.starts_with(p.root()));
+        if HAS_WINDOWED_LAUNCHER {
+            assert_eq!(target, p.gui_launcher_file());
+        } else {
+            assert_eq!(target, p.launcher_file());
+        }
+    }
+
+    #[test]
+    fn the_two_launcher_builds_are_separate_files() {
+        let p = paths();
+        assert_ne!(p.launcher_file(), p.gui_launcher_file());
     }
 
     #[test]

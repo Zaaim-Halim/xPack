@@ -14,6 +14,14 @@ xpack-security.workspace = true
 xpack-package.workspace = true
 xpack-platform.workspace = true
 tracing.workspace = true
+directories.workspace = true
+
+# Registry access for the per-user Add/Remove Programs entry, which has no
+# equivalent in `std`. Windows-only, and confined to that one use: shortcuts
+# are written as bytes by this crate rather than through COM, so nothing here
+# needs an unsafe FFI surface.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"
 
 [dev-dependencies]
 tempfile.workspace = true

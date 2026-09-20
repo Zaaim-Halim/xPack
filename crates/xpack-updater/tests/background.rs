@@ -84,6 +84,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
         update: UpdateSpec { url: Some(BASE.to_string()), ..UpdateSpec::default() },
         health: xpack_core::HealthSpec::default(),
         signing_key: None,
+        desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
     };

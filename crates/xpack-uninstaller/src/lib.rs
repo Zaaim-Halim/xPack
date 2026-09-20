@@ -97,6 +97,8 @@ fn set_executable(path: &Path) -> Result<()> {
         .map_err(|e| Error::io(path, e))
 }
 
+// Mirrors the Unix version's signature, which genuinely can fail.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn set_executable(path: &Path) -> Result<()> {
     let _ = path;

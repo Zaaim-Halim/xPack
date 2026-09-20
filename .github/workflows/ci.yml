@@ -90,6 +90,72 @@ jobs:
 
           echo "smoke test passed on ${{ matrix.os }}"
 
+  shortcut:
+    name: windows shortcut resolves
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: shortcut
+
+      # The one thing the unit tests cannot prove. `xpack-install` writes the
+      # bytes of a `.lnk` by hand rather than through COM, and every field is
+      # checked against the specification on every platform — but "the bytes
+      # match the spec" is not the same claim as "Windows resolves it". This
+      # job makes the shell itself answer, by reading the file back through
+      # the same COM object Explorer uses.
+      #
+      # If this fails, the shortcut writer is wrong even if every unit test
+      # passes, and no amount of re-reading the specification will show it.
+      - name: Write shortcuts and resolve them through the shell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Assert-Shortcut($target) {
+            $path = Join-Path $env:TEMP 'xpack-ci.lnk'
+            if (Test-Path $path) { Remove-Item $path }
+
+            cargo run --quiet --package xpack-install --example write_shortcut -- $path $target
+            if ($LASTEXITCODE -ne 0) { throw "write_shortcut failed for $target" }
+
+            $shell = New-Object -ComObject WScript.Shell
+            $link = $shell.CreateShortcut($path)
+            $expectedDir = Split-Path -Parent $target
+
+            Write-Host "target      = $target"
+            Write-Host "TargetPath  = $($link.TargetPath)"
+            Write-Host "WorkingDir  = $($link.WorkingDirectory)"
+
+            if ($link.TargetPath -ne $target) {
+              throw "the shell resolved '$($link.TargetPath)', expected '$target'"
+            }
+            if ($link.WorkingDirectory -ne $expectedDir) {
+              throw "working directory resolved to '$($link.WorkingDirectory)', expected '$expectedDir'"
+            }
+          }
+
+          # A real, existing program. `CreateShortcut` round-trips the stored
+          # bytes and does not require the target to exist, but starting from a
+          # path that does keeps the first failure easy to read.
+          Assert-Shortcut "$env:SystemRoot\System32\notepad.exe"
+
+          # The two things the serialiser handles specially, and the reason
+          # this job exists at all. Neither is covered by an ASCII path with no
+          # spaces:
+          #
+          #  * a non-ASCII path, which the ANSI LocalBasePath cannot represent.
+          #    It survives only because LocalBasePathOffsetUnicode is written,
+          #    and only if the `?` substitution in the ANSI field keeps one
+          #    byte per character so every later offset stays correct.
+          #  * a space, which has to reach WorkingDirectory intact.
+          Assert-Shortcut "C:\Users\Jose Ramirez\My App\app.exe"
+          Assert-Shortcut "C:\Users\José Ramírez\My App\app.exe"
+
+          Write-Host 'the shell resolved every shortcut xPack wrote'
+
   lint:
     name: format and lint
     runs-on: ubuntu-latest

@@ -58,5 +58,7 @@
 //! which means one prebuilt launcher binary works for every application.
 
 pub mod launcher;
+pub mod run;
 
 pub use launcher::{HEALTH_FILE_ENV, Launcher, Outcome, StartupResult, spawn_updater};
+pub use run::run;

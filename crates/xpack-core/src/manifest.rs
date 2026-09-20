@@ -226,6 +226,59 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
+/// How the application should appear in the user's desktop environment.
+///
+/// Every field is optional and the whole section defaults to "do nothing".
+/// A menu entry is a change to the user's machine outside the installation
+/// directory, so it happens because a publisher asked for it, never because a
+/// package was silently assumed to want one.
+///
+/// # One description, three very different mechanisms
+///
+/// A Start-Menu shortcut, a freedesktop `.desktop` entry and a macOS
+/// application bundle have almost nothing in common as files. What they have
+/// in common is the *intent*, and that is what this records: the publisher
+/// says "this application should be openable from the desktop, here is its
+/// icon and roughly what kind of program it is", and each platform's installer
+/// renders that in its own terms.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopSpec {
+    /// Whether to create a menu entry, shortcut or application bundle.
+    #[serde(default)]
+    pub shortcut: bool,
+
+    /// Icon for the entry, as a payload-relative path.
+    ///
+    /// Left out, each platform falls back to whatever it shows for a program
+    /// with no icon. Supplying one is strongly preferred: an unnamed generic
+    /// icon in a user's application menu is how an installation looks broken.
+    ///
+    /// The format that works differs per platform — `.ico` on Windows,
+    /// `.icns` on macOS, PNG or SVG on Linux — which is why this is a path
+    /// into the payload rather than something xPack converts. A package that
+    /// targets one platform ships the icon that platform reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// freedesktop categories for the Linux menu entry, e.g. `Development`.
+    ///
+    /// Ignored on Windows and macOS, neither of which has an equivalent
+    /// concept that a publisher declares. Left empty, the entry still appears;
+    /// it simply lands in whatever catch-all the desktop environment uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+
+    /// Whether the application needs a terminal to be useful.
+    ///
+    /// Set, the Linux entry is marked `Terminal=true` and Windows points the
+    /// shortcut at the console launcher rather than the windowed one, so the
+    /// user gets the window the program expects to write to. Left unset, the
+    /// shortcut opens the application with no console attached.
+    #[serde(default)]
+    pub terminal: bool,
+}
+
 /// One file in the payload, with the digest the signature transitively covers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -276,6 +329,9 @@ pub struct Manifest {
     /// How a newly activated version proves it started successfully.
     #[serde(default)]
     pub health: HealthSpec,
+    /// How the application appears in the user's desktop environment.
+    #[serde(default)]
+    pub desktop: DesktopSpec,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -349,6 +405,10 @@ impl Manifest {
             validate_update_url(url)?;
         }
 
+        if let Some(icon) = &self.desktop.icon {
+            validate_relative_path("desktop.icon", icon)?;
+        }
+
         self.validate_payload()
     }
 
@@ -384,6 +444,19 @@ impl Manifest {
                     self.payload.total_size
                 ),
             ));
+        }
+
+        // Same rule as the launch executable below, and for the same reason:
+        // an icon named but not shipped produces an entry in the user's menu
+        // with a missing image, long after the install reported success.
+        if let Some(icon) = &self.desktop.icon {
+            let wanted = normalise_separators(icon);
+            if !self.payload.files.iter().any(|f| f.path == wanted) {
+                return Err(Error::invalid(
+                    "manifest",
+                    format!("desktop.icon {icon:?} is not present in the payload"),
+                ));
+            }
         }
 
         // A bundled launch target must actually be present in the payload,
@@ -552,6 +625,7 @@ mod tests {
             },
             update: UpdateSpec::default(),
             health: HealthSpec::default(),
+            desktop: DesktopSpec::default(),
             signing_key: None,
             payload: PayloadSpec {
                 total_size: 30,

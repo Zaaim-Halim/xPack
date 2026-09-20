@@ -403,15 +403,16 @@ pub fn spawn_updater(paths: &InstallPaths) -> bool {
         return false;
     }
 
-    let child = std::process::Command::new(&updater)
+    let mut command = std::process::Command::new(&updater);
+    command
         .arg("--application-dir")
         .arg(paths.root())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    without_a_console(&mut command);
 
-    match child {
+    match command.spawn() {
         Ok(mut child) => {
             let pid = child.id();
             tracing::debug!(pid, "background updater started");
@@ -426,4 +427,40 @@ pub fn spawn_updater(paths: &InstallPaths) -> bool {
             false
         }
     }
+}
+
+/// Stops Windows giving a background child a console window of its own.
+///
+/// The updater is a console-subsystem binary. Windows gives such a process a
+/// console when its parent has none to inherit, and that console is a black
+/// window that appears over the user's application and stays there for as long
+/// as the update check runs. `CREATE_NO_WINDOW` suppresses it.
+///
+/// `DETACHED_PROCESS` would suppress it too, and is the flag the name
+/// "detached" suggests. It is deliberately not used: the two are documented as
+/// mutually exclusive, and `CREATE_NO_WINDOW` is the one that leaves the
+/// child's standard handles alone — which matters, because the caller has
+/// already redirected all three to null and a second mechanism fighting over
+/// them buys nothing.
+///
+/// Detachment in the sense that matters — the updater outliving the launcher —
+/// needs no flag on Windows. A child process there has no lifetime tie to its
+/// parent; that tie is a Unix notion, and the thread waiting on the child
+/// handles it.
+#[cfg(windows)]
+fn without_a_console(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    /// `CREATE_NO_WINDOW` from `processthreadsapi.h`. Spelled out rather than
+    /// pulled from a Windows crate: one constant does not justify the
+    /// dependency, and its value is part of a stable ABI.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// Nothing to do: no Unix platform gives a spawned process a window.
+#[cfg(not(windows))]
+fn without_a_console(command: &mut std::process::Command) {
+    let _ = command;
 }
