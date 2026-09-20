@@ -56,6 +56,10 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 # Rewriting the icon and version information of a Windows executable, so the
 # programs a user sees carry their application's name rather than xPack's.
 # Developer-side only: none of this reaches a shipped runtime binary.
+# Copy-on-write file clones where the filesystem has them. Lets two installed
+# versions share a bundled runtime's bytes without the two becoming the same
+# file, which a hard link would.
+reflink-copy = "0.1.30"
 editpe = "0.2.4"
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 

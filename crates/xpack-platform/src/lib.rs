@@ -17,6 +17,7 @@
 pub mod link;
 pub mod lock;
 pub mod process;
+pub mod sharing;
 
 pub use link::{LinkOutcome, update_current_link};
 pub use lock::{DownloadLease, InstallLock};

@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+reflink-copy.workspace = true
 xpack-core.workspace = true
 tracing.workspace = true
 
