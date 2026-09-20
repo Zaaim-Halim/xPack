@@ -29,6 +29,12 @@ xpack-log.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
+# The end-to-end tests parse the index the CLI writes with the *updater's* own
+# type. Asserting on a shape re-declared in the test would prove only that the
+# test agrees with itself.
+xpack-update.workspace = true
+xpack-security.workspace = true
+xpack-core.workspace = true
 
 [lints]
 workspace = true

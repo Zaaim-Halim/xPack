@@ -50,6 +50,8 @@ enum Command {
     Keygen(commands::keygen::Args),
     /// Build a signed .xpkg from a payload directory.
     Pack(commands::pack::Args),
+    /// Write the update index a server publishes.
+    Index(commands::index::Args),
     /// Describe a package without trusting it.
     Inspect(commands::inspect::Args),
     /// Check a package's signature against a key.
@@ -81,7 +83,13 @@ impl Command {
     /// operate on a package rather than an installation return `None`.
     fn application_id(&self) -> Option<String> {
         match self {
-            Self::Keygen(_) | Self::Pack(_) | Self::Inspect(_) | Self::Verify(_) => None,
+            // These build or read package files. None of them touches an
+            // installation, so there is nowhere to log but the console.
+            Self::Keygen(_)
+            | Self::Pack(_)
+            | Self::Index(_)
+            | Self::Inspect(_)
+            | Self::Verify(_) => None,
             Self::Install(a) => a.application_id(),
             Self::List(a) => Some(a.application.clone()),
             Self::Run(a) => Some(a.application.clone()),
@@ -118,6 +126,7 @@ fn main() -> std::process::ExitCode {
     let outcome = match &cli.command {
         Command::Keygen(a) => commands::keygen::run(a),
         Command::Pack(a) => commands::pack::run(a),
+        Command::Index(a) => commands::index::run(a),
         Command::Inspect(a) => commands::inspect::run(a),
         Command::Verify(a) => commands::verify::run(a),
         Command::Install(a) => commands::install::run(a, &context),

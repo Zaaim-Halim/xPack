@@ -377,3 +377,266 @@ fn no_command_waits_for_input_that_will_never_come() {
         stderr(&refused)
     );
 }
+
+// --- publishing: `pack --json` and `index` -------------------------------
+//
+// These are the commands a build-system integration drives. What they must
+// get right is machine-readable output and an index the *updater* can parse —
+// so these tests assert on parsed JSON, never on prose.
+
+#[test]
+fn pack_json_reports_everything_needed_to_publish() {
+    let fixture = Fixture::new();
+    fixture.keygen();
+    fixture.write_payload("1.0.0", 0);
+
+    let out = fixture.run(&[
+        "pack",
+        "payload-1.0.0",
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "demo-1.0.0.xpkg",
+        "--json",
+    ]);
+    assert!(out.status.success(), "pack --json failed: {}", stderr(&out));
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should be JSON");
+
+    assert_eq!(report["application"], "com.example.demo");
+    assert_eq!(report["version"], "1.0.0");
+    // The two values an update index cannot be built without.
+    assert!(report["sha256"].as_str().is_some_and(|s| s.len() == 64), "{report}");
+    assert!(report["size"].as_u64().is_some_and(|n| n > 0), "{report}");
+    assert!(report["signedBy"].as_str().is_some(), "{report}");
+
+    // The platform must come back in the form `--platform` accepts. A nested
+    // {os, arch} object — which is how a Platform serialises into a manifest —
+    // would make every integration reassemble the string itself.
+    let platform = report["platform"].as_str().expect("platform should be a string");
+    assert!(platform.contains('-'), "expected <os>-<arch>, got {platform:?}");
+
+    let again = fixture.run(&[
+        "pack",
+        "payload-1.0.0",
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "round-trip.xpkg",
+        "--platform",
+        platform,
+        "--json",
+    ]);
+    assert!(
+        again.status.success(),
+        "the reported platform must be accepted back: {}",
+        stderr(&again)
+    );
+}
+
+#[test]
+fn index_writes_a_document_the_updater_can_parse() {
+    // The whole point of the command. If the CLI and the updater disagree
+    // about this format, every release is broken and nothing else catches it.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let out = fixture.run(&["index", &package, "--out-dir", "updates", "--json"]);
+    assert!(out.status.success(), "index failed: {}", stderr(&out));
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should be JSON");
+    let entry = &written[0];
+    let index_path = entry["path"].as_str().expect("an index path");
+
+    let body = std::fs::read(fixture.path().join(index_path)).expect("the index should exist");
+
+    // Parsed by the updater's own type, not by a hand-written shape here.
+    let index = xpack_update::index::UpdateIndex::from_slice(&body).expect("updater must parse it");
+    assert_eq!(index.application, "com.example.demo");
+    assert_eq!(index.version.to_string(), "1.0.0");
+    assert_eq!(index.package.file, package);
+    assert!(index.package.size > 0);
+    assert!(index.package.sha256.is_some(), "a digest is what bounds the download");
+}
+
+#[test]
+fn the_index_digest_matches_the_package_on_disk() {
+    // A digest that does not match is worse than none: every client downloads
+    // the package and then rejects it.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let packed = fixture.run(&[
+        "pack",
+        "payload-1.0.0",
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "recomputed.xpkg",
+        "--json",
+    ]);
+    assert!(packed.status.success(), "{}", stderr(&packed));
+
+    let out = fixture.run(&["index", &package, "--out-dir", "updates", "--json"]);
+    assert!(out.status.success(), "index failed: {}", stderr(&out));
+    let written: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let index_path = written[0]["path"].as_str().unwrap();
+
+    let body = std::fs::read(fixture.path().join(index_path)).unwrap();
+    let index = xpack_update::index::UpdateIndex::from_slice(&body).unwrap();
+
+    // Recompute independently of both commands.
+    let bytes = std::fs::read(fixture.path().join(&package)).unwrap();
+    let expected = xpack_security::sha256(&bytes);
+    assert_eq!(index.package.sha256.unwrap(), expected);
+    assert_eq!(index.package.size, bytes.len() as u64);
+}
+
+#[test]
+fn index_lands_where_the_updater_would_fetch_it() {
+    // `<update.url>/<channel>.json`, mirrored on disk as
+    // `<out-dir>/<platform>/<channel>.json`, so uploading the tree works.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let out = fixture.run(&["index", &package, "--out-dir", "updates"]);
+    assert!(out.status.success(), "index failed: {}", stderr(&out));
+
+    let platform = xpack_core::Platform::host().unwrap().to_string();
+    let expected = fixture.path().join("updates").join(&platform).join("stable.json");
+    assert!(expected.is_file(), "expected an index at {}", expected.display());
+}
+
+#[test]
+fn index_verifies_when_given_a_key() {
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let out =
+        fixture.run(&["index", &package, "--out-dir", "updates", "--key", "signing.pub.json"]);
+    assert!(out.status.success(), "index --key failed: {}", stderr(&out));
+    // With a key supplied, the "not verified" warning must not appear.
+    assert!(!stderr(&out).contains("not verified"), "{}", stderr(&out));
+}
+
+#[test]
+fn index_refuses_a_package_signed_by_another_key() {
+    // An index built from a package that does not verify is a release every
+    // client downloads and refuses.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let other = fixture.run(&["keygen", "--out", "other.json", "--force"]);
+    assert!(other.status.success(), "{}", stderr(&other));
+
+    let out = fixture.run(&["index", &package, "--out-dir", "updates", "--key", "other.pub.json"]);
+    assert!(!out.status.success(), "a mismatched key must fail");
+    assert_eq!(out.status.code(), Some(3), "a signature failure has its own exit code");
+}
+
+#[test]
+fn index_refuses_two_applications_in_one_run() {
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let first = fixture.pack("1.0.0");
+
+    // A second package with a different application id.
+    std::fs::create_dir_all(fixture.path().join("payload-other/bin")).unwrap();
+    std::fs::write(fixture.path().join("payload-other/bin/app"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(
+        fixture.path().join("xpack-other.json"),
+        r#"{"application":{"id":"com.example.other","name":"Other","version":"1.0.0"},
+            "launch":{"executable":"bin/app"}}"#,
+    )
+    .unwrap();
+    let packed = fixture.run(&[
+        "pack",
+        "payload-other",
+        "--config",
+        "xpack-other.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "other-1.0.0.xpkg",
+    ]);
+    assert!(packed.status.success(), "{}", stderr(&packed));
+
+    let out = fixture.run(&["index", &first, "other-1.0.0.xpkg", "--out-dir", "updates"]);
+    assert!(!out.status.success(), "a mixed set must be refused");
+    assert!(stderr(&out).contains("more than one application"), "{}", stderr(&out));
+}
+
+// --- key material must never be published --------------------------------
+
+#[test]
+fn packing_a_directory_containing_the_signing_key_is_refused() {
+    // The accident this prevents: `xpack keygen` writes into the working
+    // directory and `xpack pack .` packages the working directory, so the two
+    // defaults compose into publishing the key that signs every future update.
+    let fixture = Fixture::new();
+    fixture.write_payload("1.0.0", 0);
+
+    // Generate the key *inside* the payload, which is what happens when
+    // someone runs both commands in the same folder.
+    let payload = "payload-1.0.0".to_string();
+    let key_in_payload = format!("{payload}/xpack-signing.json");
+    let out = fixture.run(&["keygen", "--out", &key_in_payload]);
+    assert!(out.status.success(), "keygen failed: {}", stderr(&out));
+
+    let out = fixture.run(&[
+        "pack",
+        &payload,
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        &key_in_payload,
+        "--out",
+        "leak.xpkg",
+    ]);
+
+    assert!(!out.status.success(), "packaging the signing key must be refused");
+    assert!(
+        !fixture.path().join("leak.xpkg").exists(),
+        "a package was written despite the refusal"
+    );
+}
+
+#[test]
+fn a_stray_private_key_anywhere_in_the_payload_is_refused() {
+    // Not the key being used to sign — an old one left in the tree. The
+    // library check is on content, so it is caught wherever it sits.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    fixture.write_payload("1.0.0", 0);
+
+    let stray = "payload-1.0.0/bin/old-signing.json";
+    let out = fixture.run(&["keygen", "--out", stray]);
+    assert!(out.status.success(), "keygen failed: {}", stderr(&out));
+
+    let out = fixture.run(&[
+        "pack",
+        "payload-1.0.0",
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "stray.xpkg",
+    ]);
+
+    assert!(!out.status.success(), "a stray private key must be refused");
+    assert!(stderr(&out).contains("private signing key"), "{}", stderr(&out));
+}
