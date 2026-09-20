@@ -52,36 +52,42 @@ fn entry_path(entry: &Entry, roots: &Roots) -> PathBuf {
 /// matters because this is the one file here whose *contents* a user can see
 /// and a desktop environment can reject.
 pub(super) fn render(entry: &Entry) -> String {
+    // `write!` into a String cannot fail — the only error a `fmt::Write`
+    // implementation for String could return does not exist — so each result
+    // is discarded rather than propagated through a function that has no way
+    // to fail and no caller prepared for one.
+    use std::fmt::Write as _;
+
     let mut out = String::from("[Desktop Entry]\n");
     out.push_str("Type=Application\n");
     out.push_str("Version=1.0\n");
-    out.push_str(&format!("Name={}\n", escape(&entry.name)));
+    let _ = writeln!(out, "Name={}", escape(&entry.name));
 
     if let Some(description) = &entry.description {
-        out.push_str(&format!("Comment={}\n", escape(description)));
+        let _ = writeln!(out, "Comment={}", escape(description));
     }
 
     // Quoted because the installation root contains the application id and can
     // sit under a home directory with a space in it. An unquoted Exec with a
     // space is parsed as a command plus arguments.
-    out.push_str(&format!("Exec=\"{}\" %U\n", escape(&entry.target.to_string_lossy())));
+    let _ = writeln!(out, "Exec=\"{}\" %U", escape(&entry.target.to_string_lossy()));
 
     if let Some(icon) = &entry.icon {
-        out.push_str(&format!("Icon={}\n", escape(&icon.to_string_lossy())));
+        let _ = writeln!(out, "Icon={}", escape(&icon.to_string_lossy()));
     }
 
-    out.push_str(&format!("Terminal={}\n", entry.terminal));
+    let _ = writeln!(out, "Terminal={}", entry.terminal);
 
     if !entry.categories.is_empty() {
         // The specification requires the trailing semicolon, and a desktop
         // environment that parses strictly drops the last category without it.
         let joined: Vec<String> = entry.categories.iter().map(|c| escape(c)).collect();
-        out.push_str(&format!("Categories={};\n", joined.join(";")));
+        let _ = writeln!(out, "Categories={};", joined.join(";"));
     }
 
     // Lets a desktop environment associate a running window with this entry,
     // which is what makes the correct icon appear in a dock or task switcher.
-    out.push_str(&format!("StartupWMClass={}\n", escape(&entry.name)));
+    let _ = writeln!(out, "StartupWMClass={}", escape(&entry.name));
 
     out
 }

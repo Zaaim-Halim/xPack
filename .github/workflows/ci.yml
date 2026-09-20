@@ -236,14 +236,23 @@ jobs:
       - name: Build the CLI
         run: cargo build --release --target x86_64-unknown-linux-musl -p xpack-cli
 
+      # Asked as "does it depend on anything", not by matching one phrasing of
+      # ldd's output. A static-pie binary makes ldd print "statically linked",
+      # which is not the "not a dynamic executable" this once looked for — so
+      # the check failed on a binary that was correct all along. A dependency
+      # shows up as a `=>` line whatever wording the libc's ldd chooses.
       - name: Verify the binaries are actually static
         run: |
           set -euo pipefail
           for bin in xpack-launcher xpack; do
             path="target/x86_64-unknown-linux-musl/release/$bin"
             file "$path"
-            if ldd "$path" 2>&1 | grep -qv "not a dynamic executable"; then
-              echo "$bin is dynamically linked; it would not run on a different libc" >&2
+            if ! file "$path" | grep -q "static"; then
+              echo "$bin is not statically linked; it would not run on a different libc" >&2
+              exit 1
+            fi
+            if ldd "$path" 2>&1 | grep -q "=>"; then
+              echo "$bin resolves shared libraries; it would not run on a different libc" >&2
               ldd "$path" || true
               exit 1
             fi
