@@ -11,12 +11,14 @@ authors.workspace = true
 [dependencies]
 xpack-core.workspace = true
 xpack-security.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 zip.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+walkdir.workspace = true
 tempfile.workspace = true
 
 [lints]

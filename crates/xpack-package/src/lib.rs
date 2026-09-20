@@ -29,10 +29,12 @@
 //! bytes had already touched the filesystem; there is no API here that allows
 //! it.
 
+pub mod delta;
 pub mod entry_path;
 pub mod reader;
 pub mod writer;
 
+pub use delta::{BuiltDelta, DeltaPlan, VerifiedDelta};
 pub use entry_path::{SafePath, safe_payload_path};
 pub use reader::{PackageReader, VerifiedPackage};
 pub use writer::{PackageBuilder, PackedPackage};

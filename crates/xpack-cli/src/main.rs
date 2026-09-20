@@ -50,6 +50,8 @@ enum Command {
     Keygen(commands::keygen::Args),
     /// Build a signed .xpkg from a payload directory.
     Pack(commands::pack::Args),
+    /// Build a differential update between two packages.
+    Delta(commands::delta::Args),
     /// Write the update index a server publishes.
     Index(commands::index::Args),
     /// Build a self-contained installer from a package.
@@ -89,6 +91,7 @@ impl Command {
             // installation, so there is nowhere to log but the console.
             Self::Keygen(_)
             | Self::Pack(_)
+            | Self::Delta(_)
             | Self::Index(_)
             | Self::Installer(_)
             | Self::Inspect(_)
@@ -129,6 +132,7 @@ fn main() -> std::process::ExitCode {
     let outcome = match &cli.command {
         Command::Keygen(a) => commands::keygen::run(a),
         Command::Pack(a) => commands::pack::run(a),
+        Command::Delta(a) => commands::delta::run(a),
         Command::Index(a) => commands::index::run(a),
         Command::Installer(a) => commands::installer::run(a),
         Command::Inspect(a) => commands::inspect::run(a),

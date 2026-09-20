@@ -105,15 +105,57 @@ impl PackageReader {
         self.finish_verification(&manifest_bytes, signature, signing_key)
     }
 
-    fn finish_verification(
+    /// Verifies a **delta** package against an explicit key list.
+    ///
+    /// The signature is checked over the manifest bytes before anything else
+    /// is read, exactly as for a full package and by the same code. That
+    /// ordering is the whole security argument: `delta.json` is
+    /// attacker-controlled and unsigned, so it must never steer anything
+    /// before the manifest it claims to accompany has been proven authentic.
+    pub fn verify_delta_with_keys(
         mut self,
+        keys: &[PublicKey],
+    ) -> Result<crate::delta::VerifiedDelta> {
+        let manifest_bytes = self.read_manifest_bytes()?;
+        let signature = self.read_signature()?;
+        let signing_key = signature::verify_any(keys, &manifest_bytes, &signature)
+            .map_err(|e| Error::Integrity(format!("{}: {e}", self.path.display())))?
+            .clone();
+
+        let plan = self.read_delta_plan()?;
+        let package =
+            self.finish_verification_inner(&manifest_bytes, signature, signing_key, false)?;
+        Ok(crate::delta::VerifiedDelta::new(package, plan))
+    }
+
+    /// Reads the unsigned delta plan.
+    ///
+    /// A hint, never an authority: everything it says is re-derived or
+    /// re-checked against the signed manifest before it can affect anything.
+    fn read_delta_plan(&mut self) -> Result<crate::delta::DeltaPlan> {
+        let bytes = self.read_entry(crate::delta::DELTA_ENTRY, crate::delta::MAX_PLAN_BYTES)?;
+        crate::delta::DeltaPlan::from_slice(&bytes)
+    }
+
+    fn finish_verification(
+        self,
         manifest_bytes: &[u8],
         signature: Signature,
         signing_key: PublicKey,
     ) -> Result<VerifiedPackage> {
+        self.finish_verification_inner(manifest_bytes, signature, signing_key, true)
+    }
+
+    fn finish_verification_inner(
+        mut self,
+        manifest_bytes: &[u8],
+        signature: Signature,
+        signing_key: PublicKey,
+        require_complete: bool,
+    ) -> Result<VerifiedPackage> {
         // Only now are the bytes authentic, so only now may they be parsed.
         let manifest = Manifest::from_slice(manifest_bytes)?;
-        self.check_archive_matches_manifest(&manifest)?;
+        self.check_archive_matches_manifest(&manifest, require_complete)?;
 
         tracing::debug!(
             package = %self.path.display(),
@@ -175,7 +217,19 @@ impl PackageReader {
     /// The manifest authenticates the files it lists. An archive carrying an
     /// *extra* entry is not covered by the signature at all, so it must not be
     /// extracted — and its presence means the package is not what was signed.
-    fn check_archive_matches_manifest(&mut self, manifest: &Manifest) -> Result<()> {
+    /// Checks the archive against the signed manifest.
+    ///
+    /// `require_complete` is the one rule a delta relaxes. Everything else —
+    /// no entry outside the manifest, no symlinks, no duplicates — applies
+    /// identically, because those are what stop an archive writing somewhere
+    /// it should not. A delta legitimately omits the files it expects to find
+    /// in the installed version, and assembly re-establishes completeness by
+    /// counting both sources against the manifest.
+    fn check_archive_matches_manifest(
+        &mut self,
+        manifest: &Manifest,
+        require_complete: bool,
+    ) -> Result<()> {
         let declared: BTreeMap<&str, &xpack_core::PayloadFile> =
             manifest.payload.files.iter().map(|f| (f.path.as_str(), f)).collect();
         let mut seen = std::collections::BTreeSet::new();
@@ -187,6 +241,13 @@ impl PackageReader {
             let name = entry.name().to_string();
 
             if name == MANIFEST_ENTRY || name == SIGNATURE_ENTRY {
+                continue;
+            }
+            // A delta's own plan, and only a delta's. A full package carrying
+            // one would be rejected here rather than quietly tolerated: the
+            // entry means something, and a package that is not a delta has no
+            // business asserting it.
+            if !require_complete && name == crate::delta::DELTA_ENTRY {
                 continue;
             }
 
@@ -220,7 +281,7 @@ impl PackageReader {
             }
         }
 
-        if seen.len() != declared.len() {
+        if require_complete && seen.len() != declared.len() {
             let missing: Vec<&str> =
                 declared.keys().copied().filter(|p| !seen.contains(*p)).take(5).collect();
             return Err(Error::Integrity(format!(
@@ -300,6 +361,14 @@ impl VerifiedPackage {
         self.extract_to_with_progress(destination, &NoProgress)
     }
 
+    /// The archive and manifest, for assembly from a delta.
+    ///
+    /// Crate-private: handing out the open archive is what keeps assembly
+    /// pointed at the file that was verified rather than one named again.
+    pub(crate) fn archive_and_manifest(&mut self) -> (&mut Archive, &Manifest) {
+        (&mut self.archive, &self.manifest)
+    }
+
     /// Extracts, reporting each file as it is written and verified.
     ///
     /// [`Self::extract_to`] is this with a reporter that discards everything,
@@ -341,7 +410,10 @@ impl VerifiedPackage {
             })?;
             let name = entry.name().to_string();
 
-            if name == MANIFEST_ENTRY || name == SIGNATURE_ENTRY {
+            if name == MANIFEST_ENTRY
+                || name == SIGNATURE_ENTRY
+                || name == crate::delta::DELTA_ENTRY
+            {
                 continue;
             }
             let Some(safe) = safe_payload_path(&name)? else {
@@ -404,7 +476,7 @@ impl VerifiedPackage {
 /// The hash is computed over what is actually written, and the file is
 /// discarded if it does not match. Hashing the archive entry separately from
 /// writing it would leave a window in which the two could differ.
-fn write_verified_entry(
+pub(crate) fn write_verified_entry(
     entry: &mut impl Read,
     safe: &SafePath,
     expected: &xpack_core::PayloadFile,
@@ -541,7 +613,7 @@ fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
 /// *during* extraction, after the directory was created and before the file is
 /// written. Exercising that deterministically needs interposition the public
 /// API does not offer.
-fn ensure_no_symlinked_component(
+pub(crate) fn ensure_no_symlinked_component(
     root: &Path,
     safe: &SafePath,
     verified: &mut BTreeSet<PathBuf>,

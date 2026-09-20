@@ -1,6 +1,7 @@
 //! The individual commands.
 
 pub(crate) mod activate;
+pub(crate) mod delta;
 pub(crate) mod index;
 pub(crate) mod inspect;
 pub(crate) mod install;
