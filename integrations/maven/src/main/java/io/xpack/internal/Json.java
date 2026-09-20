@@ -182,6 +182,33 @@ public final class Json {
         return s;
     }
 
+    /**
+     * Reads a required nested object.
+     *
+     * <p>The command line is not uniform about this: {@code pack} reports a
+     * platform as the string {@code "macos-arm64"} while {@code inspect}
+     * reports the manifest's own {@code {os, arch}}. Assuming either shape
+     * everywhere is how three goals came to read a field that was not there.
+     */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> object(Map<String, Object> object, String key) {
+        Object value = object.get(key);
+        if (!(value instanceof Map)) {
+            throw new IllegalArgumentException("missing object field " + key);
+        }
+        return (Map<String, Object>) value;
+    }
+
+    /** Reads a platform, whichever of the two shapes the caller was given. */
+    public static String platform(Map<String, Object> object) {
+        Object value = object.get("platform");
+        if (value instanceof String text) {
+            return text;
+        }
+        Map<String, Object> nested = object(object, "platform");
+        return string(nested, "os") + "-" + string(nested, "arch");
+    }
+
     /** Reads a required integral field. */
     public static long number(Map<String, Object> object, String key) {
         Object value = object.get(key);

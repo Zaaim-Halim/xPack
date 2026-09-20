@@ -78,7 +78,7 @@ public class DeltaMojo extends AbstractXPackMojo {
 
     /** Asks the package itself rather than reading its filename. */
     private String platformOf(Path pkg) throws MojoExecutionException {
-        return Json.string(cli().json("inspect", List.of(pkg.toString())), "platform");
+        return Json.platform(cli().json("inspect", List.of(pkg.toString())));
     }
 
     private String platformOfQuietly(Path pkg) {

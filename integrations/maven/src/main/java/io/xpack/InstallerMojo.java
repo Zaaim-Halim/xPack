@@ -53,7 +53,7 @@ public class InstallerMojo extends AbstractXPackMojo {
 
         for (Path pkg : packages) {
             Map<String, Object> described = cli().json("inspect", List.of(pkg.toString()));
-            Target target = Target.parse(Json.string(described, "platform"));
+            Target target = Target.parse(Json.platform(described));
 
             List<String> arguments = new ArrayList<>();
             arguments.add(pkg.toString());

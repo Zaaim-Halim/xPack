@@ -1,6 +1,7 @@
 package io.xpack.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -29,6 +30,55 @@ class JsonTest {
         assertEquals("/out/My-App-1.0.0-macos-arm64.xpkg", Json.string(result, "package"));
         assertEquals(99L, Json.number(result, "files"));
         assertEquals(32446545L, Json.number(result, "size"));
+    }
+
+    /**
+     * The two shapes the command line reports a platform in. Assuming one of
+     * them everywhere broke three goals at once, so both are pinned here.
+     */
+    @Test
+    void reads_a_platform_in_either_shape_the_command_line_uses() {
+        // `pack --json` reports a string.
+        assertEquals("macos-arm64", Json.platform(Json.parseObject(
+                "{\"platform\": \"macos-arm64\"}")));
+
+        // `inspect --json` reports the manifest's own object.
+        assertEquals("macos-arm64", Json.platform(Json.parseObject(
+                "{\"platform\": {\"os\": \"macos\", \"arch\": \"arm64\"}}")));
+    }
+
+    @Test
+    void a_platform_that_is_neither_shape_is_an_error_rather_than_a_guess() {
+        Map<String, Object> empty = Json.parseObject("{}");
+        assertThrows(IllegalArgumentException.class, () -> Json.platform(empty));
+    }
+
+    @Test
+    void reads_the_paths_list_reports() {
+        // The shape `list --json` prints, which is how an integration finds
+        // executables named after the application rather than after xPack.
+        String output = """
+                {
+                  "application": "com.example.demo",
+                  "root": "/r/com.example.demo",
+                  "launcher": "/r/com.example.demo/My App",
+                  "consoleLauncher": "/r/com.example.demo/My App",
+                  "updater": "/r/com.example.demo/My App Updater",
+                  "uninstaller": "/r/com.example.demo/Uninstall My App",
+                  "versions": [ { "version": "1.0.0", "active": true } ]
+                }
+                """;
+        Map<String, Object> listing = Json.parseObject(output);
+        assertEquals("/r/com.example.demo/My App", Json.string(listing, "launcher"));
+        assertEquals(1, ((List<?>) listing.get("versions")).size());
+    }
+
+    @Test
+    void a_null_path_in_a_listing_is_read_as_absent_rather_than_as_a_path() {
+        // Nothing is installed, so there is nothing to run. A caller must not
+        // be handed the string "null" to execute.
+        Map<String, Object> listing = Json.parseObject("{\"launcher\": null}");
+        assertNull(listing.get("launcher"));
     }
 
     @Test

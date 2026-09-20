@@ -104,6 +104,31 @@ public final class Processes {
         }
     }
 
+    /**
+     * Runs a command with the build's own streams, and waits for it.
+     *
+     * <p>For starting the user's application rather than a tool. Capturing
+     * its output would hold every line until it exited, so a developer
+     * running a desktop application would watch nothing happen for as long as
+     * they left it open, and input would not reach it at all.
+     *
+     * <p>No timeout, for the same reason: the process ends when the person
+     * running it closes the application.
+     */
+    public static int runInheritingIo(List<String> command, Log log)
+            throws MojoExecutionException {
+        log.debug("running " + String.join(" ", command));
+        try {
+            return new ProcessBuilder(command).inheritIO().start().waitFor();
+        } catch (IOException e) {
+            throw new MojoExecutionException(
+                    "could not run " + command.get(0) + ": " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new MojoExecutionException("interrupted while running " + command.get(0), e);
+        }
+    }
+
     private static String drain(InputStream stream) throws IOException {
         try (stream) {
             return new String(stream.readAllBytes(), StandardCharsets.UTF_8);

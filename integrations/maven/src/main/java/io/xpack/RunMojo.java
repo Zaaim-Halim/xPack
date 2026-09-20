@@ -3,6 +3,7 @@ package io.xpack;
 import io.xpack.internal.Json;
 import io.xpack.internal.Processes;
 import io.xpack.internal.Target;
+import io.xpack.internal.XPackCli;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,18 +72,31 @@ public class RunMojo extends AbstractXPackMojo {
             // whole of the trust decision being made.
             install.add("--trust-on-first-use");
         }
-        cli().run("install", install);
+        XPackCli cli = cli();
+        cli.run("install", install);
 
-        Path launcher = root.resolve(applicationId())
-                .resolve(host.executableName("xpack-launcher"));
-        if (!Files.isRegularFile(launcher)) {
-            throw new MojoExecutionException("no launcher at " + launcher);
+        // Asked for rather than worked out. An installation names its
+        // executables after the application it serves, sanitising the name
+        // and pinning the result the first time; reconstructing that here
+        // would be a second implementation of a rule that has to stay in one
+        // place, and would be wrong for any installation predating it.
+        Map<String, Object> listing =
+                cli.json("list", List.of(applicationId(), "--root", root.toString()));
+        Object reported = listing.get("launcher");
+        if (!(reported instanceof String path)) {
+            throw new MojoExecutionException(
+                    "the installation has no launcher, so there is nothing to run");
         }
+        Path launcher = Path.of(path);
 
         getLog().info("xpack: starting " + launcher);
-        Processes.run(List.of(launcher.toString()), getLog(), timeoutMinutes)
-                .logDiagnostics(getLog())
-                .failOnError("the application");
+        int status = Processes.runInheritingIo(List.of(launcher.toString()), getLog());
+        if (status != 0) {
+            // The launcher's own exit code, which is how a rolled-back
+            // version reports itself. Worth failing the build on: a developer
+            // asking to run their application wants to know it did not start.
+            throw new MojoExecutionException("the application exited with status " + status);
+        }
     }
 
     private Path packageFor(Target host) throws MojoExecutionException {
@@ -99,7 +113,7 @@ public class RunMojo extends AbstractXPackMojo {
         }
         for (Path candidate : candidates) {
             Map<String, Object> described = cli().json("inspect", List.of(candidate.toString()));
-            if (host.id().equals(Json.string(described, "platform"))) {
+            if (host.id().equals(Json.platform(described))) {
                 return candidate;
             }
         }
