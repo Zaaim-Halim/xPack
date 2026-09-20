@@ -22,8 +22,14 @@ pub(crate) struct Args {
 /// Runs `xpack verify`.
 pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     let key = super::public_key(&args.key)?;
-    let verified =
+    let mut verified =
         PackageReader::open(&args.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+
+    // The signature proves the manifest; this proves the payload matches it.
+    // Without it a package whose contents were replaced still reports as
+    // verified, because its manifest is untouched and correctly signed — and
+    // this command exists precisely to be trusted as a gate.
+    let files = verified.verify_payload_digests()?;
     let manifest = verified.manifest();
 
     crate::output::field("package", args.package.display());
@@ -31,8 +37,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("version", &manifest.application.version);
     crate::output::field("platform", manifest.platform);
     crate::output::field("signed by", key.fingerprint());
+    crate::output::field("files", files);
     println!();
-    println!("signature verified");
+    println!("signature verified, and every file matches the signed manifest");
 
     // Verification proves who signed it, not that it suits this machine.
     if let Ok(host) = xpack_core::Platform::host()

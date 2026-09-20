@@ -709,3 +709,98 @@ fn the_component_check_rejects_a_symlinked_parent_directory() {
         "a symlinked parent does resolve outside the staging root"
     );
 }
+
+// --- `verify` must answer for the payload, not only the signature ---------
+
+/// Rewrites one payload entry inside a finished package, leaving everything
+/// else — including the signed manifest and its signature — untouched.
+fn replace_payload_entry(source: &Path, entry: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let out = source.with_extension("tampered.xpkg");
+    let mut input =
+        zip::ZipArchive::new(std::io::BufReader::new(fs::File::open(source).unwrap())).unwrap();
+    let mut output = zip::ZipWriter::new(std::io::BufWriter::new(fs::File::create(&out).unwrap()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::DEFAULT);
+
+    for index in 0..input.len() {
+        let mut item = input.by_index(index).unwrap();
+        let name = item.name().to_string();
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut item, &mut content).unwrap();
+        if name == entry {
+            content = bytes.to_vec();
+        }
+        output.start_file(&name, options).unwrap();
+        std::io::Write::write_all(&mut output, &content).unwrap();
+    }
+    output.finish().unwrap();
+    out
+}
+
+/// Reads one entry out of a package.
+fn entry_bytes(package: &Path, entry: &str) -> Vec<u8> {
+    let mut archive = zip::ZipArchive::new(fs::File::open(package).unwrap()).unwrap();
+    let mut item = archive.by_name(entry).unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut item, &mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn verifying_a_package_catches_a_replaced_payload_file() {
+    // The signature covers the manifest, and replacing a payload file leaves
+    // the manifest untouched — so signature verification alone reports such a
+    // package as good. It did: `xpack verify` printed "signature verified" for
+    // a package whose contents had been swapped, and only `install` caught it.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = pack(dir.path(), &key, Platform::host().unwrap());
+
+    let tampered =
+        replace_payload_entry(&package, "payload/application/app.jar", b"different contents");
+
+    let mut verified = PackageReader::open(&tampered)
+        .unwrap()
+        .verify_with_keys(&[key.public()])
+        .expect("the signature still verifies: only the payload was touched");
+
+    let err =
+        verified.verify_payload_digests().expect_err("a replaced payload file must be caught");
+    assert!(err.is_integrity_failure(), "expected an integrity failure, got {err}");
+}
+
+#[test]
+fn verifying_catches_a_replacement_of_exactly_the_same_length() {
+    // A length check alone would miss this one; the digest is what catches it.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = pack(dir.path(), &key, Platform::host().unwrap());
+
+    let original = entry_bytes(&package, "payload/application/app.jar");
+    let mut swapped = original.clone();
+    let last = swapped.len() - 1;
+    swapped[last] ^= 0xFF;
+    assert_eq!(swapped.len(), original.len(), "the point is that the length is unchanged");
+
+    let tampered = replace_payload_entry(&package, "payload/application/app.jar", &swapped);
+    let mut verified =
+        PackageReader::open(&tampered).unwrap().verify_with_keys(&[key.public()]).unwrap();
+
+    let err = verified.verify_payload_digests().expect_err("a same-length swap must be caught");
+    assert!(err.is_integrity_failure(), "expected an integrity failure, got {err}");
+}
+
+#[test]
+fn verifying_a_genuine_package_checks_every_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = pack(dir.path(), &key, Platform::host().unwrap());
+
+    let mut verified =
+        PackageReader::open(&package).unwrap().verify_with_keys(&[key.public()]).unwrap();
+
+    let declared = verified.manifest().payload.files.len();
+    let checked = verified.verify_payload_digests().expect("a genuine package must pass");
+    assert_eq!(checked, declared);
+}

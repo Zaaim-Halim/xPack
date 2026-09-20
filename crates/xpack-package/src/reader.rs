@@ -361,6 +361,73 @@ impl VerifiedPackage {
         self.extract_to_with_progress(destination, &NoProgress)
     }
 
+    /// Hashes every payload file and checks it against the signed manifest.
+    ///
+    /// # Why this is separate from verification
+    ///
+    /// Verifying a package proves the manifest is exactly what the publisher
+    /// signed, and that the archive carries nothing the manifest does not
+    /// cover. It does **not** read the payload, because the caller that
+    /// matters — installation — hashes every byte as it writes it, and hashing
+    /// twice would double the cost of every install to no benefit.
+    ///
+    /// That split is right for installing and wrong for answering "is this
+    /// file sound?", which is what `xpack verify` is for. A package whose
+    /// payload was replaced still carries an untouched, correctly signed
+    /// manifest, so signature verification alone reports it as good — and a
+    /// publisher or mirror using that as a gate would be told the wrong thing.
+    ///
+    /// Reads the whole archive. That is the expected cost of asking.
+    pub fn verify_payload_digests(&mut self) -> Result<usize> {
+        let declared: BTreeMap<String, xpack_core::PayloadFile> =
+            self.manifest.payload.files.iter().map(|f| (f.path.clone(), f.clone())).collect();
+
+        let mut checked = 0usize;
+        for index in 0..self.archive.len() {
+            let mut entry = self.archive.by_index(index).map_err(|e| {
+                Error::invalid("package", format!("cannot read archive entry {index}: {e}"))
+            })?;
+            let name = entry.name().to_string();
+            if name == MANIFEST_ENTRY
+                || name == SIGNATURE_ENTRY
+                || name == crate::delta::DELTA_ENTRY
+            {
+                continue;
+            }
+            let Some(safe) = safe_payload_path(&name)? else {
+                continue;
+            };
+            if entry.is_dir() {
+                continue;
+            }
+
+            // Already proven present by `check_archive_matches_manifest`; the
+            // error path stays so a reordering cannot silently skip a file.
+            let expected = declared.get(safe.as_str()).ok_or_else(|| {
+                Error::Integrity(format!("{:?} is not covered by the manifest", safe.as_str()))
+            })?;
+
+            let (actual, size) = xpack_security::sha256_reader(&mut entry)?;
+            if size != expected.size {
+                return Err(Error::Integrity(format!(
+                    "{:?} is {size} bytes but the signed manifest declares {}",
+                    safe.as_str(),
+                    expected.size
+                )));
+            }
+            xpack_security::verify_digest(safe.as_str(), actual, expected.sha256)?;
+            checked += 1;
+        }
+
+        if checked != declared.len() {
+            return Err(Error::Integrity(format!(
+                "checked {checked} files but the manifest declares {}",
+                declared.len()
+            )));
+        }
+        Ok(checked)
+    }
+
     /// The archive and manifest, for assembly from a delta.
     ///
     /// Crate-private: handing out the open archive is what keeps assembly
