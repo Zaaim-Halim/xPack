@@ -270,6 +270,23 @@ impl<'lock> Installer<'lock> {
 
         let mut state = self.load_state()?;
 
+        // Named after the application from here on, but only for an
+        // installation that has no executables yet.
+        //
+        // The alternative — deriving the names whenever they are needed —
+        // renames files that already exist the first time a publisher renames
+        // their application, which orphans the launcher a shortcut points at
+        // and, on Windows, cannot be done at all while that launcher is the
+        // resident process watching the application start.
+        //
+        // Presence on disk is the test rather than the state document,
+        // because the files are the thing that cannot be renamed. An
+        // installation made before executables carried application names
+        // keeps xPack's names for the rest of its life.
+        if state.binary_base_name.is_none() && !Self::has_xpack_named_binaries(paths) {
+            state.pin_binary_names(&manifest.application.name);
+        }
+
         // Checked before the downgrade rule so reinstalling the active version
         // reports what is actually wrong, rather than "downgrades are
         // rejected", which describes a different problem entirely.
@@ -610,7 +627,11 @@ impl<'lock> Installer<'lock> {
     /// Replacing a launcher is therefore a deliberate xPack upgrade and needs
     /// its own path, not a silent side effect of installing an application.
     pub fn install_launcher(&self, source: &Path) -> Result<LauncherOutcome> {
-        Self::install_binary(source, &self.lock.paths().launcher_file(), "launcher")
+        Self::install_binary(
+            source,
+            &self.lock.paths().launcher_file_named(&self.binary_names()),
+            "launcher",
+        )
     }
 
     /// Creates or refreshes the desktop entry the manifest asked for.
@@ -630,7 +651,9 @@ impl<'lock> Installer<'lock> {
         roots: Option<&crate::integration::Roots>,
     ) -> crate::integration::Outcome {
         let paths = self.lock.paths();
-        let Some(mut entry) = crate::integration::Entry::from_manifest(manifest, paths) else {
+        let names = self.binary_names();
+        let Some(mut entry) = crate::integration::Entry::from_manifest(manifest, paths, &names)
+        else {
             return crate::integration::Outcome::NotRequested;
         };
 
@@ -644,7 +667,7 @@ impl<'lock> Installer<'lock> {
         // its entry rewritten to point at it by an update nobody watched.
         //
         // The same rule `update_current_link` applies to `current`.
-        match resolve_entry_target(&entry, paths) {
+        match resolve_entry_target(&entry, paths, &names) {
             Some(target) => entry.target = target,
             None => {
                 return crate::integration::Outcome::Failed(format!(
@@ -673,7 +696,11 @@ impl<'lock> Installer<'lock> {
     /// points at, so replacing it would break every shortcut that resolved
     /// while the file was gone.
     pub fn install_gui_launcher(&self, source: &Path) -> Result<LauncherOutcome> {
-        Self::install_binary(source, &self.lock.paths().gui_launcher_file(), "windowed launcher")
+        Self::install_binary(
+            source,
+            &self.lock.paths().gui_launcher_file_named(&self.binary_names()),
+            "windowed launcher",
+        )
     }
 
     /// Places the background updater in the installation root.
@@ -683,12 +710,39 @@ impl<'lock> Installer<'lock> {
     /// it on every application start — so replacing it is exactly the write
     /// Windows refuses.
     pub fn install_updater(&self, source: &Path) -> Result<LauncherOutcome> {
-        Self::install_binary(source, &self.lock.paths().updater_file(), "updater")
+        Self::install_binary(
+            source,
+            &self.lock.paths().updater_file_named(&self.binary_names()),
+            "updater",
+        )
     }
 
     /// Places the uninstaller in the installation root.
     pub fn install_uninstaller(&self, source: &Path) -> Result<LauncherOutcome> {
-        Self::install_binary(source, &self.lock.paths().uninstaller_file(), "uninstaller")
+        Self::install_binary(
+            source,
+            &self.lock.paths().uninstaller_file_named(&self.binary_names()),
+            "uninstaller",
+        )
+    }
+
+    /// The names this installation's executables carry.
+    ///
+    /// Read from state on each use rather than cached, because a caller may
+    /// place binaries either side of the install that pins them.
+    fn binary_names(&self) -> xpack_core::BinaryNames {
+        self.load_state().map_or(xpack_core::BinaryNames::Xpack, |state| state.binary_names())
+    }
+
+    /// Whether executables carrying xPack's own names are already on disk.
+    ///
+    /// True for every installation made before executables were named after
+    /// the application they serve.
+    fn has_xpack_named_binaries(paths: &xpack_core::InstallPaths) -> bool {
+        paths.launcher_file().exists()
+            || paths.gui_launcher_file().exists()
+            || paths.updater_file().exists()
+            || paths.uninstaller_file().exists()
     }
 
     /// Copies an executable into the installation, if nothing is there yet.
@@ -909,6 +963,9 @@ pub fn uninstall_with_roots(
         .application_id()
         .ok_or_else(|| Error::invalid("installation", "root has no application id"))?;
     let mut state = lock.load_or_new_state(id)?;
+    // Read before state is cleared, because clearing it is what would make
+    // the named executables unfindable.
+    let binary_names = state.binary_names();
     state.current_version = None;
     state.previous_version = None;
     state.versions.clear();
@@ -922,10 +979,16 @@ pub fn uninstall_with_roots(
     // removing it as a file is right on both: on Unix this unlinks the link
     // and not the directory it names.
     atomic::remove_file_if_exists(&paths.current_link())?;
-    atomic::remove_file_if_exists(&paths.launcher_file())?;
-    atomic::remove_file_if_exists(&paths.gui_launcher_file())?;
-    atomic::remove_file_if_exists(&paths.updater_file())?;
-    atomic::remove_file_if_exists(&paths.uninstaller_file())?;
+    // Both sets. An uninstall that removed only the names the current state
+    // document mentions would leave files behind on an installation whose
+    // state was lost or rewritten, and leaving an executable in a directory a
+    // user asked to be rid of is the one thing an uninstaller must not do.
+    for names in [&xpack_core::BinaryNames::Xpack, &binary_names] {
+        atomic::remove_file_if_exists(&paths.launcher_file_named(names))?;
+        atomic::remove_file_if_exists(&paths.gui_launcher_file_named(names))?;
+        atomic::remove_file_if_exists(&paths.updater_file_named(names))?;
+        atomic::remove_file_if_exists(&paths.uninstaller_file_named(names))?;
+    }
 
     // The icon copied into the root for the desktop entry, at the exact path
     // the manifest implies rather than anything matching `icon.*`. Globbing
@@ -989,8 +1052,9 @@ pub fn uninstall_with_roots(
 fn resolve_entry_target(
     entry: &crate::integration::Entry,
     paths: &xpack_core::InstallPaths,
+    names: &xpack_core::BinaryNames,
 ) -> Option<PathBuf> {
-    [entry.target.clone(), paths.launcher_file(), paths.gui_launcher_file()]
+    [entry.target.clone(), paths.launcher_file_named(names), paths.gui_launcher_file_named(names)]
         .into_iter()
         .find(|candidate| candidate.is_file())
 }
@@ -1015,7 +1079,7 @@ fn desktop_entry_for_removal(lock: &InstallLock) -> Option<crate::integration::E
 
     let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
     let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
-    crate::integration::Entry::from_manifest(&manifest, paths)
+    crate::integration::Entry::from_manifest(&manifest, paths, &state.binary_names())
 }
 
 /// Lists a directory's entries, treating an unreadable directory as empty.

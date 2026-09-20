@@ -242,6 +242,24 @@ pub struct InstallState {
     /// would be a guess dressed as a value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_check: Option<u64>,
+    /// Base name this installation's executables were given.
+    ///
+    /// Absent means they carry xPack's own names, which is what every
+    /// installation made before this field existed has on disk.
+    ///
+    /// # Why it is pinned rather than derived on demand
+    ///
+    /// The obvious implementation recomputes the names from the manifest
+    /// whenever they are needed. That breaks the first time a publisher
+    /// renames their application: the launcher already written is found under
+    /// its old name, the new name matches nothing, and the installation grows
+    /// a second launcher while every shortcut still points at the first.
+    ///
+    /// Recorded at the first install and never rewritten, a rename changes
+    /// what a user sees in their menus — which is a display concern the
+    /// desktop entry already handles — and leaves the files alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_base_name: Option<String>,
     /// Stable random identifier deciding this installation's staged-rollout
     /// cohort.
     ///
@@ -272,8 +290,33 @@ impl InstallState {
             versions: BTreeMap::new(),
             required_version: None,
             last_update_check: None,
+            binary_base_name: None,
             rollout_id: None,
         }
+    }
+
+    /// The names this installation's executables carry.
+    ///
+    /// An installation that predates named executables keeps xPack's names,
+    /// because those are the files it actually has.
+    pub fn binary_names(&self) -> crate::naming::BinaryNames {
+        match &self.binary_base_name {
+            Some(base) => crate::naming::BinaryNames::Application { base: base.clone() },
+            None => crate::naming::BinaryNames::Xpack,
+        }
+    }
+
+    /// Records the names for an installation that does not have them yet.
+    ///
+    /// Does nothing when a name is already recorded, which is what makes a
+    /// later rename of the application harmless. Returns whether anything
+    /// changed, so a caller writes state only when it did.
+    pub fn pin_binary_names(&mut self, display_name: &str) -> bool {
+        if self.binary_base_name.is_some() {
+            return false;
+        }
+        self.binary_base_name = Some(crate::naming::safe_file_name(display_name));
+        true
     }
 
     /// The staged-rollout identifier, creating one if this is the first need.
@@ -431,6 +474,73 @@ impl InstallState {
 
 #[cfg(test)]
 mod tests {
+    mod binary_naming {
+        use super::super::*;
+
+        #[test]
+        fn an_installation_that_predates_named_executables_keeps_the_old_names() {
+            // The files on that machine are called xpack-launcher and so on.
+            // Deciding otherwise would look for a launcher that is not there.
+            let json = br#"{"stateFormatVersion":1,"applicationId":"com.example.app"}"#;
+            let state: InstallState = serde_json::from_slice(json).unwrap();
+
+            assert_eq!(state.binary_base_name, None);
+            assert_eq!(state.binary_names(), crate::naming::BinaryNames::Xpack);
+            assert_eq!(state.binary_names().launcher(), "xpack-launcher");
+        }
+
+        #[test]
+        fn the_name_is_recorded_on_the_first_install() {
+            let mut state = InstallState::new("com.example.app");
+
+            assert!(state.pin_binary_names("My App"));
+            assert_eq!(state.binary_base_name.as_deref(), Some("My App"));
+            assert_eq!(state.binary_names().updater(), "My App Updater");
+        }
+
+        #[test]
+        fn renaming_the_application_does_not_rename_the_files_already_written() {
+            // The whole reason this is pinned. A second pin would leave the
+            // launcher on disk unreachable and grow another beside it.
+            let mut state = InstallState::new("com.example.app");
+            state.pin_binary_names("My App");
+
+            assert!(!state.pin_binary_names("Something Else Entirely"));
+            assert_eq!(state.binary_base_name.as_deref(), Some("My App"));
+        }
+
+        #[test]
+        fn a_hostile_display_name_is_sanitised_before_it_reaches_disk() {
+            let mut state = InstallState::new("com.example.app");
+            state.pin_binary_names("../../evil");
+
+            let base = state.binary_base_name.clone().unwrap();
+            assert!(!base.contains('/'), "{base}");
+            assert!(!base.starts_with('.'), "{base}");
+        }
+
+        #[test]
+        fn the_name_survives_being_written_and_read_back() {
+            let mut state = InstallState::new("com.example.app");
+            state.pin_binary_names("My App");
+
+            let bytes = serde_json::to_vec(&state).unwrap();
+            let read: InstallState = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(read.binary_names(), state.binary_names());
+        }
+
+        #[test]
+        fn a_state_without_a_name_does_not_write_the_field() {
+            // An installation that never needed one should produce the same
+            // document it always did, so an older build can still read it.
+            let state = InstallState::new("com.example.app");
+            let json = serde_json::to_string(&state).unwrap();
+
+            assert!(!json.contains("binaryBaseName"), "{json}");
+        }
+    }
+
     use super::*;
 
     fn v(s: &str) -> Version {

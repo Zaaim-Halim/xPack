@@ -21,6 +21,21 @@ pub(crate) fn build_package_with(
     version: &str,
     desktop: &xpack_core::DesktopSpec,
 ) -> PathBuf {
+    build_package_named(dir, key, version, "Example", desktop)
+}
+
+/// Builds a package carrying a chosen display name.
+///
+/// The name is what executables in an installation are named after, so a test
+/// about renaming an application needs to be able to change it.
+#[allow(dead_code)]
+pub(crate) fn build_package_named(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    display_name: &str,
+    desktop: &xpack_core::DesktopSpec,
+) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
     fs::write(payload.join("bin/app"), format!("#!/bin/sh\necho {version}\n")).unwrap();
@@ -35,7 +50,7 @@ pub(crate) fn build_package_with(
         format_version: FormatVersion::CURRENT,
         application: Application {
             id: "com.example.app".into(),
-            name: "Example".into(),
+            name: display_name.into(),
             version: Version::parse(version).unwrap(),
             description: None,
             publisher: None,
@@ -82,4 +97,13 @@ pub(crate) fn desktop_roots(base: &Path) -> xpack_install::integration::Roots {
 /// A temporary installation root plus its layout.
 pub(crate) fn install_paths(root: &Path) -> InstallPaths {
     InstallPaths::new(root, "com.example.app").unwrap()
+}
+
+/// The names a fresh installation of the fixture gives its executables.
+///
+/// Derived from the same display name the fixture manifest carries, so a test
+/// asserting on a path cannot quietly disagree with what an install writes.
+#[allow(dead_code)]
+pub(crate) fn installed_names() -> xpack_core::BinaryNames {
+    xpack_core::BinaryNames::from_display_name("Example")
 }

@@ -123,10 +123,21 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     crate::output::field("signed by", signed_by);
     crate::output::field("active", installed.activated);
     crate::output::field("location", lock.paths().version_dir(&installed.version).display());
-    report_binary("launcher", installed.launcher, &lock.paths().launcher_file());
-    report_binary("windowed launcher", installed.gui_launcher, &lock.paths().gui_launcher_file());
-    report_binary("updater", installed.updater, &lock.paths().updater_file());
-    report_binary("uninstaller", installed.uninstaller, &lock.paths().uninstaller_file());
+    // Under the names this installation gave them, which are the names of
+    // the files that are actually there. Reporting the ones this binary was
+    // built expecting would print four paths a user cannot open.
+    let names = lock
+        .load_state()
+        .map_or(xpack_core::BinaryNames::Xpack, |state| state.value.binary_names());
+    let paths = lock.paths();
+    report_binary("launcher", installed.launcher, &paths.launcher_file_named(&names));
+    report_binary(
+        "windowed launcher",
+        installed.gui_launcher,
+        &paths.gui_launcher_file_named(&names),
+    );
+    report_binary("updater", installed.updater, &paths.updater_file_named(&names));
+    report_binary("uninstaller", installed.uninstaller, &paths.uninstaller_file_named(&names));
 
     if matches!(decision, TrustDecision::OnFirstUse) {
         eprintln!();

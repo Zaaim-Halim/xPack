@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{build_package, install_paths};
+use common::{build_package, install_paths, installed_names};
 use xpack_core::state::{UpdatePhase, VersionStatus};
 use xpack_core::{InstallState, Version};
 use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
@@ -713,7 +713,7 @@ fn installing_places_the_launcher_in_the_root() {
 
     assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::Installed));
 
-    let launcher = paths.launcher_file();
+    let launcher = paths.launcher_file_named(&installed_names());
     assert!(launcher.is_file(), "no launcher at {}", launcher.display());
     assert_eq!(std::fs::read(&launcher).unwrap(), std::fs::read(&source).unwrap());
 
@@ -736,7 +736,10 @@ fn the_installed_launcher_is_executable() {
         InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
     install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
 
-    let mode = std::fs::metadata(paths.launcher_file()).unwrap().permissions().mode();
+    let mode = std::fs::metadata(paths.launcher_file_named(&installed_names()))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o111, 0o111, "not executable: mode {mode:o}");
 }
 
@@ -834,12 +837,13 @@ fn uninstalling_removes_the_launcher() {
     let options =
         InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
     install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
-    assert!(paths.launcher_file().is_file(), "precondition: a launcher is installed");
+    let launcher = paths.launcher_file_named(&installed_names());
+    assert!(launcher.is_file(), "precondition: a launcher is installed");
 
     let removal = xpack_install::uninstall(lock).unwrap();
 
     assert!(removal.is_complete(), "left behind: {:?}", removal.remaining);
-    assert!(!paths.launcher_file().exists());
+    assert!(!launcher.exists());
 }
 
 #[test]
@@ -1094,4 +1098,175 @@ fn a_users_own_file_in_the_root_is_reported_rather_than_deleted() {
 
     // The icon xPack itself copied in is gone, though.
     assert!(!paths.root().join("icon.txt").exists(), "xPack's own icon survived");
+}
+
+// ---------------------------------------------------------------------------
+// Executables named after the application they serve.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn installing_names_every_executable_after_the_application() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir.path(), "src-launcher")),
+        updater: Some(common::fake_binary(dir.path(), "src-updater")),
+        uninstaller: Some(common::fake_binary(dir.path(), "src-uninstaller")),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let names = installed_names();
+    for file in [
+        paths.launcher_file_named(&names),
+        paths.updater_file_named(&names),
+        paths.uninstaller_file_named(&names),
+    ] {
+        assert!(file.is_file(), "not installed: {}", file.display());
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.contains("Example"), "{name} is not named after the application");
+        assert!(!name.contains("xpack"), "{name} still carries xPack's name");
+    }
+}
+
+#[test]
+fn the_name_is_recorded_so_a_later_run_finds_the_same_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        launcher: Some(common::fake_binary(dir.path(), "l")),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.binary_base_name.as_deref(), Some("Example"));
+    assert_eq!(state.binary_names(), installed_names());
+}
+
+#[test]
+fn an_installation_that_already_carries_xpack_names_keeps_them() {
+    // The migration case, and the one that matters most: these files exist on
+    // a user's machine right now. Renaming them would orphan the shortcut
+    // pointing at one and, on Windows, cannot be done at all while the
+    // launcher is the resident process watching the application start.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    std::fs::create_dir_all(paths.root()).unwrap();
+    std::fs::write(paths.launcher_file(), b"an older launcher").unwrap();
+
+    let options = InstallOptions {
+        launcher: Some(common::fake_binary(dir.path(), "l")),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.binary_base_name, None, "an existing installation must not be renamed");
+    assert_eq!(std::fs::read(paths.launcher_file()).unwrap(), b"an older launcher");
+    assert!(
+        !paths.launcher_file_named(&installed_names()).exists(),
+        "a second launcher was written beside the one already there"
+    );
+}
+
+#[test]
+fn renaming_the_application_leaves_the_executables_where_they_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        launcher: Some(common::fake_binary(dir.path(), "l")),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    // The same application, released under a new display name.
+    let renamed = common::build_package_named(
+        dir.path(),
+        &key,
+        "1.1.0",
+        "Renamed Entirely",
+        &xpack_core::DesktopSpec::default(),
+    );
+    let mut verified =
+        open_and_verify(&renamed, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    Installer::new(&lock).install(&mut verified, &options).unwrap();
+
+    assert!(paths.launcher_file_named(&installed_names()).is_file(), "the original file moved");
+    let after = xpack_core::BinaryNames::from_display_name("Renamed Entirely");
+    assert!(
+        !paths.launcher_file_named(&after).exists(),
+        "a rename wrote a second launcher under the new name"
+    );
+}
+
+#[test]
+fn uninstalling_removes_executables_named_after_the_application() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        launcher: Some(common::fake_binary(dir.path(), "src-launcher")),
+        updater: Some(common::fake_binary(dir.path(), "src-updater")),
+        uninstaller: Some(common::fake_binary(dir.path(), "src-uninstaller")),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let names = installed_names();
+    let files = [
+        paths.launcher_file_named(&names),
+        paths.updater_file_named(&names),
+        paths.uninstaller_file_named(&names),
+    ];
+    assert!(files.iter().all(|f| f.is_file()), "precondition: all three are installed");
+
+    let removal = xpack_install::uninstall(lock).unwrap();
+
+    assert!(removal.is_complete(), "left behind: {:?}", removal.remaining);
+    for file in files {
+        assert!(!file.exists(), "left behind: {}", file.display());
+    }
+}
+
+#[test]
+fn a_desktop_entry_points_at_the_launcher_that_was_actually_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let desktop = xpack_core::DesktopSpec { shortcut: true, ..Default::default() };
+    let package = common::build_package_with(dir.path(), &key, "1.0.0", &desktop);
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir.path(), "src-launcher")),
+        gui_launcher: Some(common::fake_binary(dir.path(), "src-launcherw")),
+        desktop_roots: Some(common::desktop_roots(dir.path())),
+        ..Default::default()
+    };
+    Installer::new(&lock).install(&mut verified, &options).unwrap();
+
+    // An entry naming a file that is not there looks correct and fails with
+    // "no such file", which is worse than having no entry at all.
+    let target = paths.shortcut_target_named(&installed_names());
+    assert!(target.is_file(), "the entry would point at nothing: {}", target.display());
 }

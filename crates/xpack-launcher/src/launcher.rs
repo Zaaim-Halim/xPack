@@ -358,6 +358,21 @@ pub fn observe_startup_reporting(
     }
 }
 
+/// The names this installation's executables carry.
+///
+/// Read without taking the installation lock, which is safe for this one
+/// field and only this one: it is written once, when the installation is
+/// created, and never changed afterwards, so there is no moment at which a
+/// reader could see it half way between two values. Taking the lock here
+/// would instead contend with the launch this function runs just ahead of.
+///
+/// A state document that cannot be read at all falls back to xPack's own
+/// names, which is what an installation predating named executables has.
+fn installed_binary_names(paths: &InstallPaths) -> xpack_core::BinaryNames {
+    xpack_core::store::load::<xpack_core::InstallState>(&paths.state_file())
+        .map_or(xpack_core::BinaryNames::Xpack, |loaded| loaded.value.binary_names())
+}
+
 /// Returns the directory a launcher at `executable` would serve.
 pub fn application_dir_for(executable: &Path) -> Result<&Path> {
     xpack_core::atomic::parent_dir(executable)
@@ -397,7 +412,7 @@ pub fn application_dir_for(executable: &Path) -> Result<&Path> {
 /// does. If the launcher exits first the thread goes with it and the updater
 /// is reparented, which is the outcome "detached" was reaching for anyway.
 pub fn spawn_updater(paths: &InstallPaths) -> bool {
-    let updater = paths.updater_file();
+    let updater = paths.updater_file_named(&installed_binary_names(paths));
     if !updater.is_file() {
         tracing::debug!(path = %updater.display(), "no updater is installed");
         return false;

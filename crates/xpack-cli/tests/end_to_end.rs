@@ -721,9 +721,13 @@ fn an_installer_installs_an_application_that_then_runs() {
         .expect("the installer should run");
     assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
 
-    // And now the application itself.
-    let launcher = root.join("com.example.demo/xpack-launcher");
-    assert!(launcher.is_file(), "no launcher was installed");
+    // And now the application itself. The launcher is named after the
+    // application, not after xPack, so this also checks that what the
+    // installer reported is a path that actually exists.
+    let launcher = xpack_core::InstallPaths::new(&root, "com.example.demo")
+        .unwrap()
+        .shortcut_target_named(&xpack_core::BinaryNames::from_display_name("Demo"));
+    assert!(launcher.is_file(), "no launcher was installed at {}", launcher.display());
 
     let app =
         Command::new(&launcher).arg("hello").output().expect("the installed launcher should run");

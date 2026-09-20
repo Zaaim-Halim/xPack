@@ -158,11 +158,18 @@ impl Payload {
 
         let installed = Installer::new(&lock).install(&mut verified, &options)?;
 
+        // Read after the install, because that is when an installation is
+        // given the names its executables carry. Reporting the path this
+        // binary was built expecting would print one the user cannot run.
+        let names = lock
+            .load_or_new_state(&self.plan.application_id)
+            .map_or(xpack_core::BinaryNames::Xpack, |state| state.binary_names());
+
         Ok(Outcome {
             root: paths.root().to_path_buf(),
             version: installed.version,
             activated: installed.activated,
-            launcher: paths.launcher_file(),
+            launcher: paths.shortcut_target_named(&names),
             desktop: installed.desktop,
         })
     }

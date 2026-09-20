@@ -197,7 +197,12 @@ impl InstallPaths {
     /// filename invites normalisation collisions, and nothing reads this name
     /// anyway — the launcher only cares where it is, not what it is called.
     pub fn launcher_file(&self) -> PathBuf {
-        self.root.join(format!("xpack-launcher{}", std::env::consts::EXE_SUFFIX))
+        self.launcher_file_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The console launcher, under the names this installation actually uses.
+    pub fn launcher_file_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        self.executable(&names.launcher())
     }
 
     /// The windowed launcher, for platforms that distinguish one.
@@ -212,7 +217,12 @@ impl InstallPaths {
     /// that one attribute, and shortcuts point at this one. Unix has no such
     /// distinction, and this file is not installed on it.
     pub fn gui_launcher_file(&self) -> PathBuf {
-        self.root.join(format!("xpack-launcherw{}", std::env::consts::EXE_SUFFIX))
+        self.gui_launcher_file_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The windowed launcher, under the names this installation actually uses.
+    pub fn gui_launcher_file_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        self.executable(&names.windowed_launcher())
     }
 
     /// The launcher a desktop shortcut should point at.
@@ -223,7 +233,21 @@ impl InstallPaths {
     /// compiled on every platform, so the Windows arm cannot rot unnoticed on
     /// a machine that never builds for Windows.
     pub fn shortcut_target(&self) -> PathBuf {
-        if HAS_WINDOWED_LAUNCHER { self.gui_launcher_file() } else { self.launcher_file() }
+        self.shortcut_target_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The shortcut target, under the names this installation actually uses.
+    pub fn shortcut_target_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        if HAS_WINDOWED_LAUNCHER {
+            self.gui_launcher_file_named(names)
+        } else {
+            self.launcher_file_named(names)
+        }
+    }
+
+    /// An executable in the installation root, named for this platform.
+    fn executable(&self, stem: &str) -> PathBuf {
+        self.root.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
     }
 
     /// The background updater binary for this installation.
@@ -231,7 +255,12 @@ impl InstallPaths {
     /// Beside the launcher, and found the same way: it resolves its own
     /// location to learn which application it serves.
     pub fn updater_file(&self) -> PathBuf {
-        self.root.join(format!("xpack-updater{}", std::env::consts::EXE_SUFFIX))
+        self.updater_file_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The updater, under the names this installation actually uses.
+    pub fn updater_file_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        self.executable(&names.updater())
     }
 
     /// Where a version signals that it started successfully.
@@ -247,7 +276,12 @@ impl InstallPaths {
     /// Beside the launcher and the updater. It removes the directory it lives
     /// in, which is why it relocates itself before doing so.
     pub fn uninstaller_file(&self) -> PathBuf {
-        self.root.join(format!("xpack-uninstaller{}", std::env::consts::EXE_SUFFIX))
+        self.uninstaller_file_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The uninstaller, under the names this installation actually uses.
+    pub fn uninstaller_file_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        self.executable(&names.uninstaller())
     }
 
     /// Returns `true` when this looks like an initialised installation.
@@ -402,6 +436,82 @@ pub fn install_root_from(overridden: Option<&OsStr>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    mod named_binaries {
+        use super::super::*;
+        use crate::naming::BinaryNames;
+
+        fn paths() -> InstallPaths {
+            InstallPaths::new(std::path::Path::new("/r"), "com.example.app").unwrap()
+        }
+
+        #[test]
+        fn the_unnamed_accessors_still_resolve_exactly_what_they_always_did() {
+            // Existing installations depend on these bytes. This is the guard
+            // that routing them through BinaryNames changed nothing.
+            let p = paths();
+            let suffix = std::env::consts::EXE_SUFFIX;
+
+            assert_eq!(p.launcher_file(), p.root().join(format!("xpack-launcher{suffix}")));
+            assert_eq!(p.gui_launcher_file(), p.root().join(format!("xpack-launcherw{suffix}")));
+            assert_eq!(p.updater_file(), p.root().join(format!("xpack-updater{suffix}")));
+            assert_eq!(p.uninstaller_file(), p.root().join(format!("xpack-uninstaller{suffix}")));
+        }
+
+        #[test]
+        fn a_named_installation_puts_the_application_name_on_every_executable() {
+            let p = paths();
+            let names = BinaryNames::from_display_name("My App");
+            let suffix = std::env::consts::EXE_SUFFIX;
+
+            assert_eq!(
+                p.updater_file_named(&names),
+                p.root().join(format!("My App Updater{suffix}"))
+            );
+            assert_eq!(
+                p.uninstaller_file_named(&names),
+                p.root().join(format!("Uninstall My App{suffix}"))
+            );
+            assert_eq!(p.gui_launcher_file_named(&names), p.root().join(format!("My App{suffix}")));
+        }
+
+        #[test]
+        fn every_named_executable_lands_inside_the_installation() {
+            // A display name is publisher-controlled, so this is the property
+            // that matters most: none of these may escape the root.
+            let p = paths();
+            for hostile in ["../../etc/cron.d/x", "/etc/passwd", "..", "C:\\Windows\\a"] {
+                let names = BinaryNames::from_display_name(hostile);
+                for file in [
+                    p.launcher_file_named(&names),
+                    p.gui_launcher_file_named(&names),
+                    p.updater_file_named(&names),
+                    p.uninstaller_file_named(&names),
+                ] {
+                    assert_eq!(
+                        file.parent(),
+                        Some(p.root()),
+                        "{hostile:?} escaped the installation as {}",
+                        file.display()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn the_shortcut_points_at_a_launcher_that_is_named_the_same_way() {
+            let p = paths();
+            let names = BinaryNames::from_display_name("My App");
+            let target = p.shortcut_target_named(&names);
+
+            let expected = if HAS_WINDOWED_LAUNCHER {
+                p.gui_launcher_file_named(&names)
+            } else {
+                p.launcher_file_named(&names)
+            };
+            assert_eq!(target, expected);
+        }
+    }
+
     use super::*;
 
     fn paths() -> InstallPaths {

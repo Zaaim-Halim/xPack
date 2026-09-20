@@ -145,13 +145,24 @@ impl Entry {
     /// whole reason two launcher builds are installed: a terminal program
     /// started by the windowed build would write into a console that does not
     /// exist.
-    pub fn from_manifest(manifest: &Manifest, paths: &InstallPaths) -> Option<Self> {
+    pub fn from_manifest(
+        manifest: &Manifest,
+        paths: &InstallPaths,
+        names: &xpack_core::BinaryNames,
+    ) -> Option<Self> {
         let desktop = &manifest.desktop;
         if !desktop.shortcut {
             return None;
         }
 
-        let target = if desktop.terminal { paths.launcher_file() } else { paths.shortcut_target() };
+        // Under the names this installation actually uses, not the ones a
+        // fresh installation would choose: an entry naming a file that is not
+        // there looks correct and fails with "no such file".
+        let target = if desktop.terminal {
+            paths.launcher_file_named(names)
+        } else {
+            paths.shortcut_target_named(names)
+        };
 
         Some(Self {
             application_id: manifest.application.id.clone(),
@@ -164,7 +175,7 @@ impl Entry {
             icon: icon_destination(paths, desktop),
             categories: desktop.categories.clone(),
             terminal: desktop.terminal,
-            uninstaller: Some(paths.uninstaller_file()),
+            uninstaller: Some(paths.uninstaller_file_named(names)),
         })
     }
 }
@@ -357,12 +368,24 @@ mod tests {
 
     #[test]
     fn a_manifest_that_asks_for_nothing_produces_no_entry() {
-        assert!(Entry::from_manifest(&manifest(false, None, false), &paths()).is_none());
+        assert!(
+            Entry::from_manifest(
+                &manifest(false, None, false),
+                &paths(),
+                &xpack_core::BinaryNames::Xpack
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn an_entry_carries_the_identity_a_menu_shows() {
-        let entry = Entry::from_manifest(&manifest(true, None, false), &paths()).unwrap();
+        let entry = Entry::from_manifest(
+            &manifest(true, None, false),
+            &paths(),
+            &xpack_core::BinaryNames::Xpack,
+        )
+        .unwrap();
         assert_eq!(entry.name, "Example");
         assert_eq!(entry.publisher.as_deref(), Some("Example Ltd"));
         assert_eq!(entry.application_id, "com.example.app");
@@ -372,13 +395,23 @@ mod tests {
     fn a_terminal_application_points_at_the_console_launcher() {
         // On Windows the windowed build has no console to write to, so a
         // terminal program started from it would produce no output at all.
-        let entry = Entry::from_manifest(&manifest(true, None, true), &paths()).unwrap();
+        let entry = Entry::from_manifest(
+            &manifest(true, None, true),
+            &paths(),
+            &xpack_core::BinaryNames::Xpack,
+        )
+        .unwrap();
         assert_eq!(entry.target, paths().launcher_file());
     }
 
     #[test]
     fn a_windowed_application_points_at_the_shortcut_launcher() {
-        let entry = Entry::from_manifest(&manifest(true, None, false), &paths()).unwrap();
+        let entry = Entry::from_manifest(
+            &manifest(true, None, false),
+            &paths(),
+            &xpack_core::BinaryNames::Xpack,
+        )
+        .unwrap();
         assert_eq!(entry.target, paths().shortcut_target());
     }
 
@@ -387,8 +420,12 @@ mod tests {
         // A version directory is replaced by the next update. An entry
         // pointing into one shows a missing image the first time the
         // application updates.
-        let entry =
-            Entry::from_manifest(&manifest(true, Some("res/logo.png"), false), &paths()).unwrap();
+        let entry = Entry::from_manifest(
+            &manifest(true, Some("res/logo.png"), false),
+            &paths(),
+            &xpack_core::BinaryNames::Xpack,
+        )
+        .unwrap();
         let icon = entry.icon.unwrap();
         assert_eq!(icon, paths().root().join("icon.png"));
         assert!(!icon.starts_with(paths().versions_dir()));
@@ -399,8 +436,12 @@ mod tests {
         for (given, expected) in
             [("a/b.ico", "icon.ico"), ("x.icns", "icon.icns"), ("y.svg", "icon.svg")]
         {
-            let entry =
-                Entry::from_manifest(&manifest(true, Some(given), false), &paths()).unwrap();
+            let entry = Entry::from_manifest(
+                &manifest(true, Some(given), false),
+                &paths(),
+                &xpack_core::BinaryNames::Xpack,
+            )
+            .unwrap();
             assert_eq!(entry.icon.unwrap(), paths().root().join(expected));
         }
     }
