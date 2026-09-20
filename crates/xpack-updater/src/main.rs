@@ -13,6 +13,12 @@ use xpack_update::{HttpsTransport, Timeouts};
 use xpack_updater::{BackgroundUpdater, Outcome};
 
 /// Exit codes. Anything a caller might branch on gets its own.
+///
+/// These match `xpack` and `xpack-installer` deliberately. A monitoring system
+/// watching a fleet sees all three binaries, and a code that meant "busy" in
+/// one and "you typed the command wrong" in another would be read wrong
+/// exactly when it mattered. `2` is reserved for a command line clap could not
+/// parse, which is why busy is 4 rather than the next free number.
 mod exit {
     /// A version was staged.
     pub(crate) const STAGED: u8 = 0;
@@ -20,8 +26,15 @@ mod exit {
     pub(crate) const NOTHING_TO_DO: u8 = 0;
     /// The update could not be completed.
     pub(crate) const FAILED: u8 = 1;
+    /// A signature or digest did not verify.
+    ///
+    /// Separate from a plain failure because a caller that retries on failure
+    /// must never retry this one: a package that fails verification will fail
+    /// it again, and repeating the download only feeds an attacker or a broken
+    /// mirror.
+    pub(crate) const INTEGRITY: u8 = 3;
     /// Another xPack operation is using the installation.
-    pub(crate) const BUSY: u8 = 2;
+    pub(crate) const BUSY: u8 = 4;
 }
 
 #[derive(Parser)]
@@ -117,6 +130,10 @@ fn main() -> ExitCode {
         Err(xpack_core::Error::Locked(_)) => {
             tracing::debug!("the installation is busy; will try again next time");
             ExitCode::from(exit::BUSY)
+        }
+        Err(error) if error.is_integrity_failure() => {
+            tracing::error!(%error, "update failed verification");
+            ExitCode::from(exit::INTEGRITY)
         }
         Err(error) => {
             tracing::error!(%error, "update failed");
