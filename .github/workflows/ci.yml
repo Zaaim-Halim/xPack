@@ -40,6 +40,12 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # This includes the documentation drift tests in `xpack-cli`, which
+      # compare `docs/README.md` against the binaries. They *skip* here and
+      # say so: `docs/` is deliberately untracked, so a CI checkout does not
+      # contain the file. They run on the machine of whoever edits the CLI,
+      # which is where the drift is introduced. Nothing to fix if you see
+      # them skip.
       - name: Test
         run: cargo test --workspace --all-targets
 
