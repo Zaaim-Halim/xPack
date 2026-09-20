@@ -643,9 +643,29 @@ fn a_stray_private_key_anywhere_in_the_payload_is_refused() {
 
 // --- the bootstrap installer ---------------------------------------------
 
+/// The directory cargo put this test's binaries in.
+fn binary_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_xpack")).parent().unwrap().to_path_buf()
+}
+
 /// The `xpack-installer` stub built alongside this test.
 fn installer_stub() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_xpack")).parent().unwrap().join("xpack-installer")
+    binary_dir().join(format!("xpack-installer{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Whether every binary `xpack installer` needs has been built.
+///
+/// `cargo test -p xpack-cli` builds this crate's binary and its tests, but not
+/// the *other* crates' binaries, and `xpack installer` gathers the launcher,
+/// updater and uninstaller from beside itself. Checking only the stub made
+/// these tests fail rather than skip whenever the workspace had not been built
+/// — a failure that says nothing about the code under test.
+///
+/// CI runs `cargo build --workspace` first, so there they always run.
+fn installer_binaries_are_built() -> bool {
+    ["xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller"]
+        .iter()
+        .all(|name| binary_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX)).is_file())
 }
 
 #[test]
@@ -653,9 +673,10 @@ fn an_installer_installs_an_application_that_then_runs() {
     // The whole point of the installer, asserted by running it and then
     // running what it installed. Everything else about this crate can be
     // right and this still be broken.
-    if !installer_stub().is_file() {
-        // `cargo test -p xpack-cli` alone does not build sibling binaries.
-        eprintln!("skipping: the xpack-installer stub is not built");
+    if !installer_binaries_are_built() {
+        eprintln!(
+            "skipping: run `cargo build --workspace` first; see installer_binaries_are_built"
+        );
         return;
     }
 
@@ -716,8 +737,10 @@ fn an_installer_installs_an_application_that_then_runs() {
 
 #[test]
 fn a_dry_run_installs_nothing() {
-    if !installer_stub().is_file() {
-        eprintln!("skipping: the xpack-installer stub is not built");
+    if !installer_binaries_are_built() {
+        eprintln!(
+            "skipping: run `cargo build --workspace` first; see installer_binaries_are_built"
+        );
         return;
     }
 
