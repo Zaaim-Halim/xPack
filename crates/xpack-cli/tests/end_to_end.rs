@@ -210,9 +210,45 @@ fn list_emits_parseable_json() {
     let out = fixture.run_in_root(&["list", "com.example.demo", "--json"]);
     let parsed: serde_json::Value = serde_json::from_str(&stdout(&out))
         .unwrap_or_else(|e| panic!("stdout must be valid JSON ({e}): {}", stdout(&out)));
-    let first = &parsed.as_array().expect("an array")[0];
+
+    let first = &parsed["versions"].as_array().expect("an array of versions")[0];
     assert_eq!(first["version"], "1.0.0");
     assert_eq!(first["active"], true);
+
+    // The executables are named after the application, so a caller that
+    // cannot read their paths from here has no way to find them but to
+    // reimplement the naming rule.
+    assert_eq!(parsed["application"], "com.example.demo");
+    for field in ["root", "launcher", "consoleLauncher", "updater", "uninstaller"] {
+        let path = parsed[field].as_str().unwrap_or_else(|| panic!("{field} is missing"));
+        assert!(
+            std::path::Path::new(path).exists(),
+            "{field} names something that is not there: {path}"
+        );
+    }
+
+    // And what it reports is the launcher a user would actually run.
+    let launcher = parsed["launcher"].as_str().unwrap();
+    let ran = Command::new(launcher).output().expect("the reported launcher should run");
+    assert!(ran.status.success(), "the reported launcher failed: {}", stderr(&ran));
+}
+
+#[test]
+fn listing_an_installation_with_no_executables_reports_no_paths() {
+    // Reporting a path that is not there would hand a caller something to run
+    // that does not exist, which is worse than saying nothing.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+    fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json", "--no-launcher"]);
+
+    let out = fixture.run_in_root(&["list", "com.example.demo", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+
+    for field in ["launcher", "consoleLauncher", "updater", "uninstaller"] {
+        assert!(parsed[field].is_null(), "{field} should be null: {}", parsed[field]);
+    }
+    assert_eq!(parsed["versions"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -243,7 +243,7 @@ fn write_bundle(output: &Path, stub: &Path, payload: &[u8], name: &str) -> Resul
         xpack_core::atomic::create_dir_all(directory)?;
     }
 
-    let executable = sanitise(name);
+    let executable = installer_display_name(name);
     let stub_bytes = std::fs::read(stub).map_err(|e| Error::io(stub, e))?;
     let destination = macos.join(&executable);
     xpack_core::atomic::write(&destination, &stub_bytes)?;
@@ -256,19 +256,18 @@ fn write_bundle(output: &Path, stub: &Path, payload: &[u8], name: &str) -> Resul
     )
 }
 
-/// A display name made safe to use as a bundle executable name.
-fn sanitise(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| if c == '/' || c == ':' || c.is_control() { '-' } else { c })
-        .collect();
-    let trimmed = cleaned.trim().trim_start_matches('.').trim();
-    if trimmed.is_empty() { "Installer".to_string() } else { trimmed.to_string() }
+/// What a user is told this artefact does.
+///
+/// Phrased as the instruction it is, and matched to `Uninstall <name>` in an
+/// installation, so the two halves of an application's lifecycle read the same
+/// way.
+fn installer_display_name(application_name: &str) -> String {
+    format!("Install {}", xpack_core::safe_file_name(application_name))
 }
 
 /// The bundle's `Info.plist`.
 fn info_plist(name: &str, executable: &str) -> String {
-    let display = xml_escape(&format!("{name} Installer"));
+    let display = xml_escape(&installer_display_name(name));
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -293,7 +292,20 @@ fn xml_escape(value: &str) -> String {
 }
 
 /// The conventional name for an installer artefact.
+///
+/// Windows and Linux get a stem carrying the version and the platform,
+/// because a release publishes one of these per platform and they are
+/// downloaded into a directory that already has other things in it. The
+/// spelling differs only in the word each platform uses for the thing.
+///
+/// macOS does not, because a bundle's directory name *is* what Finder shows
+/// the user. A name built for a downloads directory reads as debris there,
+/// and the version is inside the bundle for anyone who needs it.
 fn default_name(manifest: &xpack_core::Manifest, target: Os) -> String {
+    if target == Os::Macos {
+        return format!("{}.app", installer_display_name(&manifest.application.name));
+    }
+
     let stem = format!(
         "{}-{}-{}",
         sanitise_stem(&manifest.application.name),
@@ -301,9 +313,9 @@ fn default_name(manifest: &xpack_core::Manifest, target: Os) -> String {
         manifest.platform
     );
     match target {
-        Os::Macos => format!("{stem}-installer.app"),
-        Os::Windows => format!("{stem}-installer.exe"),
-        Os::Linux => format!("{stem}-installer"),
+        // The word Windows uses, and the one a user is looking for.
+        Os::Windows => format!("{stem}-Setup.exe"),
+        _ => format!("{stem}-installer"),
     }
 }
 
@@ -364,18 +376,87 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_executable_name_cannot_escape_its_directory() {
-        assert_eq!(sanitise("Acme/Evil"), "Acme-Evil");
-        assert_eq!(sanitise(".hidden"), "hidden");
-        assert_eq!(sanitise("   "), "Installer");
+    fn a_bundle_name_cannot_escape_its_directory() {
+        // The bundle's directory name is publisher-controlled, so a separator
+        // in it would put the artefact somewhere the build never named.
+        for hostile in ["Acme/Evil", ".hidden", "../../x"] {
+            let name = installer_display_name(hostile);
+            assert_eq!(std::path::Path::new(&name).components().count(), 1, "{name}");
+            assert!(!name.contains('/'), "{name}");
+        }
+        assert_eq!(installer_display_name("Acme/Evil"), "Install Acme-Evil");
+    }
+
+    #[test]
+    fn the_bundle_is_named_as_the_instruction_it_is() {
+        // Mirrors `Uninstall <name>` in an installation: the two halves of an
+        // application's lifecycle should read the same way.
+        assert_eq!(installer_display_name("My App"), "Install My App");
+        assert_eq!(default_name(&manifest_named("My App"), Os::Macos), "Install My App.app");
+    }
+
+    #[test]
+    fn a_downloaded_artefact_says_which_release_and_platform_it_is() {
+        // Five of these land in one downloads directory per release.
+        let manifest = manifest_named("My App");
+        assert_eq!(
+            default_name(&manifest, Os::Windows),
+            format!("My-App-1.2.0-{}-Setup.exe", manifest.platform)
+        );
+        assert_eq!(
+            default_name(&manifest, Os::Linux),
+            format!("My-App-1.2.0-{}-installer", manifest.platform)
+        );
     }
 
     #[test]
     fn the_plist_escapes_a_name_that_would_break_the_xml() {
         // macOS does not report a malformed Info.plist; the bundle simply
         // never opens.
+        //
+        // An ampersand is the case that reaches here: it is legal in a
+        // filename, so sanitising the name leaves it in place and the XML
+        // escaping is the only thing standing between it and a bundle that
+        // will not launch. Angle brackets never arrive, because a filename
+        // cannot carry them.
         let plist = info_plist("Tom & Jerry <beta>", "app");
-        assert!(plist.contains("Tom &amp; Jerry &lt;beta&gt;"), "{plist}");
-        assert!(!plist.contains("<beta>"));
+        assert!(plist.contains("Tom &amp; Jerry"), "{plist}");
+        assert!(!plist.contains("<beta>"), "{plist}");
+
+        // And the name in the plist is the name of the directory, which is
+        // what Finder shows: the two disagreeing is a bundle that opens under
+        // one name and is listed under another.
+        assert!(plist.contains("Install Tom &amp; Jerry"), "{plist}");
+    }
+
+    fn manifest_named(name: &str) -> xpack_core::Manifest {
+        use std::collections::BTreeMap;
+        use xpack_core::manifest::{
+            Application, FormatVersion, LaunchSpec, PayloadSpec, UpdateSpec,
+        };
+
+        xpack_core::Manifest {
+            format_version: FormatVersion::CURRENT,
+            application: Application {
+                id: "com.example.app".into(),
+                name: name.into(),
+                version: xpack_core::Version::parse("1.2.0").unwrap(),
+                description: None,
+                publisher: None,
+            },
+            platform: xpack_core::Platform::host().unwrap(),
+            launch: LaunchSpec {
+                executable: "bin/app".into(),
+                arguments: vec![],
+                working_directory: None,
+                environment: BTreeMap::new(),
+            },
+            update: UpdateSpec::default(),
+            health: xpack_core::HealthSpec::default(),
+            signing_key: None,
+            desktop: xpack_core::DesktopSpec::default(),
+            payload: PayloadSpec::default(),
+            created_at: None,
+        }
     }
 }
