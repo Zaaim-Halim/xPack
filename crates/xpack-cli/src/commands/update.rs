@@ -10,6 +10,11 @@ use super::Context;
 use crate::progress::{Progress, ProgressMode};
 
 /// Arguments for `xpack update`.
+///
+/// The bool count trips a lint meant for domain types, where several flags
+/// usually mean a missing enum. These are command-line switches: each one is
+/// independently settable by a user and clap requires exactly this shape.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Application to update.
@@ -39,6 +44,14 @@ pub(crate) struct Args {
     /// that stalls is caught much sooner by the narrower transport timeouts.
     #[arg(long, value_name = "MINUTES", default_value_t = 30)]
     timeout: u64,
+
+    /// Respect a staged rollout, as the background updater does.
+    ///
+    /// A manual check ignores staging by default: someone who asked for the
+    /// newest version should get it. This is for confirming what an unattended
+    /// installation would actually be offered.
+    #[arg(long)]
+    staged: bool,
 
     /// How to report progress.
     ///
@@ -74,6 +87,10 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         },
         updater: super::default_updater(),
         uninstaller: super::default_uninstaller(),
+        // A person asked. Answering "there is a newer version, but not for
+        // you" would be unhelpful and impossible to explain, so a manual
+        // check is never held back — `--staged` opts in for testing a rollout.
+        respect_rollout: args.staged,
     };
 
     if args.check_only {

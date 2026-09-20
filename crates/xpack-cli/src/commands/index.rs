@@ -70,6 +70,16 @@ pub(crate) struct Args {
     #[arg(long, value_name = "URL")]
     release_notes: Option<String>,
 
+    /// Offer this release to only a percentage of installations, 0 to 100.
+    ///
+    /// Unattended updaters hold back the rest until the number is raised, so a
+    /// release can be watched before it reaches everyone. Re-run with a higher
+    /// value to widen it, or with `0` to stop a bad release spreading further.
+    ///
+    /// Omitted, the release is fully published.
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
+    rollout: Option<u8>,
+
     /// Emit the result as JSON.
     #[arg(long)]
     json: bool,
@@ -322,6 +332,7 @@ fn write_index(package: &Described, path: PathBuf, args: &Args) -> Result<Writte
             sha256: Some(package.sha256),
         },
         release_notes: args.release_notes.clone(),
+        rollout: args.rollout,
     };
 
     // The layout mirrors what the updater fetches: one directory per platform,

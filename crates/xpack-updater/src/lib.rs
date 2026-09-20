@@ -145,6 +145,9 @@ impl<'a> BackgroundUpdater<'a> {
             gui_launcher: None,
             updater: None,
             uninstaller: None,
+            // Nobody is watching this run, which is exactly the case a staged
+            // rollout exists to hold back.
+            respect_rollout: true,
         };
 
         let result = Updater::new(self.paths, self.transport)

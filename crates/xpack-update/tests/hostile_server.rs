@@ -26,6 +26,11 @@ struct Fixture {
     /// index and never reach the package download, so the test would pass
     /// without exercising the path it names.
     flood: Mutex<Option<(String, u64)>>,
+    /// Every URL fetched, in order.
+    ///
+    /// Lets a test assert on what was *not* requested, which is the only way
+    /// to show that a decision was taken before the transfer rather than after.
+    fetched: Mutex<Vec<String>>,
 }
 
 impl Fixture {
@@ -40,11 +45,16 @@ impl Fixture {
     fn flood(&self, url: &str, bytes: u64) {
         *self.flood.lock().unwrap() = Some((url.to_string(), bytes));
     }
+
+    fn was_fetched(&self, url: &str) -> bool {
+        self.fetched.lock().unwrap().iter().any(|seen| seen == url)
+    }
 }
 
 impl UpdateTransport for Fixture {
     fn fetch(&self, url: &str, limit: u64, sink: &mut dyn Write) -> Result<u64> {
         xpack_update::transport::ensure_secure(url)?;
+        self.fetched.lock().unwrap().push(url.to_string());
 
         let flood = self.flood.lock().unwrap().clone();
         if let Some((flooded, total)) = flood
@@ -548,4 +558,146 @@ fn a_server_declaring_no_size_reports_an_unknown_total() {
         "{:?}",
         recorder.events()
     );
+}
+
+// --- staged rollout ------------------------------------------------------
+//
+// The brake a publisher needs when a release turns out to be bad. These drive
+// the real updater against a real index; the bucketing rule itself is unit
+// tested in `xpack_update::rollout`.
+
+/// An index offering `version` to `percent` of installations.
+fn staged_index_json(version: &str, file: &str, size: u64, percent: u8) -> Vec<u8> {
+    format!(
+        r#"{{"application":"com.example.demo","version":"{version}",
+            "platform":{{"os":"{}","arch":"{}"}},"channel":"stable",
+            "rollout":{percent},
+            "package":{{"file":"{file}","size":{size}}}}}"#,
+        Platform::host().unwrap().os,
+        Platform::host().unwrap().arch
+    )
+    .into_bytes()
+}
+
+/// An installation on 1.0.0, with 1.1.0 served at `percent`.
+fn staged_world(percent: Option<u8>) -> (World, Fixture) {
+    let world = World::new();
+    let package = build_package(world.dir.path(), &world.key, "1.1.0");
+    let size = std::fs::metadata(&package).unwrap().len();
+
+    let index = match percent {
+        Some(percent) => staged_index_json("1.1.0", "demo-1.1.0.xpkg", size, percent),
+        None => index_json("1.1.0", "demo-1.1.0.xpkg", size),
+    };
+
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index);
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
+    (world, fixture)
+}
+
+/// The options an unattended updater uses.
+fn unattended() -> UpdateOptions {
+    UpdateOptions { respect_rollout: true, ..options() }
+}
+
+#[test]
+fn a_halted_rollout_installs_nothing() {
+    // Setting the percentage to zero is how a publisher stops a bad release
+    // reaching anybody else, so it must hold for every installation.
+    let (world, fixture) = staged_world(Some(0));
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
+
+    assert_eq!(result, None, "a halted rollout installed a version");
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+}
+
+#[test]
+fn a_held_back_installation_downloads_nothing() {
+    // The decision is taken before the transfer: an installation outside the
+    // rollout must not spend a user's bandwidth on a package it will not
+    // install.
+    let (world, fixture) = staged_world(Some(0));
+
+    Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
+
+    assert!(fixture.was_fetched(&index_url()), "the index should still be read");
+    assert!(
+        !fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")),
+        "the package was downloaded despite the rollout excluding this installation"
+    );
+}
+
+#[test]
+fn a_full_rollout_installs_normally() {
+    // The control: nothing else about this release differs.
+    let (world, fixture) = staged_world(Some(100));
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn an_index_without_a_rollout_is_fully_published() {
+    // Every index written before staged rollouts existed lacks the field and
+    // must keep working exactly as it did.
+    let (world, fixture) = staged_world(None);
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn a_manual_check_is_not_held_back_by_a_rollout() {
+    // Someone asked for the newest version. "There is one, but not for you"
+    // is unhelpful and impossible to explain, so a manual run bypasses it.
+    let (world, fixture) = staged_world(Some(0));
+
+    let result = Updater::new(&world.paths, &fixture)
+        .update(BASE, &UpdateOptions { respect_rollout: false, ..options() })
+        .unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn check_reports_nothing_available_when_held_back() {
+    // `check` and `update` must agree. A check that advertised a version the
+    // updater then refused to install would be worse than either alone.
+    let (world, fixture) = staged_world(Some(0));
+
+    let available = Updater::new(&world.paths, &fixture).check(BASE, &unattended()).unwrap();
+
+    assert!(available.is_none(), "check offered a version the rollout excludes");
+}
+
+#[test]
+fn the_rollout_identifier_is_created_once_and_then_reused() {
+    // A value that moved would let an installation drop out of a rollout it
+    // had already been offered.
+    let (world, fixture) = staged_world(Some(50));
+    let updater = Updater::new(&world.paths, &fixture);
+
+    let _ = updater.check(BASE, &unattended()).unwrap();
+    let first = world.lock().load_state().unwrap().value.rollout_id;
+    assert!(first.is_some(), "no identifier was generated");
+
+    let _ = updater.check(BASE, &unattended()).unwrap();
+    let second = world.lock().load_state().unwrap().value.rollout_id;
+
+    assert_eq!(first, second, "the identifier changed between checks");
+}
+
+#[test]
+fn a_fully_published_release_needs_no_identifier() {
+    // An installation that only ever sees ordinary releases never acquires
+    // one, so nothing is generated or stored in the common case.
+    let (world, fixture) = staged_world(Some(100));
+
+    Updater::new(&world.paths, &fixture).update(BASE, &unattended()).unwrap();
+
+    assert_eq!(world.lock().load_state().unwrap().value.rollout_id, None);
 }

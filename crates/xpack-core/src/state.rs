@@ -242,6 +242,18 @@ pub struct InstallState {
     /// would be a guess dressed as a value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_check: Option<u64>,
+    /// Stable random identifier deciding this installation's staged-rollout
+    /// cohort.
+    ///
+    /// Generated once, on the first update check that needs it, and never
+    /// changed afterwards — a value that moved would let an installation drop
+    /// out of a rollout it had already been offered.
+    ///
+    /// It is never transmitted. The client fetches a static index and decides
+    /// in private, so this identifies nothing to anyone: it exists only so the
+    /// decision is the same on every check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<String>,
 }
 
 fn idle_phase() -> UpdatePhase {
@@ -260,7 +272,26 @@ impl InstallState {
             versions: BTreeMap::new(),
             required_version: None,
             last_update_check: None,
+            rollout_id: None,
         }
+    }
+
+    /// The staged-rollout identifier, creating one if this is the first need.
+    ///
+    /// Returns the identifier and whether it was just generated, so the caller
+    /// can persist state only when something actually changed. Generating it
+    /// lazily rather than at install time means an installation that never
+    /// checks for updates never acquires one.
+    pub fn rollout_id_or_create(
+        &mut self,
+        generate: impl FnOnce() -> Result<String>,
+    ) -> Result<(String, bool)> {
+        if let Some(existing) = &self.rollout_id {
+            return Ok((existing.clone(), false));
+        }
+        let created = generate()?;
+        self.rollout_id = Some(created.clone());
+        Ok((created, true))
     }
 
     /// Returns `true` when an update check is due.

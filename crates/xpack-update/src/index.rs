@@ -54,6 +54,18 @@ pub struct UpdateIndex {
     /// Optional release notes URL, for display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_notes: Option<String>,
+
+    /// Percentage of installations this release is offered to, 0 to 100.
+    ///
+    /// Absent means fully published, which is what every index written before
+    /// staged rollouts existed means and must keep meaning.
+    ///
+    /// Lowering it does not take the release back from installations that
+    /// already have it — nothing can — but it stops any further installation
+    /// receiving it, which is the brake a publisher needs when a release turns
+    /// out to be bad. See [`crate::rollout`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<u8>,
 }
 
 fn default_channel() -> String {

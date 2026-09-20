@@ -16,6 +16,9 @@ xpack-platform.workspace = true
 xpack-install.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Staged rollouts need a random per-installation identifier and hex for it.
+getrandom.workspace = true
+hex.workspace = true
 ureq = { workspace = true, optional = true }
 tracing.workspace = true
 

@@ -42,6 +42,7 @@ use xpack_platform::{DownloadLease, InstallLock};
 
 use crate::index::{MAX_INDEX_BYTES, UpdateIndex};
 use crate::reporting::ProgressWriter;
+use crate::rollout;
 use crate::transport::UpdateTransport;
 
 /// Absolute ceiling on a downloaded package, whatever the index claims.
@@ -74,6 +75,16 @@ pub struct UpdateOptions {
     /// produce an installation missing a binary every later install would
     /// have placed.
     pub gui_launcher: Option<std::path::PathBuf>,
+
+    /// Whether a staged rollout may hold this installation back.
+    ///
+    /// An unattended check must respect it — that is the whole point of a
+    /// staged rollout. A person who typed "check for updates" must not: they
+    /// asked for the newest version, and answering "there is one, but not for
+    /// you" would be both unhelpful and impossible to explain.
+    ///
+    /// Sparkle draws the line in the same place, for the same reason.
+    pub respect_rollout: bool,
 }
 
 /// An update the server offers and this installation would accept.
@@ -153,6 +164,13 @@ impl<'a> Updater<'a> {
             };
         }
 
+        if self.held_back_by_rollout(&application, &index, options)? {
+            if let Some(current) = &state.current_version {
+                self.progress.report(&ProgressEvent::UpToDate { version: current.clone() });
+            }
+            return Ok(None);
+        }
+
         self.progress.report(&ProgressEvent::UpdateAvailable {
             version: index.version.clone(),
             total_bytes: declared_size(index.package.size),
@@ -194,6 +212,12 @@ impl<'a> Updater<'a> {
         // --- Unlocked: the index ------------------------------------------
         let index = self.fetch_index(base_url, &application, &channel)?;
         if state.ensure_not_downgrade(&index.version, options.allow_downgrade).is_err() {
+            return Ok(None);
+        }
+
+        // Before the download, not after: an installation outside the rollout
+        // must not spend the user's bandwidth on a package it will not install.
+        if self.held_back_by_rollout(&application, &index, options)? {
             return Ok(None);
         }
 
@@ -353,6 +377,48 @@ impl<'a> Updater<'a> {
         tracing::info!(version = %outcome.version, "update installed");
         self.progress.report(&ProgressEvent::Completed { version: outcome.version.clone() });
         Ok(Some(outcome.version))
+    }
+
+    /// Returns `true` when a staged rollout excludes this installation.
+    ///
+    /// Takes the lock briefly, because the first call on an installation
+    /// generates its rollout identifier and has to persist it. Every later
+    /// call reads the stored value and writes nothing.
+    fn held_back_by_rollout(
+        &self,
+        application: &str,
+        index: &UpdateIndex,
+        options: &UpdateOptions,
+    ) -> Result<bool> {
+        if !options.respect_rollout {
+            return Ok(false);
+        }
+
+        let percentage = rollout::declared_percentage(index.rollout);
+        if percentage >= rollout::FULLY_ROLLED_OUT {
+            // The overwhelmingly common case: a fully published release. No
+            // identifier is needed, so an installation that only ever sees
+            // ordinary releases never acquires one.
+            return Ok(false);
+        }
+
+        let lock = self.lock()?;
+        let mut state = lock.load_or_new_state(application)?;
+        let (rollout_id, created) = state.rollout_id_or_create(rollout::new_rollout_id)?;
+        if created {
+            lock.save_state(&state)?;
+        }
+        drop(lock);
+
+        let included = rollout::is_in_rollout(&rollout_id, &index.version, percentage);
+        if !included {
+            tracing::info!(
+                version = %index.version,
+                percentage,
+                "a newer version exists but this installation is not yet in its staged rollout"
+            );
+        }
+        Ok(!included)
     }
 
     /// Fetches and validates the index for a channel.
