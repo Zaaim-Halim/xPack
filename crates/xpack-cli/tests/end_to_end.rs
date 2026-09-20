@@ -34,22 +34,26 @@ impl Fixture {
         self.dir.path().join("root")
     }
 
-    /// Writes a payload script with the given exit status.
+    /// Writes a payload whose application exits with the given status.
+    ///
+    /// A real executable, not a script. A `#!/bin/sh` payload works on two of
+    /// the three platforms xPack supports and fails on Windows with "not a
+    /// valid Win32 application", because `CreateProcess` runs executables and
+    /// nothing else. The exit status comes from the environment rather than
+    /// from an argument, so the user arguments a test passes through the
+    /// launcher stay the test's own.
     fn write_payload(&self, version: &str, exit_code: u8) {
         let dir = self.path().join(format!("payload-{version}/bin"));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = format!("#!/bin/sh\necho \"running {version} args=$*\"\nexit {exit_code}\n");
-        let path = dir.join("app");
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+
+        let name = format!("app{}", std::env::consts::EXE_SUFFIX);
+        std::fs::copy(env!("CARGO_BIN_EXE_xpack-test-payload"), dir.join(&name)).unwrap();
 
         let config = format!(
             r#"{{"application":{{"id":"com.example.demo","name":"Demo","version":"{version}"}},
-                "launch":{{"executable":"bin/app"}}}}"#
+                "launch":{{"executable":"bin/{name}",
+                           "environment":{{"XPACK_TEST_PAYLOAD_EXIT":"{exit_code}",
+                                          "XPACK_TEST_PAYLOAD_VERSION":"{version}"}}}}}}"#
         );
         std::fs::write(self.path().join(format!("xpack-{version}.json")), config).unwrap();
     }
@@ -219,12 +223,27 @@ fn list_emits_parseable_json() {
     // cannot read their paths from here has no way to find them but to
     // reimplement the naming rule.
     assert_eq!(parsed["application"], "com.example.demo");
-    for field in ["root", "launcher", "consoleLauncher", "updater", "uninstaller"] {
+
+    // `root` and `launcher` are always there: an installation has a
+    // directory, and one is installed unless `--no-launcher` said otherwise.
+    for field in ["root", "launcher"] {
         let path = parsed[field].as_str().unwrap_or_else(|| panic!("{field} is missing"));
         assert!(
             std::path::Path::new(path).exists(),
             "{field} names something that is not there: {path}"
         );
+    }
+
+    // The rest depend on which binaries were beside the one that installed
+    // them, so what is asserted is the invariant rather than their presence:
+    // a path is reported only when a file is actually at it.
+    for field in ["consoleLauncher", "updater", "uninstaller"] {
+        if let Some(path) = parsed[field].as_str() {
+            assert!(
+                std::path::Path::new(path).exists(),
+                "{field} names something that is not there: {path}"
+            );
+        }
     }
 
     // And what it reports is the launcher a user would actually run.
@@ -757,12 +776,20 @@ fn an_installer_installs_an_application_that_then_runs() {
         .expect("the installer should run");
     assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
 
-    // And now the application itself. The launcher is named after the
-    // application, not after xPack, so this also checks that what the
-    // installer reported is a path that actually exists.
-    let launcher = xpack_core::InstallPaths::new(&root, "com.example.demo")
-        .unwrap()
-        .shortcut_target_named(&xpack_core::BinaryNames::from_display_name("Demo"));
+    // And now the application itself. Which launcher that is differs by
+    // platform — Windows installs a windowed build as well as a console one
+    // — so the installation is asked rather than the path reconstructed,
+    // which is the same thing any other tool integrating with xPack has to
+    // do.
+    let listed = Command::new(xpack())
+        .args(["--root", &root.to_string_lossy()])
+        .args(["list", "com.example.demo", "--json"])
+        .output()
+        .expect("listing the installation should work");
+    let listing: serde_json::Value = serde_json::from_slice(&listed.stdout)
+        .unwrap_or_else(|e| panic!("list --json must parse ({e}): {}", stdout(&listed)));
+    let launcher =
+        PathBuf::from(listing["launcher"].as_str().expect("the installation reports a launcher"));
     assert!(launcher.is_file(), "no launcher was installed at {}", launcher.display());
 
     let app =

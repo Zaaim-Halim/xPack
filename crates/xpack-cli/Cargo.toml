@@ -12,6 +12,20 @@ authors.workspace = true
 name = "xpack"
 path = "src/main.rs"
 
+# A stand-in for "the application" in the end-to-end tests.
+#
+# It lives here rather than in a crate of its own because that is the only
+# arrangement Cargo guarantees: `CARGO_BIN_EXE_xpack-test-payload` names the
+# built path for this package's tests, whereas a sibling crate's binary is
+# not built by `cargo test --all-targets` at all — checked, not assumed.
+#
+# The tests used to write a `#!/bin/sh` script and call it the payload, which
+# Windows cannot execute: `CreateProcess` runs executables and refuses a
+# script with "not a valid Win32 application".
+[[bin]]
+name = "xpack-test-payload"
+path = "src/bin/xpack-test-payload.rs"
+
 [dependencies]
 xpack-core.workspace = true
 xpack-security.workspace = true
