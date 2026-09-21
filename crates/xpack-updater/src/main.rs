@@ -44,7 +44,7 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     application_dir: Option<std::path::PathBuf>,
 
-    /// Minimum hours between checks.
+    /// Minimum hours between checks, overriding what the manifest declares.
     #[arg(long, value_name = "HOURS")]
     interval: Option<u64>,
 
@@ -112,7 +112,9 @@ fn main() -> ExitCode {
     let mut updater =
         BackgroundUpdater::new(&paths, &transport).forced(args.force).reporting_to(reporter);
     if let Some(hours) = args.interval {
-        updater = updater.every(Duration::from_secs(hours * 60 * 60));
+        // Saturating, because a number large enough to overflow means the same
+        // thing as the largest one that fits: never check again.
+        updater = updater.every(Duration::from_secs(hours.saturating_mul(60 * 60)));
     }
 
     match updater.run() {
