@@ -26,6 +26,27 @@
 //! profile directory contains non-ASCII characters is not unusual, so the
 //! Unicode field is what makes those installations work.
 //!
+//! # A known limitation: names outside the system code page
+//!
+//! For a target whose path contains characters the machine's code page cannot
+//! represent — `C:\Users\José Ramírez\...`, on a machine whose code page is
+//! not Latin-1 — Windows reports the target back with substitutions:
+//! `C:\Users\Jos? Ram?rez\...`. That is what `IShellLink::GetPath` returns,
+//! and with it Explorer's properties dialog and anything reading the shortcut
+//! through the shell.
+//!
+//! The name is written in full in both of the places that hold it — `LinkInfo`'s
+//! `LocalBasePathUnicode`, and the `0xBEEF0004` extension block of every shell
+//! item — and both read back correctly when the file is parsed outside
+//! Windows. Something in the arrangement is nevertheless not what the shell
+//! expects, and it has not been found yet: three readings of the format
+//! documentation have produced three different wrong answers. What the shell
+//! writes for itself is being captured in CI so that the two can be compared
+//! rather than argued about.
+//!
+//! Until then this is recorded rather than claimed fixed. Whether such a
+//! shortcut still *opens* the right file is not established either.
+//!
 //! # This is the one thing here that cannot be proven on a Mac
 //!
 //! Every structure below is unit-tested field by field against the

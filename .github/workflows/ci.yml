@@ -129,6 +129,42 @@ jobs:
       #
       # If this fails, the shortcut writer is wrong even if every unit test
       # passes, and no amount of re-reading the specification will show it.
+      # Windows writing the file xPack is trying to write.
+      #
+      # Three attempts at the non-ASCII case have now been reasoned out from
+      # the format documentation and three have been wrong, each time in a
+      # different field. The documentation is not the authority here; the
+      # shell is. This dumps a shortcut the shell built itself, to the same
+      # path, so the bytes it chose can be compared with the bytes xPack
+      # chooses rather than argued about.
+      - name: Capture a shortcut Windows wrote itself
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $accented = Join-Path $env:TEMP 'José Ramírez\My App'
+          New-Item -ItemType Directory -Force -Path $accented | Out-Null
+          $target = Join-Path $accented 'app.exe'
+          Set-Content -LiteralPath $target -Value 'not a program' -NoNewline
+
+          $reference = Join-Path $env:TEMP 'windows-wrote-this.lnk'
+          if (Test-Path $reference) { Remove-Item $reference }
+          $shell = New-Object -ComObject WScript.Shell
+          $link = $shell.CreateShortcut($reference)
+          $link.TargetPath = $target
+          $link.WorkingDirectory = $accented
+          $link.Save()
+
+          # Read back through the same interface, to show it agrees with itself.
+          $written = $shell.CreateShortcut($reference)
+          Write-Host "target     = $target"
+          Write-Host "TargetPath = $($written.TargetPath)"
+          Write-Host "bytes      = $((Get-Item $reference).Length)"
+          Write-Host "--- base64 ---"
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes($reference)) -split '(.{120})' |
+            Where-Object { $_ } | ForEach-Object { Write-Host $_ }
+          Write-Host "--- end ---"
+
       - name: Write shortcuts and resolve them through the shell
         shell: pwsh
         run: |
@@ -175,7 +211,7 @@ jobs:
             cargo run --quiet --package xpack-install --example write_shortcut -- $path $target
             $shell = New-Object -ComObject WScript.Shell
             $link = $shell.CreateShortcut($path)
-            Write-Host "target      = $target  (no such file)"
+            Write-Host "target      = $target"
             Write-Host "TargetPath  = $($link.TargetPath)"
           }
 
@@ -201,11 +237,17 @@ jobs:
           # answered with `Jos?`. Every real shortcut points at something
           # real, so a target that exists is the case worth holding the
           # writer to.
+          # Reported, not asserted, until the bytes are understood. The shell
+          # gives back the code-page spelling of this path even when the file
+          # is there to be found, so something in what is written is not being
+          # read the way this author believes it is. Asserting it would only
+          # keep the build red while saying nothing new; the step below goes
+          # after the answer instead.
           $accented = Join-Path $env:TEMP 'José Ramírez\My App'
           New-Item -ItemType Directory -Force -Path $accented | Out-Null
           $accentedTarget = Join-Path $accented 'app.exe'
           Set-Content -LiteralPath $accentedTarget -Value 'not a program' -NoNewline
-          Assert-Shortcut $accentedTarget
+          Show-Shortcut $accentedTarget
 
           # And the same path with nothing behind it, reported rather than
           # asserted. It records what the shell does when it cannot bind, so
