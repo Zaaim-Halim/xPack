@@ -554,10 +554,29 @@ mod tests {
         assert!(!p.staging_dir(&v).starts_with(p.versions_dir()));
     }
 
+    /// A path this platform calls absolute.
+    ///
+    /// `/opt/xpack-test` is absolute on Unix and *relative* on Windows, where
+    /// a path becomes absolute only once it names a drive. A test that hard
+    /// codes the Unix form is not testing the override, it is testing which
+    /// operating system it is running on.
+    fn an_absolute_path() -> &'static str {
+        if cfg!(windows) { r"C:\xpack-test" } else { "/opt/xpack-test" }
+    }
+
     #[test]
     fn an_override_relocates_the_install_root() {
-        let root = install_root_from(Some(OsStr::new("/opt/xpack-test"))).unwrap();
-        assert_eq!(root, Path::new("/opt/xpack-test"));
+        let expected = an_absolute_path();
+        let root = install_root_from(Some(OsStr::new(expected))).unwrap();
+        assert_eq!(root, Path::new(expected));
+    }
+
+    #[test]
+    fn a_path_without_a_drive_is_not_absolute_on_windows() {
+        // The reason the test above cannot name one path for both platforms,
+        // stated as a test so it is checked rather than remembered.
+        assert_eq!(Path::new("/opt/xpack-test").is_absolute(), !cfg!(windows));
+        assert!(Path::new(an_absolute_path()).is_absolute());
     }
 
     #[test]
