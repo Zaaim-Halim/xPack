@@ -88,23 +88,17 @@ fn shortcut_path(entry: &Entry, roots: &Roots) -> PathBuf {
 
 /// Makes a display name safe to use as a file name.
 ///
-/// A display name is free-form Unicode chosen by a publisher, and the
-/// characters below either are path separators or are rejected outright by
-/// the filesystem. Trailing dots and spaces are stripped for the same reason
-/// the archive entry validator rejects them: Windows silently removes them
-/// when resolving a name, so a file written as `App .lnk` is opened as
-/// `App.lnk` and the two disagree about what exists.
+/// The same rule the rest of xPack names files by, rather than a second
+/// version of it living here. This module had its own, and the two had drifted
+/// apart: a name made entirely of separators became `---.lnk` in a user's
+/// Start Menu instead of falling back to a readable name, and neither the
+/// reserved device names nor the length limit were applied to a shortcut at
+/// all.
+///
+/// Two sanitisers for one question is how that happens. There is now one, and
+/// it is the one with tests that run on every platform.
 pub(super) fn shortcut_file_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
-            c if c.is_control() => '-',
-            c => c,
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']).trim();
-    if trimmed.is_empty() { "Application".to_string() } else { trimmed.to_string() }
+    xpack_core::safe_file_name(name)
 }
 
 /// Writes the per-user Add/Remove Programs entry.

@@ -231,6 +231,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_of_nothing_but_separators_falls_back_to_something_readable() {
+        // Otherwise a user's Start Menu grows an entry called `---`.
+        assert_eq!(safe_file_name("///"), FALLBACK);
+        assert_eq!(safe_file_name("\\\\"), FALLBACK);
+        assert_eq!(safe_file_name("???"), FALLBACK);
+    }
+
+    #[test]
+    fn the_windows_shortcut_name_is_this_same_rule() {
+        // `xpack-install` names Start Menu shortcuts with this function, and
+        // its tests can only run on Windows. These are the same cases, checked
+        // here so a change to the rule fails on whatever machine makes it
+        // rather than on a runner an hour later.
+        assert_eq!(safe_file_name(r#"a<b>c:d"e|f?g*h"#), "a-b-c-d-e-f-g-h");
+        assert_eq!(safe_file_name("App ."), "App");
+        assert_eq!(safe_file_name("App   "), "App");
+        assert_eq!(safe_file_name("///"), "Application");
+        assert_eq!(safe_file_name("Example App"), "Example App");
+    }
+
+    #[test]
     fn an_ordinary_name_survives_intact() {
         assert_eq!(safe_file_name("My Application"), "My Application");
         assert_eq!(safe_file_name("Café Münster"), "Café Münster");
