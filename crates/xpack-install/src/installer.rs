@@ -47,6 +47,15 @@ pub struct InstallOptions {
     /// shortcut would write a real entry into the developer's own application
     /// menu and leave it there.
     pub desktop_roots: Option<crate::integration::Roots>,
+    /// Update notifier to place in the installation root, if any.
+    ///
+    /// Supplied like every other binary, and placed only when the package
+    /// being installed actually asks for a prompt — see
+    /// [`Installer::notifier_is_wanted`]. An installation that updates
+    /// silently carries no dialog code at all, which is the point: the only
+    /// graphical binary xPack has should exist only where somebody asked for
+    /// a graphical thing to happen.
+    pub notifier: Option<PathBuf>,
     /// Windowed launcher to place beside the console one, if any.
     ///
     /// Only meaningful on Windows, where a console build opened from a
@@ -81,6 +90,11 @@ pub struct Installed {
     pub updater: Option<LauncherOutcome>,
     /// What happened to the uninstaller, if one was supplied.
     pub uninstaller: Option<LauncherOutcome>,
+    /// What happened to the update notifier.
+    ///
+    /// `None` when none was supplied, and also when one was supplied and the
+    /// package did not ask for a prompt.
+    pub notifier: Option<LauncherOutcome>,
     /// What happened to the desktop entry the manifest asked for.
     pub desktop: crate::integration::Outcome,
     /// What recovery cleaned up beforehand.
@@ -367,6 +381,12 @@ impl<'lock> Installer<'lock> {
             Some(source) => Some(self.install_uninstaller(source)?),
             None => None,
         };
+        let notifier = match &options.notifier {
+            Some(source) if Self::notifier_is_wanted(&manifest) => {
+                Some(self.install_notifier(source)?)
+            }
+            _ => None,
+        };
 
         // After the binaries, because the entry points at one of them, and a
         // shortcut to a launcher that is not there yet would be broken for as
@@ -394,6 +414,7 @@ impl<'lock> Installer<'lock> {
             gui_launcher,
             updater,
             uninstaller,
+            notifier,
             desktop,
             recovery: report,
         })
@@ -717,6 +738,35 @@ impl<'lock> Installer<'lock> {
         )
     }
 
+    /// Whether this package wants a dialog placed for it.
+    ///
+    /// Three things have to be true at once, and each rules out a case where
+    /// the binary would sit on disk doing nothing:
+    ///
+    /// * the publisher asked for prompting, because a prompt interrupts a user
+    ///   and nobody else may decide to do that on their behalf;
+    /// * the package declares a periodic check, because a prompt only ever
+    ///   appears from one — a check at startup stages silently and says
+    ///   nothing, by design;
+    /// * the package targets a platform with a dialog implemented, which is
+    ///   Windows and macOS. Read from the manifest rather than from the host,
+    ///   so a package built for one platform and inspected on another gets the
+    ///   same answer everywhere.
+    fn notifier_is_wanted(manifest: &xpack_core::Manifest) -> bool {
+        manifest.update.notify
+            && manifest.update.check_interval().is_some()
+            && matches!(manifest.platform.os, xpack_core::Os::Windows | xpack_core::Os::Macos)
+    }
+
+    /// Places the update notifier in the installation root.
+    pub fn install_notifier(&self, source: &Path) -> Result<LauncherOutcome> {
+        Self::install_binary(
+            source,
+            &self.lock.paths().notifier_file_named(&self.binary_names()),
+            "notifier",
+        )
+    }
+
     /// Places the uninstaller in the installation root.
     pub fn install_uninstaller(&self, source: &Path) -> Result<LauncherOutcome> {
         Self::install_binary(
@@ -987,6 +1037,7 @@ pub fn uninstall_with_roots(
         atomic::remove_file_if_exists(&paths.launcher_file_named(names))?;
         atomic::remove_file_if_exists(&paths.gui_launcher_file_named(names))?;
         atomic::remove_file_if_exists(&paths.updater_file_named(names))?;
+        atomic::remove_file_if_exists(&paths.notifier_file_named(names))?;
         atomic::remove_file_if_exists(&paths.uninstaller_file_named(names))?;
     }
 
@@ -1091,4 +1142,75 @@ fn entries_in(dir: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     read.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use xpack_core::manifest::{Application, FormatVersion, LaunchSpec, PayloadSpec, UpdateSpec};
+    use xpack_core::{Arch, Os, Platform, Version};
+
+    use super::*;
+
+    /// A manifest for `platform`, carrying `update` and nothing else of note.
+    fn manifest(os: Os, update: UpdateSpec) -> xpack_core::Manifest {
+        xpack_core::Manifest {
+            format_version: FormatVersion::CURRENT,
+            application: Application {
+                id: "com.example.app".into(),
+                name: "App".into(),
+                version: Version::parse("1.0.0").unwrap(),
+                description: None,
+                publisher: None,
+            },
+            platform: Platform::new(os, Arch::X64),
+            launch: LaunchSpec {
+                executable: "bin/app".into(),
+                arguments: vec![],
+                working_directory: None,
+                environment: BTreeMap::new(),
+            },
+            update,
+            health: xpack_core::HealthSpec::default(),
+            desktop: xpack_core::DesktopSpec::default(),
+            signing_key: None,
+            payload: PayloadSpec::default(),
+            created_at: None,
+        }
+    }
+
+    /// The configuration that wants a dialog: prompting on, and a periodic
+    /// check for one to appear from.
+    fn wants_prompting() -> UpdateSpec {
+        UpdateSpec { notify: true, check_interval_minutes: Some(180), ..UpdateSpec::default() }
+    }
+
+    #[test]
+    fn a_package_that_asked_for_a_prompt_gets_one_where_a_dialog_exists() {
+        for os in [Os::Windows, Os::Macos] {
+            assert!(Installer::notifier_is_wanted(&manifest(os, wants_prompting())), "{os:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_that_did_not_ask_gets_no_dialog_on_disk() {
+        // The default, and the overwhelmingly common case.
+        let silent = UpdateSpec { notify: false, ..wants_prompting() };
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, silent)));
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, UpdateSpec::default())));
+    }
+
+    #[test]
+    fn asking_for_a_prompt_without_periodic_checks_places_nothing() {
+        // A prompt only ever appears from a periodic check. A startup check
+        // stages in silence by design, so the binary would never run.
+        let no_interval = UpdateSpec { check_interval_minutes: None, ..wants_prompting() };
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, no_interval)));
+    }
+
+    #[test]
+    fn a_platform_with_no_dialog_carries_no_dialog_binary() {
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Linux, wants_prompting())));
+    }
 }

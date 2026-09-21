@@ -87,6 +87,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         },
         updater: super::default_updater(),
         uninstaller: super::default_uninstaller(),
+        notifier: super::default_notifier(),
         // A person asked. Answering "there is a newer version, but not for
         // you" would be unhelpful and impossible to explain, so a manual
         // check is never held back — `--staged` opts in for testing a rollout.

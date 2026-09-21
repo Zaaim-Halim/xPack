@@ -35,6 +35,42 @@ use std::process::ExitCode;
 
 use crate::Launcher;
 
+/// Starts the application, and starts it once more if the user agreed to.
+///
+/// The second start is what makes "restart now" mean anything: the update
+/// prompt asked the application to close, the user let it, and this brings it
+/// back — activating the staged version on the way, because that is what the
+/// first thing any launch does.
+///
+/// # Exactly once
+///
+/// A loop here would be a way to lose a user's machine to their own updater. A
+/// version that crashes on start, or a prompt that somehow fires again, would
+/// have the launcher restarting the application for as long as anyone let it.
+/// One restart per launcher process is all this offers: a user who wants
+/// another can ask for one, and the rollback that watches every activation is
+/// still the thing protecting them from a version that will not start.
+fn launch_with_one_restart(
+    launcher: &Launcher,
+    arguments: &[String],
+) -> xpack_core::Result<crate::Outcome> {
+    let outcome = launcher.launch(arguments, true)?;
+    if !outcome.restart_requested {
+        return Ok(outcome);
+    }
+
+    tracing::info!("the user agreed to restart; starting the updated version");
+
+    // The second launch offers no further restart. This process performs one,
+    // so a prompt during that second run would ask the application to close
+    // and leave nothing to bring it back — the user's application would simply
+    // disappear. It still checks, stages and announces; the wording becomes
+    // "at the next start", which by then is the truth.
+    Launcher::for_application_dir(launcher.paths().root())
+        .without_restart_offers()
+        .launch(arguments, true)
+}
+
 /// Writes one line to standard error, and never fails if there is none.
 ///
 /// The discarded error is the whole point. See the module documentation.
@@ -82,7 +118,7 @@ pub fn run() -> ExitCode {
     // next time the application starts.
     crate::spawn_updater(launcher.paths());
 
-    match launcher.launch(&arguments, true) {
+    match launch_with_one_restart(&launcher, &arguments) {
         Ok(outcome) => {
             if let Some(target) = &outcome.rolled_back_to {
                 // Logged as well as printed, because a windowed build has

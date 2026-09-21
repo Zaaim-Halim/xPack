@@ -102,6 +102,9 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     };
     let updater = if args.no_launcher { None } else { super::default_updater() };
     let uninstaller = if args.no_launcher { None } else { super::default_uninstaller() };
+    // Offered unconditionally; the installer places it only for a package that
+    // asked to prompt its users.
+    let notifier = if args.no_launcher { None } else { super::default_notifier() };
     let options = InstallOptions {
         allow_downgrade: args.allow_downgrade,
         activate: !args.no_activate,
@@ -109,6 +112,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         gui_launcher,
         updater,
         uninstaller,
+        notifier,
         // The user's own directories: this is a real installation.
         desktop_roots: None,
     };

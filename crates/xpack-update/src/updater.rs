@@ -62,6 +62,16 @@ pub struct UpdateOptions {
     pub uninstaller: Option<std::path::PathBuf>,
     /// Background updater to place in the installation root, if it has none.
     pub updater: Option<std::path::PathBuf>,
+    /// Update notifier to place in the installation root, if it has none.
+    ///
+    /// Carried for the same reason as the launcher: an update that turns out
+    /// to be a first install must not produce an installation missing a binary
+    /// every other install would have placed. The installer still decides
+    /// whether the package wants one.
+    ///
+    /// A background update passes nothing here, because it runs from inside an
+    /// installation and has no copy of the binary to place.
+    pub notifier: Option<std::path::PathBuf>,
     /// Launcher binary to place in the installation root, if it has none.
     ///
     /// An update normally finds one already there and leaves it alone. This
@@ -476,6 +486,7 @@ impl<'a> Updater<'a> {
             gui_launcher: options.gui_launcher.clone(),
             updater: options.updater.clone(),
             uninstaller: options.uninstaller.clone(),
+            notifier: options.notifier.clone(),
             // The user's real directories. An update is a real installation,
             // not a test, and the entry it refreshes is the one in their menu.
             desktop_roots: None,
