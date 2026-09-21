@@ -13,7 +13,7 @@ use xpack_core::manifest::{
     Application, FormatVersion, LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadSpec, SIGNATURE_ENTRY,
     UpdateSpec,
 };
-use xpack_core::platform::{Arch, Os};
+use xpack_core::platform::Arch;
 use xpack_core::{Platform, Version};
 use xpack_package::{PackageBuilder, PackageReader};
 use xpack_security::{KeyPair, TrustStore};
@@ -80,6 +80,25 @@ fn trusting(key: &KeyPair) -> TrustStore {
 
 fn host() -> Platform {
     Platform::host().unwrap()
+}
+
+/// A platform that is not this host's, and that this host can still build for.
+///
+/// Both halves matter. "Not the host" is the point of the test; "buildable
+/// here" is what lets it run anywhere. A host that cannot record Unix
+/// permission bits refuses to build for a system that needs them, so a Windows
+/// machine cannot produce the Linux package this test used to ask for: it
+/// failed on that refusal without ever reaching the rule it exists to check.
+///
+/// The same operating system with the other architecture satisfies both. It is
+/// never the host, and it never needs a permission bit the host cannot record.
+fn another_platform_this_host_can_build() -> Platform {
+    let host = host();
+    let other = match host.arch {
+        Arch::X64 => Arch::Arm64,
+        Arch::Arm64 => Arch::X64,
+    };
+    Platform::new(host.os, other)
 }
 
 /// Rewrites an `.xpkg`, applying `edit` to its entries.
@@ -440,11 +459,8 @@ fn a_package_for_another_platform_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let key = KeyPair::generate().unwrap();
 
-    let foreign = if host() == Platform::new(Os::Windows, Arch::X64) {
-        Platform::new(Os::Linux, Arch::Arm64)
-    } else {
-        Platform::new(Os::Windows, Arch::X64)
-    };
+    let foreign = another_platform_this_host_can_build();
+    assert_ne!(foreign, host(), "the package under test must be for another platform");
     let pkg = pack(dir.path(), &key, foreign);
 
     let verified = PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap();
