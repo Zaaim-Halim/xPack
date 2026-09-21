@@ -194,3 +194,65 @@ pub fn launch_spec(
 ) -> LaunchSpec {
     LaunchSpec { executable: executable.into(), arguments, working_directory: None, environment }
 }
+
+/// Asks a process to close itself, the way a user clicking its close button would.
+///
+/// # Asking, not killing
+///
+/// The application being asked is the user's, and it may have unsaved work. So
+/// this sends the request every desktop platform already has for "please
+/// close": the application's own shutdown runs, its "do you want to save?"
+/// prompt appears if it has one, and it is free to refuse. A refusal is not a
+/// failure here — it means the user said no, and the update simply waits for
+/// the next start, which is what it would have done anyway.
+///
+/// Returning `Ok` therefore means the request was delivered, never that the
+/// process has exited. The caller waits for that separately.
+///
+/// # Why an operating-system command rather than an API call
+///
+/// The direct calls are `PostMessage(WM_CLOSE)` on Windows and `kill(2)` on
+/// Unix, and both are FFI that this workspace forbids. `taskkill` without
+/// `/F` posts exactly that message, and `kill` sends exactly that signal; they
+/// ship with the operating system and are older than most of the code that
+/// would call them. Trading one process spawn for keeping the workspace free
+/// of unsafe is a trade this crate has made before.
+///
+/// **`/F` is never passed.** It terminates without asking, which is precisely
+/// the behaviour that loses a user's work.
+pub fn request_close(pid: u32) -> Result<()> {
+    let mut command = close_command(pid);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+
+    let status = command
+        .status()
+        .map_err(|e| Error::Launch(format!("asking process {pid} to close: {e}")))?;
+
+    if status.success() {
+        return Ok(());
+    }
+    // A non-zero status usually means the process had already exited, which is
+    // the outcome the caller wanted anyway. It is reported rather than hidden,
+    // because a caller that asked twice would otherwise never learn why.
+    Err(Error::Launch(format!("process {pid} did not accept a close request (status {status})")))
+}
+
+/// The command that asks a process to close, for this platform.
+#[cfg(windows)]
+fn close_command(pid: u32) -> Command {
+    let mut command = Command::new("taskkill");
+    // No `/F`: this posts WM_CLOSE to the process's windows and lets the
+    // application decide what to do about it.
+    command.arg("/PID").arg(pid.to_string());
+    command
+}
+
+/// The command that asks a process to close, for this platform.
+#[cfg(not(windows))]
+fn close_command(pid: u32) -> Command {
+    let mut command = Command::new("kill");
+    // SIGTERM, the signal a desktop application is expected to handle by
+    // shutting down cleanly. Never SIGKILL, which it cannot handle at all.
+    command.arg("-TERM").arg(pid.to_string());
+    command
+}

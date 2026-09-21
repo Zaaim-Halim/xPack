@@ -21,4 +21,4 @@ pub mod sharing;
 
 pub use link::{LinkOutcome, update_current_link};
 pub use lock::{DownloadLease, InstallLock};
-pub use process::{LaunchRequest, launch, resolve_executable};
+pub use process::{LaunchRequest, launch, request_close, resolve_executable};
