@@ -1,0 +1,66 @@
+[package]
+name = "xpack-notify"
+description = "The dialog that tells a user an update is waiting."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-notify"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+clap.workspace = true
+
+# The only graphical dependency in the workspace, and it is confined to this
+# crate and to Windows. Nothing else links it, so the launcher and the updater
+# keep their dependency lists — and a platform with no dialog still builds this
+# binary, it simply reports that it could not show one.
+[target.'cfg(windows)'.dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false }
+
+# AppKit, scoped the same way: absent from the dependency graph, the build and
+# the binary on every other platform. Only the classes the alert needs are
+# enabled, so this does not drag in the whole framework's bindings.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAlert",
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSPanel",
+    "NSButton",
+    "NSControl",
+    "NSView",
+    "NSImage",
+    # Where the activation policy lives, which is what promotes this process
+    # far enough for its alert to open in front.
+    "NSRunningApplication",
+] }
+
+# The one crate that does not inherit the workspace lints wholesale.
+#
+# Everything is kept as the workspace sets it except `unsafe_code`, which is
+# lowered from `forbid` to `deny`. `forbid` cannot be lifted by an `allow` at
+# any inner scope — that is the difference between the two levels — and two
+# AppKit setters this crate needs are marked unsafe by their bindings. `deny`
+# keeps every other line of the crate under the same ban while letting those
+# two be excepted where they are written, with their reasoning beside them.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
