@@ -198,6 +198,14 @@ const EXTENSION_SIGNATURE: u32 = 0xBEEF_0004;
 /// and the one with no fields this writer would have to invent.
 const EXTENSION_VERSION: u16 = 0x0003;
 
+/// Where the UTF-16 name sits, counted from the start of the extension block.
+///
+/// Fixed by the layout rather than chosen: size, version and signature take
+/// eight bytes, the two timestamps eight more, and this field and the one
+/// after it four. The shell reads the name from wherever this says, so it is
+/// the one number in the block that must agree with the bytes around it.
+const LONG_NAME_OFFSET: u16 = 0x0014;
+
 /// Builds the `LinkTargetIDList`: the shell's own name for the target.
 ///
 /// # Why this exists as well as `LinkInfo`
@@ -311,8 +319,13 @@ fn long_name_extension(name: &str, offset: u16) -> Vec<u8> {
     block.extend_from_slice(&0u16.to_le_bytes());
     block.extend_from_slice(&0u16.to_le_bytes());
     block.extend_from_slice(&0u16.to_le_bytes());
-    // Unknown, and documented as such. Zero is what the shell writes when it
-    // has nothing to put here.
+    // Where the name below begins. This is the field that makes the block
+    // readable: a shell that cannot find the name here falls back to the
+    // code-page name in the item above, which is exactly the name that cannot
+    // hold every character.
+    block.extend_from_slice(&LONG_NAME_OFFSET.to_le_bytes());
+    // Size of the localized name that would follow the name below. Nothing
+    // follows it, so zero.
     block.extend_from_slice(&0u16.to_le_bytes());
     block.extend_from_slice(&to_utf16_nul(name));
     block.extend_from_slice(&offset.to_le_bytes());
@@ -491,16 +504,19 @@ mod tests {
     }
 
     /// The UTF-16 name inside an item's `0xBEEF0004` extension block.
+    ///
+    /// Read the way the shell reads it: find the block, then follow the offset
+    /// the block itself declares. A helper that walked a fixed distance from
+    /// the signature would agree with a writer that put the name in the wrong
+    /// place, which is precisely the bug this file has already shipped once.
     fn long_name_of(item: &[u8]) -> String {
-        let signature = item
-            .windows(4)
-            .position(|window| window == EXTENSION_SIGNATURE.to_le_bytes())
-            .expect("an extension block");
-        // signature, then two dates, two times and the unknown field.
-        let mut at = signature + 4 + 10;
+        let block = extension_block_of(item);
+        let offset = u16::from_le_bytes(block[16..18].try_into().unwrap()) as usize;
+
+        let mut at = offset;
         let mut units = Vec::new();
-        while at + 1 < item.len() {
-            let unit = u16::from_le_bytes(item[at..at + 2].try_into().unwrap());
+        while at + 1 < block.len() {
+            let unit = u16::from_le_bytes(block[at..at + 2].try_into().unwrap());
             if unit == 0 {
                 break;
             }
@@ -508,6 +524,17 @@ mod tests {
             at += 2;
         }
         String::from_utf16(&units).expect("valid UTF-16")
+    }
+
+    /// The `0xBEEF0004` extension block inside a shell item.
+    fn extension_block_of(item: &[u8]) -> &[u8] {
+        let signature = item
+            .windows(4)
+            .position(|window| window == EXTENSION_SIGNATURE.to_le_bytes())
+            .expect("an extension block");
+        // The block begins four bytes before its signature: its own size and
+        // version come first.
+        &item[signature - 4..]
     }
 
     #[test]
@@ -571,6 +598,39 @@ mod tests {
             items += 1;
         }
         assert_eq!(at + 2, list.len(), "the list does not end where its size says it does");
+    }
+
+    #[test]
+    fn the_extension_block_points_at_the_name_it_carries() {
+        // The field the shell follows. Zero here — which is what an
+        // "unknown" reading of it produces — sends the shell looking at the
+        // start of the block, and it falls back to the code-page name, which
+        // is the one that cannot spell every path.
+        let bytes = serialise(&shortcut());
+        for item in id_list_items(&bytes).into_iter().skip(2) {
+            let block = extension_block_of(&item);
+            let offset = u16::from_le_bytes(block[16..18].try_into().unwrap());
+
+            assert_eq!(offset, LONG_NAME_OFFSET, "{item:?}");
+            assert!(
+                (offset as usize) < block.len(),
+                "the name is said to start past the end of the block"
+            );
+            // And the bytes there really are the name, not a coincidence.
+            assert!(!long_name_of(&item).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_extension_block_declares_its_own_length() {
+        let bytes = serialise(&shortcut());
+        for item in id_list_items(&bytes).into_iter().skip(2) {
+            let block = extension_block_of(&item);
+            let declared = u16::from_le_bytes(block[0..2].try_into().unwrap()) as usize;
+            // The block is followed by the two zero bytes that end the list of
+            // extension blocks, and nothing else.
+            assert_eq!(declared + 2, block.len(), "{block:?}");
+        }
     }
 
     #[test]
