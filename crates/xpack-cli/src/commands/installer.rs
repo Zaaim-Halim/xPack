@@ -225,26 +225,25 @@ fn brand_for_windows(
         // Named for what it will be called once installed, not for what it
         // is called in the distribution: that is the name a user sees in
         // Task Manager beside the process.
-        let (installed, role) = match stem {
-            "xpack-launcher" => (names.launcher(), "Console launcher"),
-            "xpack-launcherw" => (names.windowed_launcher(), "Launcher"),
-            "xpack-updater" => (names.updater(), "Updater"),
-            "xpack-uninstaller" => (names.uninstaller(), "Uninstaller"),
+        let Some((installed, role)) = branded_identity(&names, stem) else {
             // An unknown binary is carried through unbranded rather than
             // guessed at. A wrong name on a process is worse than none.
-            _ => {
-                branded.push(source.clone());
-                continue;
-            }
+            branded.push(source.clone());
+            continue;
         };
 
-        let destination = workshop.join(format!("{installed}.exe"));
+        // Copied under the name it arrived with, never under the name it will
+        // be installed as. See `branded_identity`.
+        let destination = workshop.join(format!("{stem}.exe"));
         std::fs::copy(source, &destination).map_err(|e| Error::io(source, e))?;
         crate::branding::apply(
             &destination,
             &crate::branding::Branding {
                 name: &manifest.application.name,
                 description: format!("{} {}", manifest.application.name, role.to_lowercase()),
+                // The name the file will carry once installed, which is what
+                // this field is for: it describes the shipped executable, not
+                // the copy sitting in a build directory.
                 original_file_name: format!("{installed}.exe"),
                 version: &manifest.application.version,
                 publisher: manifest.application.publisher.as_deref(),
@@ -254,6 +253,34 @@ fn brand_for_windows(
         branded.push(destination);
     }
     Ok(Some(branded))
+}
+
+/// What a runtime binary will be called once installed, and what it does.
+///
+/// `None` for anything this build does not recognise.
+///
+/// # The file keeps its own name until it is installed
+///
+/// Only the *metadata* written into the copy is branded. The copy itself stays
+/// under the stem it arrived with, because the stub finds each binary in the
+/// payload by that stem -- it is how it tells a launcher from an updater.
+/// Renaming them to the application's names here left the stub recognising
+/// none of them: it installed an application with no launcher, no updater and
+/// no uninstaller, reported success, and left a user with a directory they
+/// could not run.
+///
+/// Nothing is lost by waiting. The installed name is decided at install time
+/// from the application the package declares, which is the same name computed
+/// here, and it is applied wherever the binary lands.
+fn branded_identity(names: &xpack_core::BinaryNames, stem: &str) -> Option<(String, &'static str)> {
+    match stem {
+        "xpack-launcher" => Some((names.launcher(), "Console launcher")),
+        "xpack-launcherw" => Some((names.windowed_launcher(), "Launcher")),
+        "xpack-updater" => Some((names.updater(), "Updater")),
+        "xpack-uninstaller" => Some((names.uninstaller(), "Uninstaller")),
+        "xpack-notify" => Some((names.notifier(), "Update notice")),
+        _ => None,
+    }
 }
 
 /// Gives the installer itself the application's name and icon.
@@ -477,6 +504,41 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_runtime_binary_the_installer_ships_is_recognised() {
+        // The stub tells a launcher from an updater by the stem of the file it
+        // finds in the payload. A binary this table does not know is shipped
+        // unbranded, which is survivable; one that is branded *and renamed* is
+        // not, because the stub then recognises nothing and installs an
+        // application with no launcher at all.
+        let names = xpack_core::BinaryNames::from_display_name("Demo App");
+        for stem in [
+            "xpack-launcher",
+            "xpack-launcherw",
+            "xpack-updater",
+            "xpack-uninstaller",
+            "xpack-notify",
+        ] {
+            let (installed, role) =
+                branded_identity(&names, stem).unwrap_or_else(|| panic!("{stem} is unrecognised"));
+            assert!(installed.contains("Demo App"), "{stem} -> {installed}");
+            assert!(!role.is_empty());
+        }
+        assert_eq!(branded_identity(&names, "something-else"), None);
+    }
+
+    #[test]
+    fn the_installed_name_is_never_the_name_the_payload_carries() {
+        // The two are deliberately different: the payload keeps xPack's stems
+        // so the stub can identify each binary, and the branded name is what
+        // it is called once installed.
+        let names = xpack_core::BinaryNames::from_display_name("Demo App");
+        for stem in ["xpack-launcher", "xpack-launcherw", "xpack-updater", "xpack-uninstaller"] {
+            let (installed, _) = branded_identity(&names, stem).expect("a known binary");
+            assert_ne!(installed, stem, "the payload name and the installed name collapsed");
+        }
+    }
 
     #[test]
     fn the_artefact_is_named_for_its_platform() {
