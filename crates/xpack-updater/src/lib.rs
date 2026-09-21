@@ -29,6 +29,11 @@
 //! recorded in installation state and a new one is refused until the interval
 //! has passed.
 //!
+//! The interval is the publisher's to choose, from the signed manifest, and
+//! four hours only when they said nothing. The same value is what the launcher
+//! paces its periodic checks by, so the two cannot disagree about when a check
+//! is due.
+//!
 //! # It is quiet
 //!
 //! Nobody is watching. There is no terminal, no progress bar and no prompt:
@@ -38,15 +43,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
-use xpack_core::{Error, InstallPaths, Result, Version};
+use xpack_core::{Error, InstallPaths, Result, UpdateSpec, Version};
 use xpack_platform::InstallLock;
 use xpack_update::{UpdateOptions, UpdateTransport, Updater};
 
-/// How long to wait between asking the server, by default.
+/// How long to wait between asking the server, when nothing says otherwise.
 ///
 /// Four hours is frequent enough that a security fix reaches an active user
 /// the same day, and rare enough that a busy user's machine is not a burden on
 /// the publisher's server.
+///
+/// A publisher who wants a different rate says so in the signed manifest, and
+/// a caller who wants one for a single run passes it to [`BackgroundUpdater::every`].
+/// This is only what applies when neither did.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// What a run of the updater did.
@@ -67,14 +76,14 @@ pub struct BackgroundUpdater<'a> {
     paths: &'a InstallPaths,
     transport: &'a dyn UpdateTransport,
     progress: &'a dyn ProgressReporter,
-    interval: Duration,
+    interval: Option<Duration>,
     force: bool,
 }
 
 impl<'a> BackgroundUpdater<'a> {
     /// Builds an updater for an installation.
     pub fn new(paths: &'a InstallPaths, transport: &'a dyn UpdateTransport) -> Self {
-        Self { paths, transport, progress: &NoProgress, interval: DEFAULT_INTERVAL, force: false }
+        Self { paths, transport, progress: &NoProgress, interval: None, force: false }
     }
 
     /// Reports each stage to `progress` as it happens.
@@ -88,10 +97,14 @@ impl<'a> BackgroundUpdater<'a> {
         self
     }
 
-    /// Sets the minimum time between checks.
+    /// Sets the minimum time between checks, overriding the manifest.
+    ///
+    /// For a caller that has its own reason to choose — a test, or an operator
+    /// running the binary by hand. Left alone, the interval comes from the
+    /// publisher's signed manifest and falls back to [`DEFAULT_INTERVAL`].
     #[must_use]
     pub fn every(mut self, interval: Duration) -> Self {
-        self.interval = interval;
+        self.interval = Some(interval);
         self
     }
 
@@ -114,15 +127,24 @@ impl<'a> BackgroundUpdater<'a> {
             let lock = InstallLock::acquire(self.paths)?;
             let mut state = lock.load_or_new_state(&application)?;
 
-            if !self.force && !state.update_check_is_due(now, self.interval.as_secs()) {
-                tracing::debug!("an update check is not due yet");
+            // Read before the due check, because the interval it decides with
+            // is one of the things the manifest declares. A local file read,
+            // under a lock this window holds anyway.
+            let spec = self.update_spec(&state)?;
+            let interval = self.interval_for(spec.as_ref());
+
+            if !self.force && !state.update_check_is_due(now, interval.as_secs()) {
+                tracing::debug!(
+                    interval_seconds = interval.as_secs(),
+                    "an update check is not due yet"
+                );
                 return Ok(Outcome::NotDue);
             }
 
             self.progress
                 .report(&ProgressEvent::CheckingForUpdate { application: application.clone() });
 
-            let Some(url) = self.update_url(&state)? else {
+            let Some(url) = spec.and_then(|spec| spec.url) else {
                 return Ok(Outcome::NoServerConfigured);
             };
 
@@ -172,12 +194,16 @@ impl<'a> BackgroundUpdater<'a> {
         }
     }
 
-    /// The update server the active version's signed manifest names.
+    /// What the active version's signed manifest says about updating.
     ///
-    /// Taken from the manifest rather than from a caller, so the server is
-    /// whatever the publisher signed rather than whatever a process on the
-    /// machine happened to pass in.
-    fn update_url(&self, state: &xpack_core::InstallState) -> Result<Option<String>> {
+    /// Taken from the manifest rather than from a caller, so the server and
+    /// the rate are whatever the publisher signed rather than whatever a
+    /// process on the machine happened to pass in.
+    ///
+    /// `None` when there is no active version or its manifest cannot be read.
+    /// An installation in that state has nothing to check against, and every
+    /// caller here treats it as "not configured" rather than as a failure.
+    fn update_spec(&self, state: &xpack_core::InstallState) -> Result<Option<UpdateSpec>> {
         let Some(version) = &state.current_version else {
             return Ok(None);
         };
@@ -185,7 +211,20 @@ impl<'a> BackgroundUpdater<'a> {
         let Ok(bytes) = std::fs::read(&manifest_file) else {
             return Ok(None);
         };
-        Ok(xpack_core::Manifest::from_slice(&bytes)?.update.url.clone())
+        Ok(Some(xpack_core::Manifest::from_slice(&bytes)?.update))
+    }
+
+    /// The interval in force: the caller's, then the publisher's, then ours.
+    ///
+    /// The publisher's value has to reach this gate and not only the launcher
+    /// that spawns the process. A manifest asking for a check every thirty
+    /// minutes, against a gate still holding out for four hours, would spawn
+    /// this binary every thirty minutes to be told each time that nothing is
+    /// due yet.
+    fn interval_for(&self, spec: Option<&UpdateSpec>) -> Duration {
+        self.interval
+            .or_else(|| spec.and_then(UpdateSpec::check_interval))
+            .unwrap_or(DEFAULT_INTERVAL)
     }
 
     fn application_id(&self) -> Result<String> {

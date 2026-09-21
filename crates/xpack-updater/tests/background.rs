@@ -270,3 +270,88 @@ fn an_installation_with_no_update_server_asks_nobody() {
     assert_eq!(outcome, Outcome::NoServerConfigured);
     assert_eq!(fixture.requests(), 0);
 }
+
+/// Rewrites the installed manifest's declared check interval.
+///
+/// The same trick the no-server test uses: the installed copy is what the
+/// updater reads, so a test changes what the publisher declared by changing
+/// it there.
+fn declare_check_interval(world: &World, minutes: Option<u32>) {
+    let manifest_file = world.paths.version_manifest_file(&Version::parse("1.0.0").unwrap());
+    let mut manifest = Manifest::from_slice(&std::fs::read(&manifest_file).unwrap()).unwrap();
+    manifest.update.check_interval_minutes = minutes;
+    std::fs::write(&manifest_file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn a_manifest_interval_shorter_than_the_default_makes_a_check_due_sooner() {
+    // Without this the launcher would spawn the updater every thirty minutes,
+    // as the publisher asked, and be told each time that nothing is due for
+    // another four hours.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_check_interval(&world, Some(30));
+    record_check_at(&world, unix_seconds() - 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::Staged(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn a_manifest_interval_longer_than_the_default_holds_a_check_back() {
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_check_interval(&world, Some(24 * 60));
+    record_check_at(&world, unix_seconds() - 5 * 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::NotDue, "the default interval overrode the publisher's");
+    assert_eq!(fixture.requests(), 0);
+}
+
+#[test]
+fn an_explicit_interval_overrides_the_manifest() {
+    // An operator running the binary by hand has a reason the manifest cannot
+    // know about.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_check_interval(&world, Some(24 * 60));
+    record_check_at(&world, unix_seconds() - 2 * 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture)
+        .every(Duration::from_secs(60 * 60))
+        .run()
+        .unwrap();
+
+    assert_eq!(outcome, Outcome::Staged(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn a_manifest_declaring_no_interval_keeps_the_default() {
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_check_interval(&world, None);
+    record_check_at(&world, unix_seconds() - 2 * 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::NotDue);
+    assert_eq!(fixture.requests(), 0);
+}
+
+#[test]
+fn a_manifest_interval_below_the_floor_does_not_mean_a_check_every_start() {
+    // A publisher asking for a check every minute gets the floor, not a
+    // request from every installation every minute.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_check_interval(&world, Some(1));
+    record_check_at(&world, unix_seconds() - 5 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::NotDue);
+    assert_eq!(fixture.requests(), 0);
+}
