@@ -220,6 +220,19 @@ pub fn launch_spec(
 ///
 /// **`/F` is never passed.** It terminates without asking, which is precisely
 /// the behaviour that loses a user's work.
+///
+/// # A Windows process with no window cannot be asked
+///
+/// `WM_CLOSE` is posted to the process's windows, so a console program that
+/// has none has nothing to receive it, and this reports a failure rather than
+/// ending it. That is the right answer — the alternative is `/F` — but it
+/// means a windowless application on Windows cannot be restarted by asking.
+///
+/// In practice the applications this is used on have windows: it is called
+/// when a user has clicked a button in a dialog, which an application without
+/// a window cannot have shown them. Where it does happen, the caller learns
+/// from the error, the application keeps running, and the update is applied at
+/// the next start like any other.
 pub fn request_close(pid: u32) -> Result<()> {
     let mut command = close_command(pid);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
