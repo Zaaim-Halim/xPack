@@ -101,6 +101,14 @@ pub(crate) fn default_updater() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-updater")
 }
 
+/// The `xpack-notify` binary sitting beside this executable, if there is one.
+///
+/// Offered to every install; placed only into installations whose package asks
+/// for a prompt, which the installer decides from the manifest.
+pub(crate) fn default_notifier() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-notify")
+}
+
 /// The `xpack-uninstaller` binary sitting beside this executable, if there is one.
 pub(crate) fn default_uninstaller() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-uninstaller")

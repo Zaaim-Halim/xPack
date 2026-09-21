@@ -153,6 +153,7 @@ impl Payload {
             gui_launcher: self.binary("xpack-launcherw"),
             updater: self.binary("xpack-updater"),
             uninstaller: self.binary("xpack-uninstaller"),
+            notifier: self.binary("xpack-notify"),
             desktop_roots: None,
         };
 

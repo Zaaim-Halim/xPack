@@ -167,6 +167,7 @@ impl<'a> BackgroundUpdater<'a> {
             gui_launcher: None,
             updater: None,
             uninstaller: None,
+            notifier: None,
             // Nobody is watching this run, which is exactly the case a staged
             // rollout exists to hold back.
             respect_rollout: true,
