@@ -2,6 +2,8 @@ package io.xpack.internal;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.PromptSpec;
+import io.xpack.config.UpdateSpec;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,6 +32,7 @@ public final class ManifestWriter {
 
     private static final Pattern NUMERIC = Pattern.compile("0|[1-9]\\d*");
 
+
     private String id;
     private String name;
     private String version;
@@ -40,8 +43,7 @@ public final class ManifestWriter {
     private List<String> arguments = new ArrayList<>();
     private Map<String, String> environment = new LinkedHashMap<>();
     private String updateUrl;
-    private String updateChannel;
-    private Boolean mandatory;
+    private UpdateSpec update = new UpdateSpec();
     private HealthSpec health;
     private DesktopSpec desktop;
 
@@ -90,10 +92,23 @@ public final class ManifestWriter {
         return this;
     }
 
-    public ManifestWriter update(String url, String channel, Boolean isMandatory) {
+    /**
+     * The update settings, with {@code url} already resolved for this target.
+     *
+     * <p>The URL is passed separately because it is derived rather than
+     * configured: the plugin holds a base, and the caller appends the segment
+     * naming the platform this manifest is for.
+     *
+     * <p>Nothing here is validated. What a severity may say, how short an
+     * interval may be, how long a prompt may run -- the packager refuses a
+     * manifest that breaks any of those, and it names the line, the column and
+     * the words it will accept. A second copy of the rules in this file would
+     * add a second thing to keep in step, and would be the copy that is wrong
+     * first.
+     */
+    public ManifestWriter update(String url, UpdateSpec spec) {
         this.updateUrl = blankToNull(url);
-        this.updateChannel = blankToNull(channel);
-        this.mandatory = isMandatory;
+        this.update = spec == null ? new UpdateSpec() : spec;
         return this;
     }
 
@@ -189,10 +204,23 @@ public final class ManifestWriter {
                 .putIfAny("arguments", arguments)
                 .putIfAny("environment", environment);
 
-        Json.Obj update = new Json.Obj()
-                .put("channel", updateChannel)
+        Json.Obj updateObject = new Json.Obj()
+                .put("channel", blankToNull(update.getChannel()))
                 .put("url", updateUrl)
-                .put("mandatory", mandatory);
+                .put("mandatory", update.getMandatory())
+                .put("checkWhileRunning", update.getCheckWhileRunning())
+                .put("checkIntervalMinutes", update.getCheckIntervalMinutes())
+                .put("notify", update.getNotify())
+                .put("severity", blankToNull(update.getSeverity()));
+
+        PromptSpec prompt = update.getPrompt();
+        if (prompt != null && !prompt.isEmpty()) {
+            updateObject.put(
+                    "prompt",
+                    new Json.Obj()
+                            .put("title", blankToNull(prompt.getTitle()))
+                            .put("message", blankToNull(prompt.getMessage())));
+        }
 
         Json.Obj healthObject = new Json.Obj();
         if (health != null && !health.isEmpty()) {
@@ -214,7 +242,7 @@ public final class ManifestWriter {
                 .put("application", application)
                 .put("platform", platform)
                 .put("launch", launch)
-                .putIfAny("update", update)
+                .putIfAny("update", updateObject)
                 .putIfAny("health", healthObject)
                 .putIfAny("desktop", desktopObject)
                 .toString();

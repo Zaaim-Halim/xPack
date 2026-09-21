@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.PromptSpec;
+import io.xpack.config.UpdateSpec;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -63,6 +65,105 @@ class ManifestWriterTest {
     }
 
     @Test
+    void writes_the_polling_and_prompt_settings_when_they_are_asked_for() {
+        UpdateSpec update = new UpdateSpec();
+        update.setChannel("stable");
+        update.setCheckWhileRunning(true);
+        update.setCheckIntervalMinutes(180);
+        update.setNotify(true);
+        update.setSeverity("recommended");
+        PromptSpec prompt = new PromptSpec();
+        prompt.setTitle("A new version is ready");
+        prompt.setMessage("Restart when convenient.");
+        update.setPrompt(prompt);
+
+        Map<String, Object> manifest =
+                Json.parseObject(minimal().update("https://example.com/demo/linux-x64", update).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> written = (Map<String, Object>) manifest.get("update");
+        assertEquals(Boolean.TRUE, written.get("checkWhileRunning"));
+        assertEquals(180L, written.get("checkIntervalMinutes"));
+        assertEquals(Boolean.TRUE, written.get("notify"));
+        assertEquals("recommended", written.get("severity"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> writtenPrompt = (Map<String, Object>) written.get("prompt");
+        assertEquals("A new version is ready", writtenPrompt.get("title"));
+        assertEquals("Restart when convenient.", writtenPrompt.get("message"));
+    }
+
+    @Test
+    void writes_nothing_about_polling_when_nothing_was_asked_for() {
+        // A POM that says nothing must produce the manifest it always did.
+        // Every one of these fields is absent-means-default on the other side,
+        // and writing them as nulls would be a change of meaning.
+        UpdateSpec update = new UpdateSpec();
+        update.setChannel("stable");
+
+        String json = minimal().update("https://example.com/demo/linux-x64", update).toJson();
+
+        assertFalse(json.contains("checkWhileRunning"), json);
+        assertFalse(json.contains("checkIntervalMinutes"), json);
+        assertFalse(json.contains("notify"), json);
+        assertFalse(json.contains("severity"), json);
+        assertFalse(json.contains("prompt"), json);
+    }
+
+    @Test
+    void a_prompt_with_nothing_in_it_is_left_out_rather_than_written_empty() {
+        UpdateSpec update = new UpdateSpec();
+        update.setChannel("stable");
+        update.setPrompt(new PromptSpec());
+
+        String json = minimal().update("https://example.com/demo/linux-x64", update).toJson();
+
+        assertFalse(json.contains("prompt"), json);
+    }
+
+    @Test
+    void an_interval_alone_does_not_turn_on_checking_while_running() {
+        // The two are written independently, because they answer different
+        // questions on the other side: one says how often the server may be
+        // asked at all, the other whether anything looks while the
+        // application is open. A POM that sets only the number must not be
+        // read as having asked for both.
+        UpdateSpec update = new UpdateSpec();
+        update.setCheckIntervalMinutes(45);
+
+        String json = minimal().update("https://example.com/demo/linux-x64", update).toJson();
+
+        assertTrue(json.contains("checkIntervalMinutes"), json);
+        assertFalse(json.contains("checkWhileRunning"), json);
+    }
+
+    @Test
+    void checking_while_running_can_be_asked_for_without_naming_a_rate() {
+        // And the other way round: the switch alone is a complete answer,
+        // because the interval has a default. Under the older arrangement,
+        // where the number was also the switch, this POM checked nothing.
+        UpdateSpec update = new UpdateSpec();
+        update.setCheckWhileRunning(true);
+
+        String json = minimal().update("https://example.com/demo/linux-x64", update).toJson();
+
+        assertTrue(json.contains("\"checkWhileRunning\": true"), json);
+        assertFalse(json.contains("checkIntervalMinutes"), json);
+    }
+
+    @Test
+    void the_interval_is_a_number_rather_than_a_string() {
+        // It is read as one on the other side, and a quoted number there is a
+        // parse failure at install time rather than at build time.
+        UpdateSpec update = new UpdateSpec();
+        update.setCheckIntervalMinutes(45);
+
+        String json = minimal().update("https://example.com/demo/linux-x64", update).toJson();
+
+        assertTrue(json.contains("\"checkIntervalMinutes\": 45"), json);
+    }
+
+    @Test
     void writes_the_sections_that_were_configured() {
         HealthSpec health = new HealthSpec();
         health.setRequireStartupReport(true);
@@ -72,17 +173,21 @@ class ManifestWriterTest {
         desktop.setShortcut(true);
         desktop.setCategories(List.of("Utility"));
 
+        UpdateSpec update = new UpdateSpec();
+        update.setChannel("stable");
+        update.setMandatory(false);
+
         Map<String, Object> manifest = Json.parseObject(minimal()
-                .update("https://example.com/demo/linux-x64", "stable", false)
+                .update("https://example.com/demo/linux-x64", update)
                 .health(health)
                 .desktop(desktop)
                 .toJson());
 
         @SuppressWarnings("unchecked")
-        Map<String, Object> update = (Map<String, Object>) manifest.get("update");
-        assertEquals("https://example.com/demo/linux-x64", update.get("url"));
-        assertEquals("stable", update.get("channel"));
-        assertEquals(Boolean.FALSE, update.get("mandatory"));
+        Map<String, Object> written = (Map<String, Object>) manifest.get("update");
+        assertEquals("https://example.com/demo/linux-x64", written.get("url"));
+        assertEquals("stable", written.get("channel"));
+        assertEquals(Boolean.FALSE, written.get("mandatory"));
 
         @SuppressWarnings("unchecked")
         Map<String, Object> health2 = (Map<String, Object>) manifest.get("health");

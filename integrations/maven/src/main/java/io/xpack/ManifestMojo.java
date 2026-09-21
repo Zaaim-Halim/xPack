@@ -56,7 +56,7 @@ public class ManifestMojo extends AbstractXPackMojo {
                         .executable(executable)
                         .arguments(launchArguments())
                         .environment(environment)
-                        .update(updateUrlFor(target), updateChannel, mandatory)
+                        .update(updateUrlFor(target), update)
                         .health(health)
                         .desktop(desktop)
                         .toJson();

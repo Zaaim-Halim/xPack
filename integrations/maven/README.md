@@ -119,8 +119,8 @@ others.
 <icon>${project.basedir}/src/main/resources/icon.png</icon>
 ```
 
-`xpack:installer` then rewrites the installer, launcher, updater and
-uninstaller it ships: each gets the application's name, the version, the
+`xpack:installer` then rewrites the installer, launcher, updater, uninstaller
+and update dialog it ships: each gets the application's name, the version, the
 publisher, and a description saying which of them it is. A `.png` is expanded
 into the sizes Windows chooses between, so the same file can serve
 `<desktop><icon>` rather than being a second one to keep in step.
@@ -184,6 +184,118 @@ mvn -Dxpack.key=$PWD/xpack-signing.json xpack:run
 ```
 
 A working example is in `src/it/bundled-jdk-app`.
+
+## Checking for updates while the application runs
+
+By default an installation checks once, when the application starts, and
+applies whatever it found the next time it starts. Nothing runs in between and
+the user is told nothing.
+
+`<update>` changes that:
+
+```xml
+<configuration>
+  <updateBaseUrl>https://updates.example.com/demo</updateBaseUrl>
+  <update>
+    <channel>stable</channel>
+    <checkWhileRunning>true</checkWhileRunning>
+    <checkIntervalMinutes>180</checkIntervalMinutes>
+    <notify>true</notify>
+    <severity>recommended</severity>
+    <prompt>
+      <title>A new version is ready</title>
+      <message>It has been downloaded and checked already.</message>
+    </prompt>
+  </update>
+</configuration>
+```
+
+`<checkWhileRunning>` is the switch. Off, the application is checked only when
+it starts. On, the launcher keeps looking for as long as the application is
+open — which is not a promise that anything happens on a schedule, since an
+application nobody opens is never checked.
+
+`<checkIntervalMinutes>` says how often the update server may be asked, and
+nothing else. It governs the check made at startup too, so it is worth setting
+even when nothing looks while running. Unset means four hours; below fifteen
+minutes is raised to fifteen. **Leaving it out cannot turn checking off** —
+only the switch does that.
+
+`<notify>` decides whether a check that finds something may say so, and
+`<prompt>` is what it says. That wording travels inside the signed manifest, so
+it is the publisher's text rather than whatever the update server served.
+`<severity>` is `optional`, `recommended` or `critical`; it decides what the
+prompt offers rather than what is installed, so a critical release is told, not
+offered. It is separate from `<mandatory>`, which refuses to let anything older
+start once the release is installed. Set both for a security release.
+
+## Which cadence decides what
+
+The two cadences above are not only a build schedule. They decide which
+settings an existing user can be given and which ones only a new installer can
+deliver.
+
+### When you build the installer
+
+```sh
+mvn xpack:installer
+```
+
+The `<update>` block in the POM **at that moment** is packaged into the setup
+file, along with the binaries that installation will run for the rest of its
+life. One of those binaries is the update dialog, and it is shipped only when
+the POM asks for one:
+
+```xml
+<update>
+  <checkWhileRunning>true</checkWhileRunning>   <!-- there is a check to speak up from -->
+  <notify>true</notify>                         <!-- and the user may be told -->
+</update>
+```
+
+Both, plus a platform with a dialog implemented — Windows and macOS — and the
+installer carries `<App> Update Notice`. Either one missing and it does not,
+and the installation has no graphical code in it at all. That is deliberate:
+an application that updates silently should not ship a dialog it never opens.
+
+Everything else in the block is packaged too, but nothing about it is
+special — a later release can change all of it.
+
+### When you ship a regular update
+
+```sh
+mvn deploy
+```
+
+The new release carries its own manifest, and its `<update>` block is what
+existing installations obey from the moment they install it:
+
+- `<checkWhileRunning>` can be turned on or off. The checking is done by the
+  launcher and the updater, which every installation already has, so this takes
+  effect on the next start with nothing new to install.
+- `<checkIntervalMinutes>` can be raised or lowered. Ship a busy release and
+  lower it; leave it out and it returns to four hours.
+- `<severity>`, `<prompt>` and `<mandatory>` describe *that* release, and are
+  read from it when it is staged. A release announces itself in its own words.
+
+**`<notify>` is the one that cannot be turned on this way.** Showing a dialog
+needs the binary, and a background update runs from inside the installation
+with no copy of one to place. Set it in a release whose installations were made
+without it and nothing happens: the update is applied quietly at the next start
+and the installation's log says why. Adding it takes a new installer, which
+users have to download.
+
+So the rule of thumb: **decide about prompting when you build the installer,
+and tune everything else per release.**
+
+| | Set in | An existing installation can be given it |
+|---|---|---|
+| `<checkWhileRunning>`, `<checkIntervalMinutes>` | every release | yes |
+| `<severity>`, `<prompt>`, `<mandatory>` | every release | yes |
+| whether a dialog exists at all | the **installer** | **no** |
+
+`<updateBaseUrl>` stays outside the block so that `-Dxpack.updateBaseUrl` can
+override it from a release build without editing the POM.
 
 ## Things that will bite
 

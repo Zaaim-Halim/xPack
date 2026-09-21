@@ -29,7 +29,19 @@
           <mainClass>com.example.demo.Main</mainClass>
           <publisher>Example Ltd</publisher>
           <updateBaseUrl>https://updates.example.com/demo</updateBaseUrl>
-          <updateChannel>stable</updateChannel>
+          <update>
+            <channel>stable</channel>
+            <!-- Keep looking while the application is open, no more than once
+                 every three hours, and say so when something is waiting. -->
+            <checkWhileRunning>true</checkWhileRunning>
+            <checkIntervalMinutes>180</checkIntervalMinutes>
+            <notify>true</notify>
+            <severity>recommended</severity>
+            <prompt>
+              <title>A new version of the demo is ready</title>
+              <message>It has been downloaded and checked already.</message>
+            </prompt>
+          </update>
           <environment>
             <DEMO_GREETING>hello from the manifest</DEMO_GREETING>
           </environment>

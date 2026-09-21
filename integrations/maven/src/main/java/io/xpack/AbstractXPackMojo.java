@@ -3,6 +3,7 @@ package io.xpack;
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
 import io.xpack.config.RuntimeSpec;
+import io.xpack.config.UpdateSpec;
 import io.xpack.internal.Json;
 import io.xpack.internal.Layout;
 import io.xpack.internal.ManifestWriter;
@@ -119,15 +120,27 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
 
     // --------------------------------------------------------------- updates
 
-    /** Base update URL. The {@code <os>-<arch>} segment is appended per target. */
+    /**
+     * Where updates come from, how often to look, and what to say about one.
+     *
+     * <p>One block rather than a handful of loose parameters, because these
+     * settings are read together and a release that is mandatory but announced
+     * as optional is a contradiction easier to see when the two words sit
+     * beside each other.
+     */
+    @Parameter
+    protected UpdateSpec update = new UpdateSpec();
+
+    /**
+     * Base update URL. The {@code <os>-<arch>} segment is appended per target.
+     *
+     * <p>Kept here rather than inside {@code <update>} so that a release build
+     * can override it with {@code -Dxpack.updateBaseUrl} without editing the
+     * POM: Maven reads {@code property = } on a plugin parameter, never on a
+     * field of a nested block.
+     */
     @Parameter(property = "xpack.updateBaseUrl")
     protected String updateBaseUrl;
-
-    @Parameter(property = "xpack.updateChannel")
-    protected String updateChannel;
-
-    @Parameter(property = "xpack.mandatory")
-    protected Boolean mandatory;
 
     // -------------------------------------------------------- health, desktop
 
