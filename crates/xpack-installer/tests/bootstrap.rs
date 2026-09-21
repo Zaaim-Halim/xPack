@@ -74,8 +74,13 @@ fn plan(key: &KeyPair) -> InstallPlan {
 /// Builds a payload the way `xpack installer` does.
 fn payload_bytes(dir: &Path, key: &KeyPair) -> Vec<u8> {
     let package = build_package(dir, key);
+    // What `xpack installer` puts in a real payload. The windowed launcher is
+    // Windows-only there, and included here on every platform so that the one
+    // machine able to check what Windows does with it is not also the only
+    // machine that has it.
     let binaries = vec![
         fake_binary(dir, "xpack-launcher"),
+        fake_binary(dir, "xpack-launcherw"),
         fake_binary(dir, "xpack-updater"),
         fake_binary(dir, "xpack-uninstaller"),
     ];

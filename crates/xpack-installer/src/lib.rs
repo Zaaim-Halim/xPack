@@ -170,7 +170,7 @@ impl Payload {
             root: paths.root().to_path_buf(),
             version: installed.version,
             activated: installed.activated,
-            launcher: paths.shortcut_target_named(&names),
+            launcher: launcher_to_report(&paths, &names),
             desktop: installed.desktop,
         })
     }
@@ -185,6 +185,22 @@ impl Payload {
             .find(|path| path.file_stem().is_some_and(|found| found == stem))
             .cloned()
     }
+}
+
+/// The launcher to tell the user about, which has to be one that is there.
+///
+/// Windows prefers the windowed build: it is what a shortcut points at, and
+/// starting an application from the console build leaves an empty console
+/// window behind it. But an installer is only able to place the binaries its
+/// payload carries, and a payload without a windowed build is a payload whose
+/// installation has a console launcher and nothing else.
+///
+/// Naming the preferred path regardless would print a path that does not
+/// exist -- the one thing this line must never do, since a user's next action
+/// is to run what it printed.
+fn launcher_to_report(paths: &InstallPaths, names: &xpack_core::BinaryNames) -> PathBuf {
+    let preferred = paths.shortcut_target_named(names);
+    if preferred.is_file() { preferred } else { paths.launcher_file_named(names) }
 }
 
 /// Joins an archive entry name onto a directory, refusing anything that escapes.
@@ -282,5 +298,55 @@ mod tests {
     #[test]
     fn a_drive_qualified_component_is_refused() {
         assert!(safe_join(Path::new("/tmp/unpack"), "C:evil").is_err());
+    }
+
+    /// An installation directory with the named launchers present.
+    fn installation(launchers: &[&str]) -> (tempfile::TempDir, InstallPaths) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let paths = InstallPaths::from_application_dir(dir.path());
+        let names = xpack_core::BinaryNames::Xpack;
+
+        for launcher in launchers {
+            let path = match *launcher {
+                "console" => paths.launcher_file_named(&names),
+                "windowed" => paths.gui_launcher_file_named(&names),
+                other => panic!("unknown launcher {other}"),
+            };
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+            std::fs::write(&path, b"a launcher").expect("the launcher");
+        }
+        (dir, paths)
+    }
+
+    #[test]
+    fn an_installation_without_a_windowed_launcher_is_told_about_the_one_it_has() {
+        // A payload carrying no windowed build produces an installation with
+        // only a console launcher. Naming the windowed one anyway would print
+        // a path that is not there, and the user's next action is to run what
+        // was printed.
+        let (_dir, paths) = installation(&["console"]);
+        let names = xpack_core::BinaryNames::Xpack;
+
+        assert_eq!(launcher_to_report(&paths, &names), paths.launcher_file_named(&names));
+    }
+
+    #[test]
+    fn a_windowed_launcher_is_preferred_wherever_the_platform_prefers_it() {
+        // Which build that is differs by platform, so the expectation is asked
+        // of the same function the shortcut writer asks.
+        let (_dir, paths) = installation(&["console", "windowed"]);
+        let names = xpack_core::BinaryNames::Xpack;
+
+        assert_eq!(launcher_to_report(&paths, &names), paths.shortcut_target_named(&names));
+    }
+
+    #[test]
+    fn an_installation_with_no_launcher_at_all_names_the_ordinary_one() {
+        // Nothing exists to report. The console launcher is the honest answer:
+        // it is where one would be if the payload had carried it.
+        let (_dir, paths) = installation(&[]);
+        let names = xpack_core::BinaryNames::Xpack;
+
+        assert_eq!(launcher_to_report(&paths, &names), paths.launcher_file_named(&names));
     }
 }
