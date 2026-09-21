@@ -166,22 +166,52 @@ jobs:
             }
           }
 
-          # A real, existing program. `CreateShortcut` round-trips the stored
-          # bytes and does not require the target to exist, but starting from a
-          # path that does keeps the first failure easy to read.
+          # Writes a shortcut and prints what the shell makes of it, without
+          # holding it to an answer.
+          function Show-Shortcut($target) {
+            $path = Join-Path $env:TEMP 'xpack-ci.lnk'
+            if (Test-Path $path) { Remove-Item $path }
+
+            cargo run --quiet --package xpack-install --example write_shortcut -- $path $target
+            $shell = New-Object -ComObject WScript.Shell
+            $link = $shell.CreateShortcut($path)
+            Write-Host "target      = $target  (no such file)"
+            Write-Host "TargetPath  = $($link.TargetPath)"
+          }
+
+          # A real, existing program, which is what a shortcut normally points
+          # at and the case the shell can answer fully.
           Assert-Shortcut "$env:SystemRoot\System32\notepad.exe"
 
-          # The two things the serialiser handles specially, and the reason
-          # this job exists at all. Neither is covered by an ASCII path with no
-          # spaces:
-          #
-          #  * a non-ASCII path, which the ANSI LocalBasePath cannot represent.
-          #    It survives only because LocalBasePathOffsetUnicode is written,
-          #    and only if the `?` substitution in the ANSI field keeps one
-          #    byte per character so every later offset stays correct.
-          #  * a space, which has to reach WorkingDirectory intact.
+          # A space, which has to reach WorkingDirectory intact. The target
+          # need not exist for this one: its name is the same in the system
+          # code page as it is in Unicode, so nothing is lost either way.
           Assert-Shortcut "C:\Users\Jose Ramirez\My App\app.exe"
-          Assert-Shortcut "C:\Users\José Ramírez\My App\app.exe"
+
+          # A non-ASCII path, which is the reason this job exists. The ANSI
+          # LocalBasePath cannot hold it, so it survives only because the
+          # Unicode fields are written beside it -- in LinkInfo, and in the
+          # extension block of every shell item.
+          #
+          # This one is created first, because the shell answers "what does
+          # this shortcut point at?" by binding the shortcut's item list to
+          # the filesystem. Where there is nothing to bind to, it falls back
+          # to the names stored in the file, and the first of those is in the
+          # system code page: a question about a path that does not exist is
+          # answered with `Jos?`. Every real shortcut points at something
+          # real, so a target that exists is the case worth holding the
+          # writer to.
+          $accented = Join-Path $env:TEMP 'José Ramírez\My App'
+          New-Item -ItemType Directory -Force -Path $accented | Out-Null
+          $accentedTarget = Join-Path $accented 'app.exe'
+          Set-Content -LiteralPath $accentedTarget -Value 'not a program' -NoNewline
+          Assert-Shortcut $accentedTarget
+
+          # And the same path with nothing behind it, reported rather than
+          # asserted. It records what the shell does when it cannot bind, so
+          # the next person to read `Jos?` in a log knows whether they are
+          # looking at a bug or at a shortcut to a file that is not there.
+          Show-Shortcut "C:\Users\José Ramírez\My App\app.exe"
 
           Write-Host 'the shell resolved every shortcut xPack wrote'
 
