@@ -470,6 +470,21 @@ mod build_rule_tests {
         Platform::new(os, Arch::X64)
     }
 
+    /// A platform this host is actually allowed to build for.
+    ///
+    /// The tests below are about rules that have nothing to do with the
+    /// target -- a key left in the payload, bytes that must not differ
+    /// between builds -- and a Unix target names a package a Windows host
+    /// refuses to build at all, because it cannot record the executable bit.
+    /// Those tests then fail on the refusal without ever reaching the rule
+    /// they exist for.
+    ///
+    /// Which is exactly what happened: they passed on every machine that
+    /// could build a Linux package and failed on the one that could not.
+    fn buildable_here() -> Platform {
+        Platform::host().expect("a host platform this build knows about")
+    }
+
     #[test]
     fn a_unix_host_may_build_for_anything() {
         for os in [Os::Linux, Os::Macos, Os::Windows] {
@@ -500,6 +515,19 @@ mod build_rule_tests {
         // Nothing xPack itself executes lives in the payload, so a missing
         // bit is not certain to break anything. It warns rather than refuses.
         assert!(ensure_modes_are_recordable(target(Os::Linux), false, false).is_ok());
+    }
+
+    #[test]
+    fn every_host_may_build_for_itself() {
+        // Why the build-rule tests below name this host's own platform rather
+        // than a Unix one. A machine that cannot record a mode bit cannot
+        // build a package for a system that needs one -- but it can always
+        // build for the system it is, which is the property that lets a test
+        // about something else pick a target and not think about it again.
+        assert!(
+            ensure_modes_are_recordable(buildable_here(), HOST_RECORDS_UNIX_MODES, true).is_ok(),
+            "this host cannot package for itself"
+        );
     }
 
     #[test]
@@ -567,7 +595,7 @@ mod build_rule_tests {
         // keygen` writes into the working directory, `xpack pack .` packages
         // the working directory, and the result would publish the key that
         // authorises every future update.
-        let (dir, manifest) = fixture(target(Os::Linux));
+        let (dir, manifest) = fixture(buildable_here());
         let key = xpack_security::KeyPair::generate().unwrap();
         let payload_root = dir.path().join("payload");
 
@@ -585,7 +613,7 @@ mod build_rule_tests {
     fn a_renamed_private_key_is_still_refused() {
         // The check is on content, so copying the key to `assets/data.bin`
         // does not get it past.
-        let (dir, manifest) = fixture(target(Os::Linux));
+        let (dir, manifest) = fixture(buildable_here());
         let key = xpack_security::KeyPair::generate().unwrap();
         let payload_root = dir.path().join("payload");
 
@@ -604,7 +632,7 @@ mod build_rule_tests {
     fn a_public_key_in_the_payload_is_allowed() {
         // Publishing the public key is normal — an application may ship it to
         // pin its own updates. Only the secret half is refused.
-        let (dir, manifest) = fixture(target(Os::Linux));
+        let (dir, manifest) = fixture(buildable_here());
         let key = xpack_security::KeyPair::generate().unwrap();
         let payload_root = dir.path().join("payload");
         key.public().save(&payload_root.join("trusted.pub.json")).unwrap();
@@ -618,7 +646,7 @@ mod build_rule_tests {
     fn an_application_config_using_the_name_private_key_is_not_refused() {
         // A rule that blocks legitimate releases is a rule people route
         // around, so the match requires the whole xPack key shape.
-        let (dir, manifest) = fixture(target(Os::Linux));
+        let (dir, manifest) = fixture(buildable_here());
         let key = xpack_security::KeyPair::generate().unwrap();
         let payload_root = dir.path().join("payload");
         std::fs::write(
@@ -638,7 +666,7 @@ mod build_rule_tests {
         // an artefact came from the source it claims. Nothing asserted it, so
         // a dependency changing its default timestamp would have broken it
         // silently.
-        let (dir, manifest) = fixture(target(Os::Linux));
+        let (dir, manifest) = fixture(buildable_here());
         let key = xpack_security::KeyPair::generate().unwrap();
         let payload_root = dir.path().join("payload");
 
