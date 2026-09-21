@@ -216,22 +216,42 @@ pub struct UpdateSpec {
     #[serde(default)]
     pub mandatory: bool,
 
-    /// Shortest time between unattended checks while the application runs.
+    /// Whether to keep looking for updates while the application is open.
     ///
-    /// Absent means the application is checked only when it starts, which is
-    /// what every installation did before this field existed and what most
-    /// desktop applications want: one check per start, and nothing running in
-    /// between to make another.
+    /// Off by default: the application is checked when it starts, and whatever
+    /// that check finds is applied at the next start. That is what every
+    /// installation did before this field existed, and what most desktop
+    /// applications want.
     ///
-    /// A value turns on periodic checking for as long as the application is
-    /// open. It is a floor on how often the server may be asked, never a
-    /// promise that it will be — an application nobody opens is never checked,
-    /// whatever this says, because nothing is running to do the checking.
+    /// On, the launcher keeps looking for as long as the application runs. It
+    /// is still not a promise that anything is checked on a schedule — an
+    /// application nobody opens is never checked, because nothing is running
+    /// to do the checking.
     ///
-    /// Zero means periodic checking is off, exactly as an absent field does. A
-    /// publisher who writes zero is saying so deliberately rather than leaving
-    /// the line out, and reading it as "as often as possible" would turn a
-    /// plausible typo into a flood of requests aimed at their own server.
+    /// # Why this is a switch of its own rather than an interval that may be
+    /// absent
+    ///
+    /// The two questions are different: *whether* to look while running, and
+    /// *how often* the server may be asked. Folding them into one field made
+    /// the interval load-bearing in a way nobody would guess — a release that
+    /// left the number out turned the whole feature off, silently, and the
+    /// next release to leave it out would do it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_while_running: bool,
+
+    /// Shortest time between asking the update server anything, in minutes.
+    ///
+    /// Governs every check, not only the ones made while the application runs:
+    /// an application opened twenty times a day makes at most one request per
+    /// interval, whether those checks come from the launcher starting or from
+    /// [`Self::check_while_running`].
+    ///
+    /// Absent means [`DEFAULT_CHECK_INTERVAL_MINUTES`]. Below
+    /// [`MIN_CHECK_INTERVAL_MINUTES`] is raised to it rather than refused: the
+    /// value costs a user bandwidth and a publisher server load, and a release
+    /// cannot appear fast enough for a shorter one to find anything. Refusing
+    /// instead would mean a whole package rejected over a number with an
+    /// obvious, harmless reading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_interval_minutes: Option<u32>,
 
@@ -271,6 +291,7 @@ impl Default for UpdateSpec {
             channel: default_channel(),
             url: None,
             mandatory: false,
+            check_while_running: false,
             check_interval_minutes: None,
             severity: UpdateSeverity::default(),
             notify: false,
@@ -280,22 +301,18 @@ impl Default for UpdateSpec {
 }
 
 impl UpdateSpec {
-    /// How often to check while the application runs, if it asked for that.
+    /// The shortest time that may pass between asking the update server.
     ///
-    /// `None` means check only at startup. An interval below
-    /// [`MIN_CHECK_INTERVAL_MINUTES`] is raised to it rather than refused: the
-    /// value costs a user bandwidth and a publisher server load, and a release
-    /// cannot appear fast enough for a shorter one to find anything. Refusing
-    /// instead would mean a whole package rejected over a number that has an
-    /// obvious, harmless reading.
-    pub fn check_interval(&self) -> Option<Duration> {
-        match self.check_interval_minutes {
-            None | Some(0) => None,
-            Some(minutes) => {
-                let minutes = u64::from(minutes.max(MIN_CHECK_INTERVAL_MINUTES));
-                Some(Duration::from_secs(minutes * 60))
-            }
-        }
+    /// Always an answer: what the publisher asked for, raised to
+    /// [`MIN_CHECK_INTERVAL_MINUTES`] if it was shorter than that, or
+    /// [`DEFAULT_CHECK_INTERVAL_MINUTES`] when they said nothing.
+    ///
+    /// Whether anything checks while the application runs is a separate
+    /// question, answered by [`Self::check_while_running`]. This says only how
+    /// often, and it governs the check made at startup too.
+    pub fn check_interval(&self) -> Duration {
+        let minutes = self.check_interval_minutes.unwrap_or(DEFAULT_CHECK_INTERVAL_MINUTES);
+        Duration::from_secs(u64::from(minutes.max(MIN_CHECK_INTERVAL_MINUTES)) * 60)
     }
 
     /// The severity a prompt should actually use.
@@ -357,11 +374,18 @@ pub const MAX_PROMPT_TITLE_CHARS: usize = 120;
 /// Longest prompt message accepted, in characters.
 pub const MAX_PROMPT_MESSAGE_CHARS: usize = 2000;
 
-/// Shortest periodic check interval an installation will honour, in minutes.
+/// Shortest check interval an installation will honour, in minutes.
 ///
 /// Fifteen minutes is far below any interval a real publisher wants and far
 /// above the rate at which asking a server is free.
 pub const MIN_CHECK_INTERVAL_MINUTES: u32 = 15;
+
+/// How often an installation asks its update server when nobody said.
+///
+/// Four hours is frequent enough that a security fix reaches an active user
+/// the same day, and rare enough that a busy user's machine is not a burden on
+/// the publisher's server.
+pub const DEFAULT_CHECK_INTERVAL_MINUTES: u32 = 4 * 60;
 
 fn default_channel() -> String {
     "stable".to_string()
@@ -963,43 +987,37 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_check_interval_means_startup_checks_only() {
-        assert_eq!(UpdateSpec::default().check_interval(), None);
+    fn checking_while_running_is_off_until_a_publisher_asks_for_it() {
+        // The default behaviour, and what every installation did before the
+        // field existed: one check when the application starts.
+        assert!(!UpdateSpec::default().check_while_running);
     }
 
     #[test]
-    fn a_manifest_without_a_check_interval_still_parses() {
-        // Every package published before the field existed looks like this,
-        // and each one must keep working against a client that knows about it.
-        let mut manifest = serde_json::to_value(sample()).unwrap();
-        assert!(manifest["update"].get("checkIntervalMinutes").is_none());
-        manifest["update"]["url"] = serde_json::json!("https://updates.example.com");
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        assert_eq!(Manifest::from_slice(&bytes).unwrap().update.check_interval(), None);
+    fn an_absent_interval_means_the_default_rather_than_no_checking() {
+        // The interval says how often, never whether. A release that leaves
+        // the number out still checks -- at the default rate -- because the
+        // switch above is what turns checking on and off.
+        assert_eq!(
+            UpdateSpec::default().check_interval(),
+            Duration::from_secs(u64::from(DEFAULT_CHECK_INTERVAL_MINUTES) * 60)
+        );
     }
 
     #[test]
-    fn a_declared_check_interval_survives_the_signed_bytes() {
-        let mut manifest = sample();
-        manifest.update.check_interval_minutes = Some(180);
-        let bytes = manifest.to_signed_bytes().unwrap();
-        let back = Manifest::from_slice(&bytes).unwrap();
-        assert_eq!(back.update.check_interval(), Some(Duration::from_secs(3 * 60 * 60)));
-        assert_eq!(back, manifest);
+    fn forgetting_the_interval_cannot_turn_the_feature_off() {
+        // The failure this split exists to prevent: an interval that was also
+        // the switch meant a release which left the number out stopped its
+        // installations checking at all, and said nothing about it.
+        let asked = UpdateSpec { check_while_running: true, ..UpdateSpec::default() };
+        assert!(asked.check_while_running, "the switch is not the interval's to flip");
+        assert_eq!(asked.check_interval(), UpdateSpec::default().check_interval());
     }
 
     #[test]
-    fn the_check_interval_is_named_in_camel_case_like_every_other_field() {
-        let mut manifest = sample();
-        manifest.update.check_interval_minutes = Some(60);
-        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
-        assert!(json.contains("\"checkIntervalMinutes\": 60"), "{json}");
-    }
-
-    #[test]
-    fn zero_minutes_turns_periodic_checking_off_rather_than_asking_constantly() {
-        let spec = UpdateSpec { check_interval_minutes: Some(0), ..UpdateSpec::default() };
-        assert_eq!(spec.check_interval(), None);
+    fn a_declared_interval_is_what_is_asked_for() {
+        let spec = UpdateSpec { check_interval_minutes: Some(180), ..UpdateSpec::default() };
+        assert_eq!(spec.check_interval(), Duration::from_secs(3 * 60 * 60));
     }
 
     #[test]
@@ -1011,15 +1029,72 @@ mod tests {
         manifest.validate().unwrap();
         assert_eq!(
             manifest.update.check_interval(),
-            Some(Duration::from_secs(u64::from(MIN_CHECK_INTERVAL_MINUTES) * 60))
+            Duration::from_secs(u64::from(MIN_CHECK_INTERVAL_MINUTES) * 60)
+        );
+    }
+
+    #[test]
+    fn zero_is_the_floor_too_rather_than_a_hidden_off_switch() {
+        // It used to mean "never check", which made one field answer two
+        // questions. The switch answers one of them now, so this is just a
+        // number that is too small.
+        let spec = UpdateSpec { check_interval_minutes: Some(0), ..UpdateSpec::default() };
+        assert_eq!(
+            spec.check_interval(),
+            Duration::from_secs(u64::from(MIN_CHECK_INTERVAL_MINUTES) * 60)
         );
     }
 
     #[test]
     fn a_very_large_interval_does_not_overflow_the_duration() {
         let spec = UpdateSpec { check_interval_minutes: Some(u32::MAX), ..UpdateSpec::default() };
-        let interval = spec.check_interval().expect("an interval");
-        assert_eq!(interval, Duration::from_secs(u64::from(u32::MAX) * 60));
+        assert_eq!(spec.check_interval(), Duration::from_secs(u64::from(u32::MAX) * 60));
+    }
+
+    #[test]
+    fn a_manifest_without_either_field_still_parses() {
+        // Every package published before they existed looks like this, and
+        // each one must keep working against a client that knows about them.
+        let mut manifest = serde_json::to_value(sample()).unwrap();
+        assert!(manifest["update"].get("checkWhileRunning").is_none());
+        assert!(manifest["update"].get("checkIntervalMinutes").is_none());
+        manifest["update"]["url"] = serde_json::json!("https://updates.example.com");
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+
+        let back = Manifest::from_slice(&bytes).unwrap();
+        assert!(!back.update.check_while_running);
+        assert_eq!(back.update.check_interval(), UpdateSpec::default().check_interval());
+    }
+
+    #[test]
+    fn both_fields_survive_the_signed_bytes() {
+        let mut manifest = sample();
+        manifest.update.check_while_running = true;
+        manifest.update.check_interval_minutes = Some(180);
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let back = Manifest::from_slice(&bytes).unwrap();
+        assert_eq!(back, manifest);
+        assert!(back.update.check_while_running);
+        assert_eq!(back.update.check_interval(), Duration::from_secs(3 * 60 * 60));
+    }
+
+    #[test]
+    fn the_fields_are_named_in_camel_case_like_every_other_one() {
+        let mut manifest = sample();
+        manifest.update.check_while_running = true;
+        manifest.update.check_interval_minutes = Some(60);
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(json.contains("\"checkWhileRunning\": true"), "{json}");
+        assert!(json.contains("\"checkIntervalMinutes\": 60"), "{json}");
+    }
+
+    #[test]
+    fn a_release_that_asks_for_nothing_writes_neither_field() {
+        // Keeps a manifest from a publisher who never heard of either one
+        // byte-identical to what it was.
+        let json = String::from_utf8(sample().to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("checkWhileRunning"), "{json}");
+        assert!(!json.contains("checkIntervalMinutes"), "{json}");
     }
 
     #[test]

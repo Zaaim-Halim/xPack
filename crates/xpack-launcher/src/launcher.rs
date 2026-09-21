@@ -288,19 +288,18 @@ impl Launcher {
     /// in a launcher about to return would be killed before its first tick,
     /// and a prompt would have nothing able to restart anything.
     ///
-    /// The interval comes from the manifest of the version that just started,
-    /// which is the one whose publisher is answering for how often their
-    /// server should be asked.
+    /// Both answers come from the manifest of the version that just started —
+    /// whether to look at all, and how often. That release is the one whose
+    /// publisher is answering for how much of their server's time this
+    /// installation takes.
     fn watch_for_updates(&self, manifest: &Manifest, pid: u32, wait: bool) -> Watch {
         let watch = Watch {
             restart_requested: Arc::new(AtomicBool::new(false)),
             still_running: Arc::new(AtomicBool::new(true)),
         };
 
-        if wait
-            && let Some(interval) = manifest.update.check_interval()
-            && manifest.update.url.is_some()
-        {
+        if wait && manifest.update.check_while_running && manifest.update.url.is_some() {
+            let interval = manifest.update.check_interval();
             // The handle is what lets a prompt offer a restart at all: this
             // process knows the application's pid and is the thing that will
             // start it again, so it is the only one in a position to promise
@@ -797,9 +796,21 @@ fn pending_announcement(paths: &InstallPaths) -> Option<Announcement> {
 
     let notifier = paths.notifier_file_named(&state.binary_names());
     if !notifier.is_file() {
-        tracing::debug!(
+        // Said plainly, and at a level somebody reads, because this is the one
+        // update setting a release cannot turn on for itself. Everything else
+        // about updating travels in the manifest and takes effect as soon as
+        // that release is installed; a dialog is a binary, and the updater
+        // runs from inside the installation with no copy of one to place.
+        //
+        // So a publisher who adds prompting after an installation was made
+        // gets silence, and would go on getting it with nothing to read. This
+        // is the line that tells them a new installer is what it takes.
+        tracing::warn!(
+            version = %version,
             path = %notifier.display(),
-            "a version asks to be announced but no notifier is installed"
+            "this version asks to announce itself, but the installation was set up without a \
+             dialog; only an installer can add one, so the update will be applied quietly at \
+             the next start"
         );
         return None;
     }

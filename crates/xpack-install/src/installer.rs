@@ -51,11 +51,11 @@ pub struct InstallOptions {
     ///
     /// Supplied like every other binary, and placed only when the package
     /// being installed asks for a prompt: it declares `update.notify`, it
-    /// declares a periodic check for a prompt to appear from, and it targets a
-    /// platform with a dialog implemented. An installation that updates
-    /// silently carries no dialog code at all, which is the point — the only
-    /// graphical binary xPack has should exist only where somebody asked for a
-    /// graphical thing to happen.
+    /// checks while it runs so that a prompt has a moment to appear from, and
+    /// it targets a platform with a dialog implemented. An installation that
+    /// updates silently carries no dialog code at all, which is the point —
+    /// the only graphical binary xPack has should exist only where somebody
+    /// asked for a graphical thing to happen.
     pub notifier: Option<PathBuf>,
     /// Windowed launcher to place beside the console one, if any.
     ///
@@ -746,16 +746,26 @@ impl<'lock> Installer<'lock> {
     ///
     /// * the publisher asked for prompting, because a prompt interrupts a user
     ///   and nobody else may decide to do that on their behalf;
-    /// * the package declares a periodic check, because a prompt only ever
-    ///   appears from one — a check at startup stages silently and says
-    ///   nothing, by design;
+    /// * the package checks while it runs, because a prompt only ever appears
+    ///   from one of those checks — a check at startup stages silently and
+    ///   says nothing, by design;
     /// * the package targets a platform with a dialog implemented, which is
     ///   Windows and macOS. Read from the manifest rather than from the host,
     ///   so a package built for one platform and inspected on another gets the
     ///   same answer everywhere.
+    ///
+    /// # This is the one update setting a later release cannot change
+    ///
+    /// Everything else about updating travels in each release's manifest and
+    /// takes effect the moment that release is installed. A dialog cannot: it
+    /// is a binary, and the background updater runs from inside the
+    /// installation with no copy of one to place. So whether an installation
+    /// is *able* to say anything is settled here, when it is first installed,
+    /// and a publisher who turns prompting on later needs a new installer for
+    /// it to mean anything.
     fn notifier_is_wanted(manifest: &xpack_core::Manifest) -> bool {
         manifest.update.notify
-            && manifest.update.check_interval().is_some()
+            && manifest.update.check_while_running
             && matches!(manifest.platform.os, xpack_core::Os::Windows | xpack_core::Os::Macos)
     }
 
@@ -1181,10 +1191,10 @@ mod tests {
         }
     }
 
-    /// The configuration that wants a dialog: prompting on, and a periodic
-    /// check for one to appear from.
+    /// The configuration that wants a dialog: prompting on, and the checking
+    /// while running that a prompt can appear from.
     fn wants_prompting() -> UpdateSpec {
-        UpdateSpec { notify: true, check_interval_minutes: Some(180), ..UpdateSpec::default() }
+        UpdateSpec { notify: true, check_while_running: true, ..UpdateSpec::default() }
     }
 
     #[test]
@@ -1203,11 +1213,24 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_a_prompt_without_periodic_checks_places_nothing() {
-        // A prompt only ever appears from a periodic check. A startup check
-        // stages in silence by design, so the binary would never run.
-        let no_interval = UpdateSpec { check_interval_minutes: None, ..wants_prompting() };
-        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, no_interval)));
+    fn asking_for_a_prompt_without_checking_while_running_places_nothing() {
+        // A prompt only ever appears from a check made while the application
+        // runs. A startup check stages in silence by design, so the binary
+        // would sit there and never run.
+        let startup_only = UpdateSpec { check_while_running: false, ..wants_prompting() };
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, startup_only)));
+    }
+
+    #[test]
+    fn an_interval_alone_does_not_ask_for_a_dialog() {
+        // The interval says how often to ask a server, which has nothing to do
+        // with whether anybody is told the answer.
+        let quiet = UpdateSpec {
+            check_while_running: true,
+            check_interval_minutes: Some(30),
+            ..UpdateSpec::default()
+        };
+        assert!(!Installer::notifier_is_wanted(&manifest(Os::Windows, quiet)));
     }
 
     #[test]

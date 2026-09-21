@@ -329,7 +329,7 @@ fn an_explicit_interval_overrides_the_manifest() {
 }
 
 #[test]
-fn a_manifest_declaring_no_interval_keeps_the_default() {
+fn a_manifest_declaring_no_interval_asks_at_the_default_rate() {
     let world = World::new();
     let fixture = serving_an_update(&world);
     declare_check_interval(&world, None);
@@ -354,4 +354,46 @@ fn a_manifest_interval_below_the_floor_does_not_mean_a_check_every_start() {
 
     assert_eq!(outcome, Outcome::NotDue);
     assert_eq!(fixture.requests(), 0);
+}
+
+/// Declares whether the installed version checks while it runs.
+fn declare_checking_while_running(world: &World, checks: bool) {
+    let manifest_file = world.paths.version_manifest_file(&Version::parse("1.0.0").unwrap());
+    let mut manifest = Manifest::from_slice(&std::fs::read(&manifest_file).unwrap()).unwrap();
+    manifest.update.check_while_running = checks;
+    std::fs::write(&manifest_file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn the_interval_governs_a_startup_check_too() {
+    // The interval says how often the server may be asked, and a check made
+    // when the application starts is asking. An installation that never
+    // checks while running still honours it.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_checking_while_running(&world, false);
+    declare_check_interval(&world, Some(24 * 60));
+    record_check_at(&world, unix_seconds() - 5 * 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::NotDue, "a startup check ignored the declared interval");
+    assert_eq!(fixture.requests(), 0);
+}
+
+#[test]
+fn forgetting_the_interval_does_not_stop_an_installation_checking() {
+    // The failure the switch exists to prevent. When the interval was also
+    // the switch, a release that left the number out stopped its
+    // installations checking at all, silently. Now it checks at the default
+    // rate, and only the switch can turn it off.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    declare_checking_while_running(&world, true);
+    declare_check_interval(&world, None);
+    record_check_at(&world, unix_seconds() - 5 * 60 * 60);
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::Staged(Version::parse("1.1.0").unwrap()));
 }

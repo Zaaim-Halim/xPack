@@ -41,10 +41,14 @@
 //! # It starts the updater
 //!
 //! The launcher spawns the background updater, detached, on every start, and
-//! never waits for it. That is the whole update trigger: no scheduler to
-//! register at install time, no background agent to notarise, no privileges.
-//! A user who never opens the application never updates, which for a desktop
-//! application is the right trade.
+//! never waits for it. Where the running version asks to be checked while it
+//! runs, a thread here keeps doing so for as long as the application is open.
+//!
+//! Between them that is the whole update trigger: no scheduler to register at
+//! install time, no background agent to notarise, no privileges. A user who
+//! never opens the application never updates, which for a desktop application
+//! is the right trade — and an application left open for days is checked
+//! anyway, which is what the thread is for.
 //!
 //! A version the updater staged is activated *here*, not there, because
 //! activation begins a probation and a probation needs something watching the

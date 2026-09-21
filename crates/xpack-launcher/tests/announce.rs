@@ -68,6 +68,7 @@ fn build(dir: &Path, key: &KeyPair, version: &str, update: UpdateSpec) -> PathBu
 fn announcing() -> UpdateSpec {
     UpdateSpec {
         url: Some("https://updates.example.com/demo".into()),
+        check_while_running: true,
         check_interval_minutes: Some(180),
         notify: true,
         severity: UpdateSeverity::Recommended,

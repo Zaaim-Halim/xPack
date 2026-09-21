@@ -30,9 +30,11 @@
 //! has passed.
 //!
 //! The interval is the publisher's to choose, from the signed manifest, and
-//! four hours only when they said nothing. The same value is what the launcher
-//! paces its periodic checks by, so the two cannot disagree about when a check
-//! is due.
+//! four hours only when they said nothing. It governs every check, including
+//! this one: an installation that never looks while it runs still asks its
+//! server no more often than the interval allows. The launcher paces its own
+//! checks by the same value, so the two cannot disagree about when a check is
+//! due.
 //!
 //! # It is quiet
 //!
@@ -49,14 +51,15 @@ use xpack_update::{UpdateOptions, UpdateTransport, Updater};
 
 /// How long to wait between asking the server, when nothing says otherwise.
 ///
-/// Four hours is frequent enough that a security fix reaches an active user
-/// the same day, and rare enough that a busy user's machine is not a burden on
-/// the publisher's server.
+/// The same number the manifest falls back to, named here as well because this
+/// is what applies when there is no manifest to read at all — an installation
+/// with no active version, or one whose manifest cannot be read.
 ///
 /// A publisher who wants a different rate says so in the signed manifest, and
-/// a caller who wants one for a single run passes it to [`BackgroundUpdater::every`].
-/// This is only what applies when neither did.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+/// a caller who wants one for a single run passes it to
+/// [`BackgroundUpdater::every`].
+pub const DEFAULT_INTERVAL: Duration =
+    Duration::from_secs(xpack_core::manifest::DEFAULT_CHECK_INTERVAL_MINUTES as u64 * 60);
 
 /// What a run of the updater did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,10 +225,12 @@ impl<'a> BackgroundUpdater<'a> {
     /// minutes, against a gate still holding out for four hours, would spawn
     /// this binary every thirty minutes to be told each time that nothing is
     /// due yet.
+    ///
+    /// It applies to this check whether or not the installation also checks
+    /// while it runs: the interval says how often the server may be asked, and
+    /// a startup check is asking.
     fn interval_for(&self, spec: Option<&UpdateSpec>) -> Duration {
-        self.interval
-            .or_else(|| spec.and_then(UpdateSpec::check_interval))
-            .unwrap_or(DEFAULT_INTERVAL)
+        self.interval.or_else(|| spec.map(UpdateSpec::check_interval)).unwrap_or(DEFAULT_INTERVAL)
     }
 
     fn application_id(&self) -> Result<String> {
