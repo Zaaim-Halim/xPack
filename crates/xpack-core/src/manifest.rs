@@ -17,6 +17,7 @@
 //! Filenames and update-index entries are hints. They are never trusted.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -214,13 +215,153 @@ pub struct UpdateSpec {
     /// session on the old version.
     #[serde(default)]
     pub mandatory: bool,
+
+    /// Shortest time between unattended checks while the application runs.
+    ///
+    /// Absent means the application is checked only when it starts, which is
+    /// what every installation did before this field existed and what most
+    /// desktop applications want: one check per start, and nothing running in
+    /// between to make another.
+    ///
+    /// A value turns on periodic checking for as long as the application is
+    /// open. It is a floor on how often the server may be asked, never a
+    /// promise that it will be — an application nobody opens is never checked,
+    /// whatever this says, because nothing is running to do the checking.
+    ///
+    /// Zero means periodic checking is off, exactly as an absent field does. A
+    /// publisher who writes zero is saying so deliberately rather than leaving
+    /// the line out, and reading it as "as often as possible" would turn a
+    /// plausible typo into a flood of requests aimed at their own server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_interval_minutes: Option<u32>,
+
+    /// How urgent this release is, for the prompt only.
+    ///
+    /// See [`UpdateSpec::effective_severity`], which is what a prompt should
+    /// ask: a mandatory release is never shown as optional, whatever this says.
+    #[serde(default, skip_serializing_if = "is_default_severity")]
+    pub severity: UpdateSeverity,
+
+    /// Whether a background check that stages this version may tell the user.
+    ///
+    /// Off by default, because a prompt is an interruption and a publisher who
+    /// has not asked for one has not agreed to interrupt their users. With it
+    /// off, an update is staged in silence and applied at the next start,
+    /// which is what every installation did before prompting existed.
+    #[serde(default)]
+    pub notify: bool,
+
+    /// What the prompt says. Absent leaves the wording to whatever shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<PromptSpec>,
+}
+
+/// Whether the severity is the default, for `skip_serializing_if`.
+///
+/// Takes a reference because serde requires that signature, not because the
+/// value is large enough to warrant one.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_severity(severity: &UpdateSeverity) -> bool {
+    *severity == UpdateSeverity::default()
 }
 
 impl Default for UpdateSpec {
     fn default() -> Self {
-        Self { channel: default_channel(), url: None, mandatory: false }
+        Self {
+            channel: default_channel(),
+            url: None,
+            mandatory: false,
+            check_interval_minutes: None,
+            severity: UpdateSeverity::default(),
+            notify: false,
+            prompt: None,
+        }
     }
 }
+
+impl UpdateSpec {
+    /// How often to check while the application runs, if it asked for that.
+    ///
+    /// `None` means check only at startup. An interval below
+    /// [`MIN_CHECK_INTERVAL_MINUTES`] is raised to it rather than refused: the
+    /// value costs a user bandwidth and a publisher server load, and a release
+    /// cannot appear fast enough for a shorter one to find anything. Refusing
+    /// instead would mean a whole package rejected over a number that has an
+    /// obvious, harmless reading.
+    pub fn check_interval(&self) -> Option<Duration> {
+        match self.check_interval_minutes {
+            None | Some(0) => None,
+            Some(minutes) => {
+                let minutes = u64::from(minutes.max(MIN_CHECK_INTERVAL_MINUTES));
+                Some(Duration::from_secs(minutes * 60))
+            }
+        }
+    }
+
+    /// The severity a prompt should actually use.
+    ///
+    /// A mandatory release is critical whether or not it says so. Nothing
+    /// older may start once it is installed, so offering a user "later" would
+    /// be offering them a choice that has already been taken away — and a
+    /// publisher who sets one flag and forgets the other should not produce a
+    /// dialog that contradicts what the launcher is about to do.
+    pub fn effective_severity(&self) -> UpdateSeverity {
+        if self.mandatory { UpdateSeverity::Critical } else { self.severity }
+    }
+}
+
+/// How urgent a release is, and therefore what a user may do about it.
+///
+/// Display only: it decides what an update prompt offers, never what is
+/// installed or verified. Enforcement is [`UpdateSpec::mandatory`], which is a
+/// separate flag because refusing to start an old version and interrupting a
+/// user are different decisions with different costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateSeverity {
+    /// Take it whenever. The default, and what an unset field means.
+    ///
+    /// Lowest on purpose: a publisher who said nothing has not asked to
+    /// interrupt anyone, and guessing otherwise on their behalf is how an
+    /// updater becomes the thing users disable.
+    #[default]
+    Optional,
+    /// Worth taking soon.
+    Recommended,
+    /// Should be taken now; a prompt offers no way to decline.
+    Critical,
+}
+
+/// What an update prompt says, written by the publisher.
+///
+/// Both fields are shown to a user, so both are bounded and screened at
+/// validation. A manifest is signed, which makes this the publisher's own
+/// text — but a signature proves authorship, not that the string is a sane
+/// thing to put in a dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptSpec {
+    /// One line, shown as the dialog's title.
+    pub title: String,
+    /// The body. Line breaks are allowed; nothing else that is not printable.
+    pub message: String,
+}
+
+/// Longest prompt title accepted, in characters.
+///
+/// A title is one line in a dialog the operating system sizes itself. Longer
+/// than this is either a mistake or a message in the wrong field, and both
+/// look like a bug to the user staring at a truncated sentence.
+pub const MAX_PROMPT_TITLE_CHARS: usize = 120;
+
+/// Longest prompt message accepted, in characters.
+pub const MAX_PROMPT_MESSAGE_CHARS: usize = 2000;
+
+/// Shortest periodic check interval an installation will honour, in minutes.
+///
+/// Fifteen minutes is far below any interval a real publisher wants and far
+/// above the rate at which asking a server is free.
+pub const MIN_CHECK_INTERVAL_MINUTES: u32 = 15;
 
 fn default_channel() -> String {
     "stable".to_string()
@@ -404,6 +545,9 @@ impl Manifest {
         if let Some(url) = &self.update.url {
             validate_update_url(url)?;
         }
+        if let Some(prompt) = &self.update.prompt {
+            validate_prompt(prompt)?;
+        }
 
         if let Some(icon) = &self.desktop.icon {
             validate_relative_path("desktop.icon", icon)?;
@@ -576,6 +720,60 @@ fn normalise_separators(path: &str) -> String {
 /// Plain HTTP is permitted only for `localhost`, which keeps the integration
 /// test suite able to run a throwaway server without weakening the rule that
 /// real deployments ship over TLS.
+/// Rejects prompt text that cannot be shown to a user as written.
+///
+/// Every rule here is about the dialog, not about trust. The manifest is
+/// signed, so this text is the publisher's — but a control character in the
+/// middle of a sentence renders as a box or vanishes, and an empty title
+/// produces a dialog labelled with nothing. Both are caught at packaging time,
+/// where the publisher can still fix them, rather than on a user's screen.
+///
+/// Line breaks are allowed in the message because a dialog can show
+/// paragraphs, and refused in the title because it cannot.
+fn validate_prompt(prompt: &PromptSpec) -> Result<()> {
+    if prompt.title.trim().is_empty() {
+        return Err(Error::invalid("manifest", "update.prompt.title must not be empty"));
+    }
+    if prompt.message.trim().is_empty() {
+        return Err(Error::invalid("manifest", "update.prompt.message must not be empty"));
+    }
+
+    let title_length = prompt.title.chars().count();
+    if title_length > MAX_PROMPT_TITLE_CHARS {
+        return Err(Error::invalid(
+            "manifest",
+            format!(
+                "update.prompt.title is {title_length} characters, limit is \
+                 {MAX_PROMPT_TITLE_CHARS}"
+            ),
+        ));
+    }
+    let message_length = prompt.message.chars().count();
+    if message_length > MAX_PROMPT_MESSAGE_CHARS {
+        return Err(Error::invalid(
+            "manifest",
+            format!(
+                "update.prompt.message is {message_length} characters, limit is \
+                 {MAX_PROMPT_MESSAGE_CHARS}"
+            ),
+        ));
+    }
+
+    if prompt.title.chars().any(char::is_control) {
+        return Err(Error::invalid(
+            "manifest",
+            "update.prompt.title contains a control character; a dialog title is one line",
+        ));
+    }
+    if prompt.message.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(Error::invalid(
+            "manifest",
+            "update.prompt.message contains a control character other than a line break",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_update_url(url: &str) -> Result<()> {
     let is_localhost = url.starts_with("http://127.0.0.1")
         || url.starts_with("http://localhost")
@@ -646,6 +844,182 @@ mod tests {
             },
             created_at: None,
         }
+    }
+
+    #[test]
+    fn a_publisher_who_says_nothing_gets_the_least_urgent_severity() {
+        // Silence is not a request to interrupt anyone.
+        assert_eq!(UpdateSpec::default().severity, UpdateSeverity::Optional);
+        assert_eq!(UpdateSpec::default().effective_severity(), UpdateSeverity::Optional);
+        assert!(!UpdateSpec::default().notify);
+        assert_eq!(UpdateSpec::default().prompt, None);
+    }
+
+    #[test]
+    fn a_mandatory_release_is_critical_even_when_it_forgot_to_say_so() {
+        // Offering "later" for a version the launcher will require anyway is
+        // offering a choice that no longer exists.
+        let spec = UpdateSpec {
+            mandatory: true,
+            severity: UpdateSeverity::Optional,
+            ..UpdateSpec::default()
+        };
+        assert_eq!(spec.effective_severity(), UpdateSeverity::Critical);
+    }
+
+    #[test]
+    fn severity_and_prompt_survive_the_signed_bytes() {
+        let mut manifest = sample();
+        manifest.update.severity = UpdateSeverity::Critical;
+        manifest.update.notify = true;
+        manifest.update.prompt = Some(PromptSpec {
+            title: "Security update".into(),
+            message: "This release fixes a problem.\n\nRestart when you can.".into(),
+        });
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let back = Manifest::from_slice(&bytes).unwrap();
+        assert_eq!(back, manifest);
+        assert_eq!(back.update.effective_severity(), UpdateSeverity::Critical);
+    }
+
+    #[test]
+    fn severity_is_spelled_in_lowercase_in_the_document() {
+        let mut manifest = sample();
+        manifest.update.severity = UpdateSeverity::Recommended;
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(json.contains("\"severity\": \"recommended\""), "{json}");
+    }
+
+    #[test]
+    fn a_default_severity_is_left_out_of_the_document() {
+        // Keeps every manifest published before prompting existed byte-identical.
+        let json = String::from_utf8(sample().to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("severity"), "{json}");
+        assert!(!json.contains("prompt"), "{json}");
+    }
+
+    #[test]
+    fn an_empty_prompt_title_is_refused_at_packaging_time() {
+        let mut manifest = sample();
+        manifest.update.prompt =
+            Some(PromptSpec { title: "   ".into(), message: "Something".into() });
+        let err = manifest.validate().unwrap_err();
+        assert!(format!("{err}").contains("title"), "got {err}");
+    }
+
+    #[test]
+    fn an_over_long_prompt_title_is_refused() {
+        let mut manifest = sample();
+        manifest.update.prompt = Some(PromptSpec {
+            title: "x".repeat(MAX_PROMPT_TITLE_CHARS + 1),
+            message: "Something".into(),
+        });
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn an_over_long_prompt_message_is_refused() {
+        let mut manifest = sample();
+        manifest.update.prompt = Some(PromptSpec {
+            title: "Update".into(),
+            message: "x".repeat(MAX_PROMPT_MESSAGE_CHARS + 1),
+        });
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn a_control_character_never_reaches_a_dialog() {
+        // It renders as a box, or as nothing, and either way the user reads a
+        // sentence with a hole in it.
+        let mut manifest = sample();
+        manifest.update.prompt =
+            Some(PromptSpec { title: "Update\u{7}now".into(), message: "Something".into() });
+        assert!(manifest.validate().is_err());
+
+        manifest.update.prompt =
+            Some(PromptSpec { title: "Update".into(), message: "Before\u{0}after".into() });
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn a_line_break_is_allowed_in_the_message_but_not_the_title() {
+        let mut manifest = sample();
+        manifest.update.prompt = Some(PromptSpec {
+            title: "Update".into(),
+            message: "First paragraph.\n\nSecond paragraph.".into(),
+        });
+        manifest.validate().unwrap();
+
+        manifest.update.prompt =
+            Some(PromptSpec { title: "Two\nlines".into(), message: "Something".into() });
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn severity_orders_from_least_to_most_urgent() {
+        // The prompt picks its buttons by comparing these.
+        assert!(UpdateSeverity::Optional < UpdateSeverity::Recommended);
+        assert!(UpdateSeverity::Recommended < UpdateSeverity::Critical);
+    }
+
+    #[test]
+    fn an_absent_check_interval_means_startup_checks_only() {
+        assert_eq!(UpdateSpec::default().check_interval(), None);
+    }
+
+    #[test]
+    fn a_manifest_without_a_check_interval_still_parses() {
+        // Every package published before the field existed looks like this,
+        // and each one must keep working against a client that knows about it.
+        let mut manifest = serde_json::to_value(sample()).unwrap();
+        assert!(manifest["update"].get("checkIntervalMinutes").is_none());
+        manifest["update"]["url"] = serde_json::json!("https://updates.example.com");
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(Manifest::from_slice(&bytes).unwrap().update.check_interval(), None);
+    }
+
+    #[test]
+    fn a_declared_check_interval_survives_the_signed_bytes() {
+        let mut manifest = sample();
+        manifest.update.check_interval_minutes = Some(180);
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let back = Manifest::from_slice(&bytes).unwrap();
+        assert_eq!(back.update.check_interval(), Some(Duration::from_secs(3 * 60 * 60)));
+        assert_eq!(back, manifest);
+    }
+
+    #[test]
+    fn the_check_interval_is_named_in_camel_case_like_every_other_field() {
+        let mut manifest = sample();
+        manifest.update.check_interval_minutes = Some(60);
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(json.contains("\"checkIntervalMinutes\": 60"), "{json}");
+    }
+
+    #[test]
+    fn zero_minutes_turns_periodic_checking_off_rather_than_asking_constantly() {
+        let spec = UpdateSpec { check_interval_minutes: Some(0), ..UpdateSpec::default() };
+        assert_eq!(spec.check_interval(), None);
+    }
+
+    #[test]
+    fn an_interval_below_the_floor_is_raised_to_it_rather_than_refused() {
+        let mut manifest = sample();
+        manifest.update.check_interval_minutes = Some(1);
+        // The package is still valid: a number with an obvious harmless
+        // reading must not cost a user their update.
+        manifest.validate().unwrap();
+        assert_eq!(
+            manifest.update.check_interval(),
+            Some(Duration::from_secs(u64::from(MIN_CHECK_INTERVAL_MINUTES) * 60))
+        );
+    }
+
+    #[test]
+    fn a_very_large_interval_does_not_overflow_the_duration() {
+        let spec = UpdateSpec { check_interval_minutes: Some(u32::MAX), ..UpdateSpec::default() };
+        let interval = spec.check_interval().expect("an interval");
+        assert_eq!(interval, Duration::from_secs(u64::from(u32::MAX) * 60));
     }
 
     #[test]

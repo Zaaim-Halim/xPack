@@ -21,7 +21,7 @@ pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
     Application, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY, Manifest,
-    PayloadFile, PayloadSpec, SIGNATURE_ENTRY, UpdateSpec,
+    PayloadFile, PayloadSpec, PromptSpec, SIGNATURE_ENTRY, UpdateSeverity, UpdateSpec,
 };
 pub use naming::{BinaryNames, safe_file_name};
 pub use paths::{

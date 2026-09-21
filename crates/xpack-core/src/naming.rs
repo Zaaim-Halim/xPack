@@ -176,6 +176,17 @@ impl BinaryNames {
         }
     }
 
+    /// The dialog that announces a waiting update.
+    ///
+    /// Present only in installations whose publisher asked for a prompt, so
+    /// unlike the others this name often names nothing at all.
+    pub fn notifier(&self) -> String {
+        match self {
+            Self::Xpack => "xpack-notify".to_string(),
+            Self::Application { base } => format!("{base} Update Notice"),
+        }
+    }
+
     /// The uninstaller.
     ///
     /// Named as an instruction rather than a noun, because it is the one of
@@ -192,6 +203,32 @@ impl BinaryNames {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notifier_is_named_after_the_application_too() {
+        let names = BinaryNames::from_display_name("My App");
+        assert_eq!(names.notifier(), "My App Update Notice");
+        assert_eq!(BinaryNames::Xpack.notifier(), "xpack-notify");
+    }
+
+    #[test]
+    fn no_two_binaries_share_a_name_where_both_are_installed() {
+        // They all live in the installation root, so a collision would have
+        // one of them silently overwrite another at install time. The two
+        // launcher builds are asked for the case where both exist, which is
+        // the only case where their names have to differ.
+        for names in [BinaryNames::Xpack, BinaryNames::from_display_name("My App")] {
+            let all = [
+                names.launcher_beside_windowed(true),
+                names.windowed_launcher(),
+                names.updater(),
+                names.uninstaller(),
+                names.notifier(),
+            ];
+            let unique: std::collections::BTreeSet<_> = all.iter().collect();
+            assert_eq!(unique.len(), all.len(), "{all:?}");
+        }
+    }
 
     #[test]
     fn an_ordinary_name_survives_intact() {

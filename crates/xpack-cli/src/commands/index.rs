@@ -494,7 +494,7 @@ mod tests {
             update: xpack_core::UpdateSpec {
                 channel: "stable".into(),
                 url: url.map(str::to_string),
-                mandatory: false,
+                ..xpack_core::UpdateSpec::default()
             },
             health: xpack_core::HealthSpec::default(),
             desktop: xpack_core::DesktopSpec::default(),

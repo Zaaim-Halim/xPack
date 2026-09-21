@@ -260,6 +260,21 @@ pub struct InstallState {
     /// desktop entry already handles — and leaves the files alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_base_name: Option<String>,
+    /// Version the user has already been told is waiting, if any.
+    ///
+    /// A staged version sits on disk until the application is next started,
+    /// which may be days. Without a record of having announced it, every
+    /// periodic check that found nothing new would still find a staged version
+    /// and announce it again — a dialog every few hours about an update the
+    /// user has already seen, which is how a person learns to dismiss whatever
+    /// the updater says without reading it.
+    ///
+    /// Holding the version rather than a flag means a newer staged version is
+    /// announced even though the previous one was: the value no longer matches
+    /// and the comparison says so, with nothing to reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_update: Option<Version>,
+
     /// Stable random identifier deciding this installation's staged-rollout
     /// cohort.
     ///
@@ -291,6 +306,7 @@ impl InstallState {
             required_version: None,
             last_update_check: None,
             binary_base_name: None,
+            announced_update: None,
             rollout_id: None,
         }
     }
@@ -349,6 +365,15 @@ impl InstallState {
             Some(last) if last > now => true,
             Some(last) => now.saturating_sub(last) >= interval_seconds,
         }
+    }
+
+    /// Whether `version` still needs announcing to the user.
+    ///
+    /// False once it has been announced, and true again for anything newer,
+    /// because the comparison is against the version itself rather than a flag
+    /// somebody has to remember to clear.
+    pub fn update_needs_announcing(&self, version: &Version) -> bool {
+        self.announced_update.as_ref() != Some(version)
     }
 
     /// Reads state from disk, recovering from the backup if needed.
@@ -801,6 +826,33 @@ mod update_check_tests {
     }
 
     const HOUR: u64 = 3600;
+
+    #[test]
+    fn a_version_is_announced_until_it_has_been() {
+        let mut state = state();
+        let version = Version::parse("1.1.0").unwrap();
+        assert!(state.update_needs_announcing(&version), "a new version was not announced");
+        state.announced_update = Some(version.clone());
+        assert!(!state.update_needs_announcing(&version), "the same version was announced twice");
+    }
+
+    #[test]
+    fn a_newer_version_is_announced_even_after_an_older_one_was() {
+        // Holding the version rather than a flag is what makes this work with
+        // nothing to reset.
+        let mut state = state();
+        state.announced_update = Some(Version::parse("1.1.0").unwrap());
+        assert!(state.update_needs_announcing(&Version::parse("1.2.0").unwrap()));
+    }
+
+    #[test]
+    fn the_announced_version_survives_a_round_trip() {
+        let mut s = state();
+        s.announced_update = Some(Version::parse("2.0.0").unwrap());
+        let bytes = serde_json::to_vec(&s).unwrap();
+        let back: InstallState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.announced_update, Some(Version::parse("2.0.0").unwrap()));
+    }
 
     #[test]
     fn a_first_check_is_always_due() {

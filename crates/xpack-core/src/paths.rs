@@ -284,6 +284,19 @@ impl InstallPaths {
         self.executable(&names.uninstaller())
     }
 
+    /// The update notifier, under xPack's own names.
+    pub fn notifier_file(&self) -> PathBuf {
+        self.notifier_file_named(&crate::naming::BinaryNames::Xpack)
+    }
+
+    /// The update notifier, under the names this installation actually uses.
+    ///
+    /// Most installations have nothing at this path: a prompt is placed only
+    /// where a publisher asked for one.
+    pub fn notifier_file_named(&self, names: &crate::naming::BinaryNames) -> PathBuf {
+        self.executable(&names.notifier())
+    }
+
     /// Returns `true` when this looks like an initialised installation.
     pub fn is_installed(&self) -> bool {
         self.state_file().is_file()
