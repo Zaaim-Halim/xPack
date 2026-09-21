@@ -36,6 +36,8 @@
 
 use std::path::Path;
 
+/// `HasLinkTargetIDList`: the shortcut carries a shell item list.
+const HAS_LINK_TARGET_ID_LIST: u32 = 0x0000_0001;
 /// `HasLinkInfo`: the shortcut carries a `LinkInfo` structure.
 const HAS_LINK_INFO: u32 = 0x0000_0002;
 /// `HasName`: the shortcut carries a description string.
@@ -168,6 +170,158 @@ fn write_header(out: &mut Vec<u8>, flags: u32) {
     out.extend_from_slice(&0u32.to_le_bytes());
 }
 
+/// `CLSID_MyComputer`, the root every filesystem item list hangs from.
+///
+/// Byte order is the on-the-wire layout of a GUID: the first three groups
+/// little-endian, the last two as written.
+const CLSID_MY_COMPUTER: [u8; 16] = [
+    0xE0, 0x4F, 0xD0, 0x20, 0xEA, 0x3A, 0x69, 0x10, 0xA2, 0xD8, 0x08, 0x00, 0x2B, 0x30, 0x30, 0x9D,
+];
+
+/// Shell item type for the root node carrying a CLSID.
+const ITEM_ROOT: u8 = 0x1F;
+/// Shell item type for a drive, such as `C:\`.
+const ITEM_DRIVE: u8 = 0x2F;
+/// Shell item type for a directory.
+const ITEM_DIRECTORY: u8 = 0x31;
+/// Shell item type for a file.
+const ITEM_FILE: u8 = 0x32;
+
+/// `FILE_ATTRIBUTE_DIRECTORY`.
+const ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+/// `FILE_ATTRIBUTE_ARCHIVE`, which is what an ordinary file carries.
+const ATTRIBUTE_ARCHIVE: u16 = 0x0020;
+
+/// Signature of the extension block carrying an item's long name.
+const EXTENSION_SIGNATURE: u32 = 0xBEEF_0004;
+/// Extension block version. `0x0003` is the oldest layout every shell reads,
+/// and the one with no fields this writer would have to invent.
+const EXTENSION_VERSION: u16 = 0x0003;
+
+/// Builds the `LinkTargetIDList`: the shell's own name for the target.
+///
+/// # Why this exists as well as `LinkInfo`
+///
+/// `LinkInfo` carries the target's absolute path as text, and the shell will
+/// resolve a shortcut from it. What it will not do is *report* it: the path a
+/// caller gets back from `IShellLink::GetPath` — which is what Explorer's
+/// properties dialog, "open file location", pinning, and every script using
+/// `WScript.Shell` read — comes from this item list. Without one, those all
+/// see a shortcut with no target, even where double-clicking still works.
+///
+/// So both are written. They say the same thing in the two vocabularies the
+/// shell has for saying it.
+///
+/// # What an item list is
+///
+/// A chain from the desktop down to the file: My Computer, the drive, each
+/// directory, then the file itself. Each link is an `ItemID` — a length, a
+/// type byte, and the type's own payload — and a zero length ends the chain.
+///
+/// Each directory and file item carries its name twice: once in the system
+/// code page, which is what shells older than Windows XP read, and once as
+/// UTF-16 in an extension block, which is what every shell since reads and
+/// the only one of the two that can hold a name outside the code page.
+fn target_id_list(target: &str) -> Vec<u8> {
+    let mut items = Vec::new();
+
+    // My Computer. A file's item list is meaningless without the root it
+    // descends from: the shell resolves each item against its parent.
+    let mut root = vec![ITEM_ROOT, 0x50];
+    root.extend_from_slice(&CLSID_MY_COMPUTER);
+    push_item(&mut items, &root);
+
+    let mut components = target.split('\\').filter(|part| !part.is_empty());
+    let Some(drive) = components.next() else {
+        return Vec::new();
+    };
+
+    // `C:\`, padded to the fixed width the drive item has always had.
+    let mut drive_item = vec![ITEM_DRIVE];
+    drive_item.extend_from_slice(format!("{drive}\\").as_bytes());
+    drive_item.resize(23, 0);
+    push_item(&mut items, &drive_item);
+
+    let rest: Vec<&str> = components.collect();
+    let last = rest.len().saturating_sub(1);
+    for (index, component) in rest.iter().enumerate() {
+        let is_file = index == last;
+        push_item(&mut items, &filesystem_item(component, is_file));
+    }
+
+    // The terminating zero-length ItemID.
+    items.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut out = Vec::with_capacity(items.len() + 2);
+    let size = u16::try_from(items.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&items);
+    out
+}
+
+/// Appends one `ItemID`: its size, including the two bytes of the size itself.
+fn push_item(items: &mut Vec<u8>, data: &[u8]) {
+    let size = u16::try_from(data.len() + 2).unwrap_or(u16::MAX);
+    items.extend_from_slice(&size.to_le_bytes());
+    items.extend_from_slice(data);
+}
+
+/// Builds a directory or file item, carrying its name in both encodings.
+fn filesystem_item(name: &str, is_file: bool) -> Vec<u8> {
+    let mut item = vec![if is_file { ITEM_FILE } else { ITEM_DIRECTORY }, 0x00];
+    // Size and timestamps of the target, which the shell treats as advisory
+    // and re-reads from the filesystem. Zero rather than a guess.
+    item.extend_from_slice(&0u32.to_le_bytes());
+    item.extend_from_slice(&0u16.to_le_bytes());
+    item.extend_from_slice(&0u16.to_le_bytes());
+    item.extend_from_slice(
+        &(if is_file { ATTRIBUTE_ARCHIVE } else { ATTRIBUTE_DIRECTORY }).to_le_bytes(),
+    );
+
+    let primary = to_code_page(name);
+    item.extend_from_slice(&primary);
+    item.push(0);
+    // The extension block that follows must start on an even offset, counted
+    // from the beginning of the ItemID — which the two size bytes precede.
+    if (item.len() + 2) % 2 != 0 {
+        item.push(0);
+    }
+
+    let extension_offset = u16::try_from(item.len() + 2).unwrap_or(u16::MAX);
+    item.extend_from_slice(&long_name_extension(name, extension_offset));
+    // A zero size where the next extension block's size would be: the list of
+    // extension blocks ends here.
+    item.extend_from_slice(&0u16.to_le_bytes());
+    item
+}
+
+/// The `0xBEEF0004` extension block, which carries the item's real name.
+///
+/// `offset` is where this block begins within its `ItemID`, which the block
+/// repeats at its end so a reader walking backwards can find it.
+fn long_name_extension(name: &str, offset: u16) -> Vec<u8> {
+    let mut block = Vec::new();
+    // Size is filled in once the rest is known.
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block.extend_from_slice(&EXTENSION_VERSION.to_le_bytes());
+    block.extend_from_slice(&EXTENSION_SIGNATURE.to_le_bytes());
+    // Creation and last-access dates and times, in MS-DOS form. Zero for the
+    // same reason as the header's timestamps.
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block.extend_from_slice(&0u16.to_le_bytes());
+    // Unknown, and documented as such. Zero is what the shell writes when it
+    // has nothing to put here.
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block.extend_from_slice(&to_utf16_nul(name));
+    block.extend_from_slice(&offset.to_le_bytes());
+
+    let size = u16::try_from(block.len()).unwrap_or(u16::MAX);
+    block[0..2].copy_from_slice(&size.to_le_bytes());
+    block
+}
+
 /// Builds the `LinkInfo` structure naming the target's absolute path.
 fn link_info(target: &str) -> Vec<u8> {
     let ansi_path = to_code_page(target);
@@ -261,7 +415,7 @@ fn to_utf16_nul(value: &str) -> Vec<u8> {
 /// so a writer that emits them out of order produces a file in which the
 /// working directory is read as the arguments.
 pub fn serialise(shortcut: &Shortcut) -> Vec<u8> {
-    let mut flags = HAS_LINK_INFO | HAS_WORKING_DIR | IS_UNICODE;
+    let mut flags = HAS_LINK_TARGET_ID_LIST | HAS_LINK_INFO | HAS_WORKING_DIR | IS_UNICODE;
     if shortcut.description.is_some() {
         flags |= HAS_NAME;
     }
@@ -274,6 +428,9 @@ pub fn serialise(shortcut: &Shortcut) -> Vec<u8> {
 
     let mut out = Vec::new();
     write_header(&mut out, flags);
+    // The item list comes first: the specification fixes this order, and it is
+    // what the shell reads before anything else.
+    out.extend_from_slice(&target_id_list(&shortcut.target));
     out.extend_from_slice(&link_info(&shortcut.target));
 
     // NAME_STRING, RELATIVE_PATH, WORKING_DIR, COMMAND_LINE_ARGUMENTS,
@@ -303,6 +460,145 @@ mod tests {
 
     fn read_u32(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    /// Where `LinkInfo` begins, which is after the header and the item list.
+    ///
+    /// Computed rather than written down: the item list is variable length,
+    /// and a test asserting a fixed offset would be asserting the length of
+    /// one particular path.
+    fn link_info_start(bytes: &[u8]) -> usize {
+        let id_list = u16::from_le_bytes(bytes[76..78].try_into().unwrap()) as usize;
+        78 + id_list
+    }
+
+    /// Walks the `LinkTargetIDList` that follows the header, returning each
+    /// `ItemID`'s payload.
+    fn id_list_items(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let size = u16::from_le_bytes(bytes[76..78].try_into().unwrap()) as usize;
+        let list = &bytes[78..78 + size];
+        let mut items = Vec::new();
+        let mut at = 0;
+        loop {
+            let item = u16::from_le_bytes(list[at..at + 2].try_into().unwrap()) as usize;
+            if item == 0 {
+                break;
+            }
+            items.push(list[at + 2..at + item].to_vec());
+            at += item;
+        }
+        items
+    }
+
+    /// The UTF-16 name inside an item's `0xBEEF0004` extension block.
+    fn long_name_of(item: &[u8]) -> String {
+        let signature = item
+            .windows(4)
+            .position(|window| window == EXTENSION_SIGNATURE.to_le_bytes())
+            .expect("an extension block");
+        // signature, then two dates, two times and the unknown field.
+        let mut at = signature + 4 + 10;
+        let mut units = Vec::new();
+        while at + 1 < item.len() {
+            let unit = u16::from_le_bytes(item[at..at + 2].try_into().unwrap());
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+            at += 2;
+        }
+        String::from_utf16(&units).expect("valid UTF-16")
+    }
+
+    #[test]
+    fn the_shortcut_carries_a_target_id_list() {
+        // Without one the shell resolves the link but reports no target at
+        // all: Explorer's properties dialog, "open file location", pinning and
+        // every script reading TargetPath see a shortcut pointing nowhere.
+        let bytes = serialise(&shortcut());
+        assert_eq!(read_u32(&bytes, 20) & HAS_LINK_TARGET_ID_LIST, HAS_LINK_TARGET_ID_LIST);
+    }
+
+    #[test]
+    fn the_id_list_descends_from_my_computer_through_every_directory() {
+        let bytes = serialise(&shortcut());
+        let items = id_list_items(&bytes);
+
+        // My Computer, the drive, six directories, then the file.
+        assert_eq!(items.len(), 9, "{items:?}");
+        assert_eq!(items[0][0], ITEM_ROOT);
+        assert_eq!(items[0][2..18], CLSID_MY_COMPUTER);
+        assert_eq!(items[1][0], ITEM_DRIVE);
+        assert_eq!(&items[1][1..4], b"C:\\");
+
+        let names: Vec<String> = items[2..].iter().map(|item| long_name_of(item)).collect();
+        assert_eq!(
+            names,
+            ["Users", "u", "AppData", "Local", "xpack", "com.example.app", "xpack-launcherw.exe"],
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_last_item_is_a_file() {
+        let bytes = serialise(&shortcut());
+        let items = id_list_items(&bytes);
+        let (file, directories) = items[2..].split_last().expect("at least one item");
+
+        assert_eq!(file[0], ITEM_FILE);
+        for directory in directories {
+            assert_eq!(directory[0], ITEM_DIRECTORY, "{directory:?}");
+        }
+    }
+
+    #[test]
+    fn every_item_id_declares_its_own_length() {
+        // A reader walks this list by length alone. One wrong size and every
+        // item after it is read from the middle of the one before.
+        let bytes = serialise(&shortcut());
+        let size = u16::from_le_bytes(bytes[76..78].try_into().unwrap()) as usize;
+        let list = &bytes[78..78 + size];
+
+        let mut at = 0;
+        let mut items = 0;
+        loop {
+            let item = u16::from_le_bytes(list[at..at + 2].try_into().unwrap()) as usize;
+            if item == 0 {
+                break;
+            }
+            assert!(item >= 2 && at + item <= list.len(), "item {items} claims {item} bytes");
+            at += item;
+            items += 1;
+        }
+        assert_eq!(at + 2, list.len(), "the list does not end where its size says it does");
+    }
+
+    #[test]
+    fn a_name_outside_the_code_page_survives_in_the_extension_block() {
+        // The same reason the Unicode LocalBasePath exists: the code-page
+        // field cannot hold this name, and the shortcut still has to work.
+        let bytes = serialise(&Shortcut::new(Path::new(r"C:\Users\José Ramírez\app.exe")));
+        let items = id_list_items(&bytes);
+        let names: Vec<String> = items[2..].iter().map(|item| long_name_of(item)).collect();
+        assert_eq!(names, ["Users", "José Ramírez", "app.exe"], "{names:?}");
+    }
+
+    #[test]
+    fn an_extension_block_starts_on_an_even_offset() {
+        // The shell reads the block at the offset the item records, and reads
+        // it as aligned words.
+        for target in [r"C:\a\b.exe", r"C:\ab\cd.exe", r"C:\abc\def.exe"] {
+            let bytes = serialise(&Shortcut::new(Path::new(target)));
+            for item in id_list_items(&bytes).into_iter().skip(2) {
+                let signature = item
+                    .windows(4)
+                    .position(|window| window == EXTENSION_SIGNATURE.to_le_bytes())
+                    .expect("an extension block");
+                // The block begins two bytes before its signature, and the
+                // item's own two size bytes precede everything.
+                assert_eq!((signature - 2 + 2) % 2, 0, "{target}: {item:?}");
+            }
+        }
     }
 
     fn shortcut() -> Shortcut {
@@ -354,7 +650,7 @@ mod tests {
         // Every offset inside LinkInfo is relative to its start, so a wrong
         // total makes the shell read the strings from the wrong place.
         let bytes = serialise(&shortcut());
-        let link_info_start = 0x4C;
+        let link_info_start = link_info_start(&bytes);
         let declared = read_u32(&bytes, link_info_start) as usize;
         let header_size = read_u32(&bytes, link_info_start + 4);
 
@@ -369,7 +665,7 @@ mod tests {
         let target = r"C:\Users\José\app\xpack-launcherw.exe";
         let bytes = serialise(&Shortcut::new(Path::new(target)));
 
-        let start = 0x4C;
+        let start = link_info_start(&bytes);
         let offset = read_u32(&bytes, start + 28) as usize;
         let from = start + offset;
         let units: Vec<u16> = bytes[from..]
@@ -387,7 +683,7 @@ mod tests {
     fn a_non_ascii_path_degrades_in_the_ansi_field_and_survives_in_the_unicode_one() {
         let target = r"C:\Users\José\app.exe";
         let bytes = serialise(&Shortcut::new(Path::new(target)));
-        let start = 0x4C;
+        let start = link_info_start(&bytes);
 
         let ansi_at = start + read_u32(&bytes, start + 16) as usize;
         let ansi: Vec<u8> = bytes[ansi_at..].iter().copied().take_while(|&b| b != 0).collect();

@@ -145,9 +145,18 @@ jobs:
             $link = $shell.CreateShortcut($path)
             $expectedDir = Split-Path -Parent $target
 
+            # A second opinion, read through a different shell interface.
+            # If these two ever disagree, the failure is in how the link is
+            # represented rather than in the path it names, and knowing which
+            # of them is empty says which representation is at fault.
+            $folder = (New-Object -ComObject Shell.Application).NameSpace((Split-Path -Parent $path))
+            $item = $folder.ParseName((Split-Path -Leaf $path))
+            $resolved = if ($item -and $item.IsLink) { $item.GetLink.Path } else { '<not a link>' }
+
             Write-Host "target      = $target"
             Write-Host "TargetPath  = $($link.TargetPath)"
             Write-Host "WorkingDir  = $($link.WorkingDirectory)"
+            Write-Host "Shell.Path  = $resolved"
 
             if ($link.TargetPath -ne $target) {
               throw "the shell resolved '$($link.TargetPath)', expected '$target'"

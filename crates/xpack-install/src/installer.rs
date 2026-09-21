@@ -50,11 +50,12 @@ pub struct InstallOptions {
     /// Update notifier to place in the installation root, if any.
     ///
     /// Supplied like every other binary, and placed only when the package
-    /// being installed actually asks for a prompt — see
-    /// [`Installer::notifier_is_wanted`]. An installation that updates
-    /// silently carries no dialog code at all, which is the point: the only
-    /// graphical binary xPack has should exist only where somebody asked for
-    /// a graphical thing to happen.
+    /// being installed asks for a prompt: it declares `update.notify`, it
+    /// declares a periodic check for a prompt to appear from, and it targets a
+    /// platform with a dialog implemented. An installation that updates
+    /// silently carries no dialog code at all, which is the point — the only
+    /// graphical binary xPack has should exist only where somebody asked for a
+    /// graphical thing to happen.
     pub notifier: Option<PathBuf>,
     /// Windowed launcher to place beside the console one, if any.
     ///
