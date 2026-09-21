@@ -55,9 +55,21 @@ use xpack_core::{Error, InstallPaths, Result};
 
 /// An exclusive hold on one installation.
 ///
-/// Releasing happens on drop. The lock is advisory, so it only excludes other
-/// xPack processes — a user deleting the installation directory by hand is not
-/// something any lock can prevent.
+/// Releasing happens on drop. What the lock excludes is other xPack processes
+/// asking for the same lock — a user deleting the installation directory by
+/// hand is not something any lock can prevent.
+///
+/// # It is advisory on Unix and mandatory on Windows
+///
+/// Unix takes a `flock`, which only an process asking for the same lock
+/// notices. Windows takes a `LockFileEx`, which the filesystem enforces: while
+/// it is held, another handle cannot so much as *read* the locked region, and
+/// an attempt returns "another process has locked a portion of the file".
+///
+/// Nothing in an installation depends on reading it, because the file locked
+/// is the lock file and nothing else. Installation state lives in its own
+/// document beside it, which is read and written freely while the lock is
+/// held — and read without the lock where a stale answer is harmless.
 #[derive(Debug)]
 pub struct InstallLock {
     /// Holding this handle holds the lock; dropping it releases.

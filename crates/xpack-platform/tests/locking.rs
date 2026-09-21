@@ -129,8 +129,33 @@ fn acquiring_does_not_truncate_the_lock_file() {
     std::fs::write(paths.lock_file(), b"owner metadata").unwrap();
 
     let lock = InstallLock::acquire(&paths).unwrap();
-    assert_eq!(std::fs::read(paths.lock_file()).unwrap(), b"owner metadata");
     drop(lock);
+
+    // Read once the lock is released, because on Windows it cannot be read
+    // while it is held: the lock there is enforced by the filesystem rather
+    // than agreed between processes, and another handle is refused even a
+    // read. The claim does not need the read to happen during the lock --
+    // nothing rewrites this file, so content that survived an acquisition is
+    // content the acquisition did not truncate.
+    assert_eq!(std::fs::read(paths.lock_file()).unwrap(), b"owner metadata");
+}
+
+#[test]
+fn a_second_acquisition_still_finds_the_content_the_first_left() {
+    // The same claim across two acquisitions, which is what an installation
+    // actually does: every operation takes this lock and none of them may
+    // disturb what another wrote.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    xpack_core::atomic::create_dir_all(&paths.state_dir()).unwrap();
+    std::fs::write(paths.lock_file(), b"owner metadata").unwrap();
+
+    for _ in 0..3 {
+        let lock = InstallLock::acquire(&paths).unwrap();
+        drop(lock);
+    }
+
+    assert_eq!(std::fs::read(paths.lock_file()).unwrap(), b"owner metadata");
 }
 
 #[test]
