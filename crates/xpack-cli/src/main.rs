@@ -79,6 +79,8 @@ enum Command {
     Recover(commands::recover::Args),
     /// Check for and apply an update.
     Update(commands::update::Args),
+    /// Turn automatic update checks on or off.
+    Autoupdate(commands::autoupdate::Args),
 }
 
 impl Command {
@@ -106,6 +108,7 @@ impl Command {
             Self::Uninstall(a) => Some(a.application.clone()),
             Self::Recover(a) => Some(a.application.clone()),
             Self::Update(a) => Some(a.application.clone()),
+            Self::Autoupdate(a) => Some(a.application.clone()),
         }
     }
 }
@@ -142,6 +145,7 @@ fn main() -> std::process::ExitCode {
         Command::List(a) => commands::list::run(a, &context),
         Command::Run(a) => commands::run::run(a, &context),
         Command::Activate(a) => commands::activate::run(a, &context),
+        Command::Autoupdate(a) => commands::autoupdate::run(a, &context),
         Command::Rollback(a) => commands::rollback::run(a, &context),
         Command::Prune(a) => commands::prune::run(a, &context),
         Command::Uninstall(a) => commands::uninstall::run(a, &context),

@@ -397,3 +397,66 @@ fn forgetting_the_interval_does_not_stop_an_installation_checking() {
 
     assert_eq!(outcome, Outcome::Staged(Version::parse("1.1.0").unwrap()));
 }
+
+#[test]
+fn an_installation_told_not_to_check_asks_nobody() {
+    // The switch a machine's owner has and the publisher does not. Without it
+    // the only way to stop an installation checking is to delete this binary,
+    // which the next install puts back.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    xpack_core::UpdatePolicy::automatic(false)
+        .save(&world.paths)
+        .expect("the policy to be written");
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert!(matches!(outcome, Outcome::TurnedOff(_)), "got {outcome:?}");
+    assert_eq!(fixture.requests(), 0, "a server was asked despite checks being turned off");
+    assert!(!world.paths.version_dir(&Version::parse("1.1.0").unwrap()).exists());
+}
+
+#[test]
+fn forcing_a_check_does_not_overrule_the_owner_of_the_machine() {
+    // `--force` exists to ignore the interval, which is the publisher's
+    // setting. It is not a way around somebody's decision that this
+    // installation may not reach the network.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    xpack_core::UpdatePolicy::automatic(false)
+        .save(&world.paths)
+        .expect("the policy to be written");
+
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).forced(true).run().unwrap();
+
+    assert!(matches!(outcome, Outcome::TurnedOff(_)), "got {outcome:?}");
+    assert_eq!(fixture.requests(), 0);
+}
+
+#[test]
+fn turning_checks_back_on_does_not_leave_one_overdue() {
+    // Nothing is recorded while checks are off, so the record of the last one
+    // still describes the last time a server was actually asked.
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    record_check_at(&world, unix_seconds());
+    let before = last_check(&world);
+
+    xpack_core::UpdatePolicy::automatic(false).save(&world.paths).expect("off");
+    let _ = BackgroundUpdater::new(&world.paths, &fixture).run();
+
+    assert_eq!(last_check(&world), before, "a check that never happened was recorded");
+}
+
+#[test]
+fn turning_checks_on_again_restores_them() {
+    let world = World::new();
+    let fixture = serving_an_update(&world);
+    xpack_core::UpdatePolicy::automatic(false).save(&world.paths).expect("off");
+    let _ = BackgroundUpdater::new(&world.paths, &fixture).run();
+
+    xpack_core::UpdatePolicy::automatic(true).save(&world.paths).expect("on again");
+    let outcome = BackgroundUpdater::new(&world.paths, &fixture).run().unwrap();
+
+    assert_eq!(outcome, Outcome::Staged(Version::parse("1.1.0").unwrap()));
+}

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use xpack_core::state::UpdatePhase;
-use xpack_core::{Error, InstallPaths, Manifest, Result, Version};
+use xpack_core::{Error, InstallPaths, Manifest, Result, UpdateSpec, Version};
 use xpack_install::Installer;
 use xpack_platform::{InstallLock, LaunchRequest, launch, request_close};
 
@@ -291,14 +291,15 @@ impl Launcher {
     /// Both answers come from the manifest of the version that just started —
     /// whether to look at all, and how often. That release is the one whose
     /// publisher is answering for how much of their server's time this
-    /// installation takes.
+    /// installation takes. Neither question is asked at all if the
+    /// installation has been told not to check on its own.
     fn watch_for_updates(&self, manifest: &Manifest, pid: u32, wait: bool) -> Watch {
         let watch = Watch {
             restart_requested: Arc::new(AtomicBool::new(false)),
             still_running: Arc::new(AtomicBool::new(true)),
         };
 
-        if wait && manifest.update.check_while_running && manifest.update.url.is_some() {
+        if periodic_checks_wanted(&self.paths, &manifest.update, wait) {
             let interval = manifest.update.check_interval();
             // The handle is what lets a prompt offer a restart at all: this
             // process knows the application's pid and is the thing that will
@@ -475,6 +476,15 @@ pub fn application_dir_for(executable: &Path) -> Result<&Path> {
 /// does. If the launcher exits first the thread goes with it and the updater
 /// is reparented, which is the outcome "detached" was reaching for anyway.
 pub fn spawn_updater(paths: &InstallPaths) -> bool {
+    // The updater would refuse this itself, and exit. Asking here as well
+    // means an installation told not to check starts no process at all, which
+    // is the answer somebody watching a locked-down machine wants to see.
+    let checks = xpack_core::automatic_checks(paths);
+    if !checks.allowed() {
+        tracing::debug!(reason = checks.describe(), "not starting the background updater");
+        return false;
+    }
+
     let Some(mut child) = spawn_updater_process(paths) else {
         return false;
     };
@@ -938,6 +948,26 @@ fn record_announcement(paths: &InstallPaths, version: &Version) -> Result<()> {
 /// An installation whose state cannot be read is not due. It is either being
 /// written at this instant or genuinely broken, and neither is a reason for a
 /// background thread to start spawning processes.
+/// Whether this launch should keep checking for updates while it runs.
+///
+/// Four things have to line up, and the first three are the publisher's
+/// answer while the last is the user's:
+///
+/// - this process is waiting on the application, so a checker thread would
+///   outlive its first tick and a prompt would have something to restart;
+/// - the release asked to be checked on while it runs;
+/// - it said where to look;
+/// - and nobody has turned automatic checks off for this installation.
+///
+/// Kept as one named decision rather than a condition inline in the caller so
+/// that it can be tested directly. The thread it gates wakes once a minute,
+/// which is far too slow to observe in a test.
+fn periodic_checks_wanted(paths: &InstallPaths, update: &UpdateSpec, wait: bool) -> bool {
+    wait && update.check_while_running
+        && update.url.is_some()
+        && xpack_core::automatic_checks(paths).allowed()
+}
+
 fn check_is_due(paths: &InstallPaths, interval: Duration) -> bool {
     let Ok(loaded) = xpack_core::InstallState::load(&paths.state_file()) else {
         return false;
@@ -985,7 +1015,7 @@ fn without_a_console(command: &mut std::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xpack_core::InstallState;
+    use xpack_core::{InstallState, UpdatePolicy};
 
     /// An installation directory with a state file in it.
     fn installation(last_check: Option<u64>) -> (tempfile::TempDir, InstallPaths) {
@@ -1055,5 +1085,57 @@ mod tests {
     fn a_never_checked_installation_is_due_immediately() {
         let (_dir, paths) = installation(None);
         assert!(check_is_due(&paths, Duration::from_secs(3 * 60 * 60)));
+    }
+
+    /// A release that asked to be checked on while it runs, and said where.
+    fn watching() -> UpdateSpec {
+        UpdateSpec {
+            url: Some("https://updates.example.com/demo".into()),
+            check_while_running: true,
+            ..UpdateSpec::default()
+        }
+    }
+
+    #[test]
+    fn a_release_that_asked_to_be_checked_on_is_checked_on() {
+        let (_dir, paths) = installation(None);
+        assert!(periodic_checks_wanted(&paths, &watching(), true));
+    }
+
+    #[test]
+    fn an_installation_told_not_to_check_starts_no_checker() {
+        let (_dir, paths) = installation(None);
+        UpdatePolicy::automatic(false).save(&paths).expect("the policy to be written");
+        assert!(!periodic_checks_wanted(&paths, &watching(), true));
+    }
+
+    #[test]
+    fn turning_checks_back_on_starts_the_checker_again() {
+        let (_dir, paths) = installation(None);
+        UpdatePolicy::automatic(false).save(&paths).expect("the policy to be written");
+        UpdatePolicy::automatic(true).save(&paths).expect("the policy to be written");
+        assert!(periodic_checks_wanted(&paths, &watching(), true));
+    }
+
+    #[test]
+    fn a_launcher_that_will_not_wait_starts_no_checker() {
+        // The thread would be killed before its first tick, an hour or more
+        // before it had anything to say.
+        let (_dir, paths) = installation(None);
+        assert!(!periodic_checks_wanted(&paths, &watching(), false));
+    }
+
+    #[test]
+    fn a_release_that_did_not_ask_is_not_checked_on() {
+        let (_dir, paths) = installation(None);
+        let update = UpdateSpec { check_while_running: false, ..watching() };
+        assert!(!periodic_checks_wanted(&paths, &update, true));
+    }
+
+    #[test]
+    fn a_release_with_nowhere_to_look_is_not_checked_on() {
+        let (_dir, paths) = installation(None);
+        let update = UpdateSpec { url: None, ..watching() };
+        assert!(!periodic_checks_wanted(&paths, &update, true));
     }
 }

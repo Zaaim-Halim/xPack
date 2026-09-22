@@ -22,6 +22,13 @@
 //!
 //! This is also what Chrome, Firefox and Windows do, for the same reasons.
 //!
+//! # It can be told not to
+//!
+//! Everything else about updating is the publisher's to decide, in the signed
+//! manifest. Whether this installation may check at all is not: see
+//! [`xpack_core::policy`]. Where the answer is no, this returns
+//! [`Outcome::TurnedOff`] having taken no lock and asked no server.
+//!
 //! # It is polite about asking
 //!
 //! Running on every application start means a user who opens their application
@@ -72,6 +79,13 @@ pub enum Outcome {
     Staged(Version),
     /// A check was made but the installation declares no update server.
     NoServerConfigured,
+    /// Checking on our own has been turned off for this installation.
+    ///
+    /// Distinct from every other outcome because nothing was attempted: no
+    /// lock was taken, no server was asked, and the record of when this
+    /// installation last checked is left alone, so turning checks back on does
+    /// not start with one that is overdue.
+    TurnedOff(xpack_core::AutomaticChecks),
 }
 
 /// Decides whether to check, and checks.
@@ -120,6 +134,15 @@ impl<'a> BackgroundUpdater<'a> {
 
     /// Runs one update cycle.
     pub fn run(&self) -> Result<Outcome> {
+        // Asked before anything else, and before the lock: a machine where
+        // nothing may reach the network without approval should see this
+        // process start and exit, not see it take a lock and open a socket.
+        let checks = xpack_core::automatic_checks(self.paths);
+        if !checks.allowed() {
+            tracing::debug!(reason = checks.describe(), "not checking for updates");
+            return Ok(Outcome::TurnedOff(checks));
+        }
+
         let application = self.application_id()?;
         let now = unix_seconds();
 

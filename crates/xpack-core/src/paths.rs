@@ -135,6 +135,16 @@ impl InstallPaths {
         self.config_dir().join("trust.json")
     }
 
+    /// Whoever owns this installation's answer about automatic updates.
+    ///
+    /// Beside the trust store rather than in installation state, because it is
+    /// a decision somebody made rather than a record of what xPack did. State
+    /// is xPack's to write; this file is the user's, and it survives every
+    /// update because nothing in an update touches it.
+    pub fn update_policy_file(&self) -> PathBuf {
+        self.config_dir().join("updates.json")
+    }
+
     /// Directory for in-progress downloads. Contents are never trusted.
     pub fn downloads_dir(&self) -> PathBuf {
         self.root.join("downloads")

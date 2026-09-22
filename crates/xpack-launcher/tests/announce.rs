@@ -441,3 +441,15 @@ fn a_handle_reports_when_its_application_has_gone() {
     let _ = app.kill();
     let _ = app.wait();
 }
+
+#[test]
+fn the_startup_check_is_not_started_either() {
+    // `spawn_updater` asks as well, so an installation told not to check
+    // starts no process at all rather than starting one that exits.
+    let world = World::new();
+    xpack_core::UpdatePolicy::automatic(false)
+        .save(&world.paths)
+        .expect("the policy to be written");
+
+    assert!(!xpack_launcher::spawn_updater(&world.paths), "the updater was started anyway");
+}

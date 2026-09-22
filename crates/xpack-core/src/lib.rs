@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod naming;
 pub mod paths;
 pub mod platform;
+pub mod policy;
 pub mod progress;
 pub mod state;
 pub mod store;
@@ -29,6 +30,7 @@ pub use paths::{
     host_launch_path_limit,
 };
 pub use platform::{Arch, Os, Platform};
+pub use policy::{AutomaticChecks, NO_UPDATE_ENV, UpdatePolicy, automatic_checks};
 pub use progress::{JsonProgress, NoProgress, ProgressEvent, ProgressReporter, STREAM_SCHEMA};
 pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};
 pub use store::Loaded;
