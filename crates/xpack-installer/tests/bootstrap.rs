@@ -7,13 +7,29 @@
 use std::path::{Path, PathBuf};
 
 use xpack_core::{Manifest, Platform, Version};
-use xpack_installer::Payload;
+use xpack_install::Existing;
 use xpack_installer::bundle::{self, InstallPlan, Source, TRAILER_LEN, Trailer};
+use xpack_installer::{Payload, Request};
 use xpack_package::PackageBuilder;
 use xpack_security::KeyPair;
 
 /// Builds a real signed package whose payload is a runnable script.
 fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
+    build_package_for(dir, key, Platform::host().unwrap())
+}
+
+/// The same package, built for a chosen platform.
+fn build_package_for(dir: &Path, key: &KeyPair, platform: Platform) -> PathBuf {
+    build_package_with(dir, key, platform, None)
+}
+
+/// The same package, naming an icon in its payload.
+fn build_package_with(
+    dir: &Path,
+    key: &KeyPair,
+    platform: Platform,
+    icon: Option<&[u8]>,
+) -> PathBuf {
     let payload = dir.join("src");
     std::fs::create_dir_all(payload.join("bin")).unwrap();
     let app = payload.join("bin/app");
@@ -22,6 +38,9 @@ fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    if let Some(icon) = icon {
+        std::fs::write(payload.join("icon.png"), icon).unwrap();
     }
 
     let manifest = Manifest {
@@ -33,7 +52,7 @@ fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
             description: None,
             publisher: None,
         },
-        platform: Platform::host().unwrap(),
+        platform,
         launch: xpack_core::LaunchSpec {
             executable: "bin/app".into(),
             arguments: Vec::new(),
@@ -42,7 +61,10 @@ fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
         },
         update: xpack_core::UpdateSpec::default(),
         health: xpack_core::HealthSpec::default(),
-        desktop: xpack_core::DesktopSpec::default(),
+        desktop: xpack_core::DesktopSpec {
+            icon: icon.map(|_| "icon.png".to_string()),
+            ..xpack_core::DesktopSpec::default()
+        },
         payload: xpack_core::PayloadSpec::default(),
         signing_key: None,
         created_at: None,
@@ -68,6 +90,7 @@ fn plan(key: &KeyPair) -> InstallPlan {
         version: "1.0.0".into(),
         signing_key: key.public().to_hex(),
         activate: true,
+        ui: None,
     }
 }
 
@@ -204,7 +227,12 @@ fn a_payload_installs_a_working_application() {
     let payload = payload_bytes(dir.path(), &key);
 
     let root = dir.path().join("root");
-    let outcome = Payload::unpack(&payload).unwrap().install_into(&root).unwrap();
+    let outcome = Payload::unpack(&payload)
+        .unwrap()
+        .verify()
+        .unwrap()
+        .install_into(&Request::new(root.clone()), &xpack_core::NoProgress)
+        .unwrap();
 
     assert_eq!(outcome.version, Version::parse("1.0.0").unwrap());
     assert!(outcome.activated);
@@ -230,8 +258,245 @@ fn a_package_signed_by_another_key_is_refused() {
     // A plan naming the real publisher, with a package signed by someone else.
     let payload = bundle::build(&plan(&real), &package, &binaries).unwrap();
 
-    let err =
-        Payload::unpack(&payload).unwrap().install_into(&dir.path().join("root")).unwrap_err();
+    let Err(err) = Payload::unpack(&payload).unwrap().verify() else {
+        panic!("a package signed by another key was verified");
+    };
 
+    // Refused before anything could be shown or installed.
     assert!(err.is_integrity_failure(), "expected an integrity failure, got {err}");
+    assert!(!dir.path().join("root").exists(), "something was installed");
+}
+
+#[test]
+fn a_plan_naming_another_application_is_refused() {
+    // The plan is not signed. Its application id once chose the directory an
+    // install went into, so a rewritten plan could have put a genuine package
+    // into another application's installation.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = build_package(dir.path(), &key);
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+
+    let mut rewritten = plan(&key);
+    rewritten.application_id = "com.example.other".into();
+    let payload = bundle::build(&rewritten, &package, &binaries).unwrap();
+
+    let Err(err) = Payload::unpack(&payload).unwrap().verify() else {
+        panic!("a plan naming another application was accepted");
+    };
+    assert!(err.is_integrity_failure(), "expected an integrity failure, got {err}");
+}
+
+#[test]
+fn what_is_shown_comes_from_the_signed_package_not_the_plan() {
+    // A rewritten plan can say anything; only the manifest is signed.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = build_package(dir.path(), &key);
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+
+    let mut rewritten = plan(&key);
+    rewritten.application_name = "Totally Trustworthy Bank".into();
+    rewritten.version = "99.0.0".into();
+    let payload = bundle::build(&rewritten, &package, &binaries).unwrap();
+
+    let verified = Payload::unpack(&payload).unwrap().verify().unwrap();
+    assert_eq!(verified.manifest().application.name, "Demo");
+    assert_eq!(verified.manifest().application.version, Version::parse("1.0.0").unwrap());
+}
+
+#[test]
+fn a_package_for_another_platform_is_refused_before_anything_is_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let host = Platform::host().unwrap();
+    let other = if host.os == xpack_core::Os::Linux {
+        xpack_core::Os::Windows
+    } else {
+        xpack_core::Os::Linux
+    };
+    let package = build_package_for(dir.path(), &key, Platform { os: other, arch: host.arch });
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+    let payload = bundle::build(&plan(&key), &package, &binaries).unwrap();
+
+    assert!(Payload::unpack(&payload).unwrap().verify().is_err());
+}
+
+#[test]
+fn looking_first_matches_installing_then() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let payload = payload_bytes(dir.path(), &key);
+    let root = dir.path().join("root");
+    let verified = Payload::unpack(&payload).unwrap().verify().unwrap();
+
+    assert_eq!(verified.inspect(&root).unwrap(), Existing::Nothing);
+    assert!(!root.exists(), "looking created the root");
+
+    verified.install_into(&Request::new(root.clone()), &xpack_core::NoProgress).unwrap();
+
+    assert_eq!(verified.inspect(&root).unwrap(), Existing::Installed);
+    let again = verified.install_into(&Request::new(root), &xpack_core::NoProgress);
+    assert!(again.is_err(), "the same version installed twice");
+}
+
+#[test]
+fn the_licence_travels_in_the_payload_and_the_icon_comes_from_the_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let icon: &[u8] = b"the icon's bytes";
+    let package = build_package_with(dir.path(), &key, Platform::host().unwrap(), Some(icon));
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+
+    let mut with_ui = plan(&key);
+    with_ui.ui = Some(xpack_installer::UiPlan::default());
+    let payload =
+        bundle::build_with_licence(&with_ui, &package, &binaries, Some("Terms.")).unwrap();
+
+    let verified = Payload::unpack(&payload).unwrap().verify().unwrap();
+    assert_eq!(verified.licence(), Some("Terms."));
+    let found = verified.icon().expect("the package's icon");
+    assert_eq!(found.name, "icon.png");
+    assert_eq!(found.bytes, icon);
+}
+
+#[test]
+fn without_settings_the_wizard_is_the_recommended_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let verified = Payload::unpack(&payload_bytes(dir.path(), &key)).unwrap().verify().unwrap();
+    assert_eq!(verified.ui(), xpack_installer::UiPlan::default());
+    assert_eq!(verified.licence(), None);
+    assert!(verified.icon().is_none());
+}
+
+#[test]
+fn a_licence_rewritten_into_something_unreadable_is_refused() {
+    // The payload is not signed, so the licence is held to its rules again
+    // when it is unpacked, not only when it was built.
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package = build_package(dir.path(), &key);
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+    let honest = bundle::build(&plan(&key), &package, &binaries).unwrap();
+
+    for licence in [vec![0xff, 0xfe, 0x00], vec![b'x'; bundle::MAX_LICENCE_BYTES + 1]] {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(honest.clone())).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            writer.raw_copy_file(archive.by_index(index).unwrap()).unwrap();
+        }
+        writer.start_file(bundle::LICENCE_ENTRY, zip::write::SimpleFileOptions::default()).unwrap();
+        writer.write_all(&licence).unwrap();
+        let forged = writer.finish().unwrap().into_inner();
+
+        assert!(
+            Payload::unpack(&forged).is_err(),
+            "a licence of {} bytes was accepted",
+            licence.len()
+        );
+    }
+}
+
+#[test]
+fn an_icon_altered_inside_the_package_refuses_the_install() {
+    use std::io::Write;
+
+    // The icon is covered by the package signature; a package whose icon no
+    // longer matches it has been tampered with.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let package =
+        build_package_with(dir.path(), &key, Platform::host().unwrap(), Some(b"honest icon"));
+
+    let bytes = std::fs::read(&package).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).unwrap();
+        if entry.name() == "payload/icon.png" {
+            drop(entry);
+            writer
+                .start_file("payload/icon.png", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"forged icon").unwrap();
+        } else {
+            writer.raw_copy_file(entry).unwrap();
+        }
+    }
+    let forged_package = dir.path().join("forged.xpkg");
+    std::fs::write(&forged_package, writer.finish().unwrap().into_inner()).unwrap();
+
+    let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
+    let payload = bundle::build(&plan(&key), &forged_package, &binaries).unwrap();
+    let Err(err) = Payload::unpack(&payload).unwrap().verify() else {
+        panic!("a package with a forged icon was verified");
+    };
+    assert!(err.is_integrity_failure(), "got {err}");
+}
+
+// --- the installer as the wizard's engine ------------------------------------
+
+#[test]
+fn the_wizard_is_told_what_the_console_would_find() {
+    use xpack_installer_ui::{Engine, RootProblem};
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let verified = Payload::unpack(&payload_bytes(dir.path(), &key)).unwrap().verify().unwrap();
+    let root = dir.path().join("root");
+
+    let fresh = Engine::inspect(&verified, &root);
+    assert_eq!(fresh.verdict, Ok(Existing::Nothing));
+    assert_eq!(fresh.target, root.join("com.example.demo"));
+    assert!(!root.exists(), "looking created the root");
+
+    assert_eq!(
+        Engine::inspect(&verified, Path::new("relative/root")).verdict,
+        Err(RootProblem::NotAbsolute)
+    );
+}
+
+#[test]
+fn the_wizard_installs_and_launches_through_the_same_call() {
+    use xpack_installer_ui::{Choices, Engine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let verified = Payload::unpack(&payload_bytes(dir.path(), &key)).unwrap().verify().unwrap();
+    let root = dir.path().join("root");
+
+    // Nothing to start before anything is installed.
+    assert!(Engine::launch(&verified, &root).is_err());
+
+    let choices = Choices { root: root.clone(), desktop_entry: None };
+    let installed = Engine::install(&verified, &choices, &xpack_core::NoProgress).unwrap();
+    assert_eq!(installed.directory, root.join("com.example.demo"));
+    assert_eq!(installed.version, Version::parse("1.0.0").unwrap());
+    assert!(!installed.shortcut_added, "the package asks for no entry");
+
+    // What the console would now say: installed, so not again.
+    assert_eq!(Engine::inspect(&verified, &root).verdict, Ok(Existing::Installed));
+    Engine::launch(&verified, &root).expect("the installed launcher starts");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_nobody_may_write_to_is_refused_before_installing() {
+    use std::os::unix::fs::PermissionsExt;
+    use xpack_installer_ui::{Engine, RootProblem};
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let verified = Payload::unpack(&payload_bytes(dir.path(), &key)).unwrap().verify().unwrap();
+
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let verdict = Engine::inspect(&verified, &locked.join("apps")).verdict;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(verdict, Err(RootProblem::NotWritable));
 }

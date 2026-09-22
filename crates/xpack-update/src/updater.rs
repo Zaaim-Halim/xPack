@@ -490,6 +490,9 @@ impl<'a> Updater<'a> {
             // The user's real directories. An update is a real installation,
             // not a test, and the entry it refreshes is the one in their menu.
             desktop_roots: None,
+            // An update never asks. The choice made at the first install, if
+            // any, is recorded and honoured by the installer.
+            desktop_entry: None,
         };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
 

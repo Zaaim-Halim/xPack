@@ -1270,3 +1270,192 @@ fn a_desktop_entry_points_at_the_launcher_that_was_actually_installed() {
     let target = paths.shortcut_target_named(&installed_names());
     assert!(target.is_file(), "the entry would point at nothing: {}", target.display());
 }
+
+/// Installs a package that asks for a desktop entry, with the user's answer.
+fn install_asking_for_an_entry(
+    dir: &std::path::Path,
+    key: &KeyPair,
+    version: &str,
+    desktop_entry: Option<bool>,
+) -> xpack_core::Result<xpack_install::Installed> {
+    let lock = InstallLock::acquire(&install_paths(dir)).unwrap();
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir, "launcher")),
+        desktop_roots: Some(common::desktop_roots(dir)),
+        desktop_entry,
+        ..Default::default()
+    };
+    let package = common::build_package_with(dir, key, version, &wants_a_shortcut());
+    let mut verified = open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public()))?;
+    Installer::new(&lock).install(&mut verified, &options)
+}
+
+#[test]
+fn a_declined_entry_is_not_written_and_later_updates_do_not_add_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path());
+
+    let first = install_asking_for_an_entry(dir.path(), &key, "1.0.0", Some(false)).unwrap();
+    assert_eq!(first.desktop, xpack_install::DesktopOutcome::NotRequested);
+    assert!(install_paths(dir.path()).desktop_preference_file().is_file(), "choice not recorded");
+
+    // An update asks nothing, exactly as the background updater does, and
+    // the package still asks for an entry. The recorded choice wins.
+    let update = install_asking_for_an_entry(dir.path(), &key, "2.0.0", None).unwrap();
+    assert_eq!(update.desktop, xpack_install::DesktopOutcome::NotRequested);
+
+    assert!(!desktop.data.exists(), "an entry was written to the data directory");
+    assert!(!desktop.home.exists(), "an entry was written to the home directory");
+}
+
+#[test]
+fn declining_on_an_existing_installation_is_refused_before_anything_changes() {
+    // Its updater may predate the recorded choice and would put the entry
+    // back, so the choice is refused rather than silently undone later.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    let error =
+        install_asking_for_an_entry(dir.path(), &key, "2.0.0", Some(false)).expect_err("refused");
+    assert!(error.to_string().contains("first installation"), "{error}");
+
+    assert!(!paths.desktop_preference_file().exists(), "the choice was recorded anyway");
+    assert!(!paths.version_dir(&v("2.0.0")).exists(), "the version was installed anyway");
+    let state = InstallLock::acquire(&paths).unwrap().load_state().unwrap().value;
+    assert_eq!(state.current_version, Some(v("1.0.0")));
+}
+
+#[test]
+fn saying_yes_never_adds_an_entry_the_package_did_not_ask_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path());
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir.path(), "launcher")),
+        desktop_roots: Some(desktop.clone()),
+        desktop_entry: Some(true),
+        ..Default::default()
+    };
+    let installed = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    assert_eq!(installed.desktop, xpack_install::DesktopOutcome::NotRequested);
+    assert!(!desktop.data.exists() && !desktop.home.exists());
+}
+
+#[test]
+fn saying_yes_on_an_existing_installation_keeps_its_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    let update = install_asking_for_an_entry(dir.path(), &key, "2.0.0", Some(true)).unwrap();
+    assert!(
+        matches!(update.desktop, xpack_install::DesktopOutcome::Done(_)),
+        "got {:?}",
+        update.desktop
+    );
+}
+
+#[test]
+fn an_unreadable_choice_counts_as_declined() {
+    // The only record ever written says no. Guessing yes would write into a
+    // user's menu against what they most likely chose.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", Some(false)).unwrap();
+    std::fs::write(install_paths(dir.path()).desktop_preference_file(), b"garbage").unwrap();
+
+    let update = install_asking_for_an_entry(dir.path(), &key, "2.0.0", None).unwrap();
+    assert_eq!(update.desktop, xpack_install::DesktopOutcome::NotRequested);
+}
+
+// --- finding an installation that is not in the default place ---------------
+//
+// Not on Windows, where the record is the user's real registry, which a test
+// has no business writing into; the reading there is compiled, not run here.
+
+#[cfg(not(windows))]
+#[test]
+fn an_installation_is_found_through_its_desktop_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path());
+
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    // `dir` is the root `install_paths` builds on: the one `--root` names.
+    let found =
+        xpack_install::integration::recorded_installation("com.example.app", "Example", &desktop);
+    assert_eq!(found.as_deref(), Some(dir.path()));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn an_entry_whose_installation_is_gone_is_not_believed() {
+    // An entry outliving its installation — removed by hand, or restored from
+    // a backup — must not send the next install somewhere that is not there.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path());
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    std::fs::remove_dir_all(install_paths(dir.path()).state_dir()).unwrap();
+
+    let found =
+        xpack_install::integration::recorded_installation("com.example.app", "Example", &desktop);
+    assert_eq!(found, None);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn an_entry_naming_another_applications_directory_is_not_believed() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path());
+    install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    // The same entry, asked about under another application's id.
+    let found =
+        xpack_install::integration::recorded_installation("com.example.other", "Example", &desktop);
+    assert_eq!(found, None);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn no_entry_means_nothing_is_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let found = xpack_install::integration::recorded_installation(
+        "com.example.app",
+        "Example",
+        &common::desktop_roots(dir.path()),
+    );
+    assert_eq!(found, None);
+}
+
+#[test]
+fn a_decline_left_by_a_failed_first_attempt_does_not_bind_the_next_one() {
+    // The first attempt declined, recorded it, and then failed before any
+    // version was installed. The next first attempt did not decline.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    std::fs::create_dir_all(paths.state_dir()).unwrap();
+    std::fs::write(paths.desktop_preference_file(), r#"{"formatVersion":1,"entry":false}"#)
+        .unwrap();
+
+    let installed = install_asking_for_an_entry(dir.path(), &key, "1.0.0", None).unwrap();
+
+    assert!(
+        matches!(installed.desktop, xpack_install::DesktopOutcome::Done(_)),
+        "got {:?}",
+        installed.desktop
+    );
+    assert!(!paths.desktop_preference_file().exists());
+}

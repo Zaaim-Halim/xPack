@@ -139,6 +139,24 @@ pub(super) fn render_trampoline(target: &Path) -> String {
     )
 }
 
+/// The launcher the `~/Applications` bundle for `name` starts, if there is one.
+pub(super) fn recorded_target(name: &str, roots: &Roots) -> Option<PathBuf> {
+    let bundle =
+        roots.home.join("Applications").join(format!("{}.app", bundle_directory_name(name)));
+    let script = bundle.join("Contents").join("MacOS").join(bundle_executable_name(name));
+    parse_trampoline(&std::fs::read_to_string(script).ok()?)
+}
+
+/// Reads back the path [`render_trampoline`] wrote, and nothing else.
+///
+/// Only the exact line xPack writes is accepted. A script someone edited by
+/// hand says nothing reliable about where an installation is.
+fn parse_trampoline(script: &str) -> Option<PathBuf> {
+    let line = script.lines().find_map(|line| line.strip_prefix("exec '"))?;
+    let quoted = line.strip_suffix(" \"$@\"")?.strip_suffix('\'')?;
+    Some(PathBuf::from(quoted.replace(r"'\''", "'")))
+}
+
 /// Single-quotes a path for `/bin/sh`.
 ///
 /// An installation root contains an application id and sits under a home
@@ -224,6 +242,23 @@ fn set_executable(path: &Path) -> xpack_core::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_path_a_trampoline_starts_reads_back_exactly() {
+        for target in [
+            "/Users/me/Applications/xPack/com.example.app/Example",
+            "/Users/My Name/it's here/Example",
+        ] {
+            let script = render_trampoline(Path::new(target));
+            assert_eq!(parse_trampoline(&script), Some(PathBuf::from(target)), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_script_xpack_did_not_write_says_nothing() {
+        assert_eq!(parse_trampoline("#!/bin/sh\nexec /somewhere/else\n"), None);
+        assert_eq!(parse_trampoline(""), None);
+    }
     use super::*;
 
     fn entry() -> Entry {

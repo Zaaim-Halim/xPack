@@ -123,6 +123,12 @@ fn a_windows_installer_carries_the_application_name_and_icon() {
     );
 
     assert!(resources.get_main_icon().unwrap().is_some(), "no icon was written");
+
+    // What Windows reads before the program runs: never elevated, and drawn
+    // at the display's real DPI rather than stretched.
+    let manifest = resources.get_manifest().unwrap().expect("a manifest");
+    assert!(manifest.contains(r#"level="asInvoker""#), "{manifest}");
+    assert!(manifest.contains(">true</dpiAware>"), "{manifest}");
 }
 
 #[test]

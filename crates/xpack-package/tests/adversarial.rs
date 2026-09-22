@@ -914,3 +914,70 @@ fn verifying_a_genuine_package_checks_every_file() {
     let checked = verified.verify_payload_digests().expect("a genuine package must pass");
     assert_eq!(checked, declared);
 }
+
+#[test]
+fn a_single_payload_file_reads_back_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let pkg = pack(dir.path(), &key, host());
+
+    let mut verified = PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap();
+    let bytes = verified.read_payload_file("application/app.jar", 1024).unwrap();
+    assert_eq!(bytes, b"pretend jar contents");
+}
+
+#[test]
+fn a_single_payload_file_that_was_altered_is_never_returned() {
+    // Same size, one flipped byte: only the digest can tell, and no byte may
+    // be handed out before it has.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let pkg = pack(dir.path(), &key, host());
+    let tampered = dir.path().join("tampered.xpkg");
+    rewrite(&pkg, &tampered, |name, mut data| {
+        if name == "payload/application/app.jar" {
+            data[0] ^= 0x01;
+        }
+        vec![Some((name.to_string(), data, None))]
+    });
+
+    let mut verified = PackageReader::open(&tampered).unwrap().verify(&trusting(&key)).unwrap();
+    let err = verified.read_payload_file("application/app.jar", 1024).unwrap_err();
+    assert!(err.is_integrity_failure(), "got {err:?}");
+}
+
+#[test]
+fn a_single_payload_file_longer_than_declared_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let declared: &[u8] = b"small";
+
+    let mut manifest = template(host());
+    manifest.launch.executable = "bin/app".into();
+    manifest.payload = PayloadSpec {
+        total_size: declared.len() as u64,
+        files: vec![xpack_core::PayloadFile {
+            path: "bin/app".into(),
+            size: declared.len() as u64,
+            sha256: xpack_security::sha256(declared),
+            mode: Some(0o755),
+        }],
+    };
+    let pkg = pack_forged(dir.path(), &key, &manifest, &[("bin/app", &[b'x'; 4096])]);
+
+    let mut verified = PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap();
+    let err = verified.read_payload_file("bin/app", 1024).unwrap_err();
+    assert!(err.is_integrity_failure(), "got {err:?}");
+}
+
+#[test]
+fn a_single_payload_file_is_read_only_when_declared_and_within_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let pkg = pack(dir.path(), &key, host());
+    let mut verified = PackageReader::open(&pkg).unwrap().verify(&trusting(&key)).unwrap();
+
+    assert!(verified.read_payload_file("not/there", 1024).is_err());
+    assert!(verified.read_payload_file("../manifest.json", 1024).is_err());
+    assert!(verified.read_payload_file("application/app.jar", 4).is_err(), "over the limit");
+}

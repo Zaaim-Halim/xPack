@@ -65,13 +65,33 @@ pub(crate) struct Args {
     #[arg(long, value_name = "DIR", default_value = ".")]
     out_dir: PathBuf,
 
-    /// Icon for the Windows executables, as `.png` or `.ico`.
+    /// Deprecated: the icon now comes from the package's `desktop.icon`.
     ///
-    /// Ignored on macOS and Linux, where an executable carries no icon: the
-    /// `.app` bundle and the `.desktop` entry supply one instead, from the
-    /// icon the manifest already names.
+    /// Still honoured, and still preferred when given, so existing builds keep
+    /// working; it prints a note saying so. Only the Windows executables use
+    /// it, as before.
     #[arg(long, value_name = "FILE")]
     icon: Option<PathBuf>,
+
+    /// Settings for the installation wizard, as a JSON file.
+    ///
+    /// Which pages appear, the licence to show, and a few lines of wording.
+    /// Every setting has a default, and so does the file: without it the
+    /// wizard is the recommended one. Branding is not here; it comes from
+    /// the signed package.
+    #[arg(long, value_name = "FILE")]
+    ui: Option<PathBuf>,
+
+    /// For a Windows target, build on the console installer instead of the
+    /// windowed one.
+    ///
+    /// The windowed build is the default: it is what a person double-clicks,
+    /// and it opens the installation wizard with no console behind it. A shell
+    /// does not wait for a windowed program, though, so an installer that is
+    /// only ever run by scripts is better built on the console one. Other
+    /// targets have one build and ignore this.
+    #[arg(long)]
+    console: bool,
 
     /// Do not make the installed version active.
     #[arg(long)]
@@ -112,18 +132,20 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         )
     })?;
 
+    let (ui, licence) = load_ui(args.ui.as_deref())?;
     let plan = InstallPlan {
-        format_version: InstallPlan::CURRENT_VERSION,
+        format_version: InstallPlan::format_for(ui.as_ref()),
         application_id: manifest.application.id.clone(),
         application_name: manifest.application.name.clone(),
         version: manifest.application.version.to_string(),
         signing_key: signing_key.clone(),
         activate: !args.no_activate,
+        ui,
     };
 
     let stub = match &args.stub {
         Some(path) => path.clone(),
-        None => super::sibling_binary_required("xpack-installer")?,
+        None => super::sibling_binary_required(stub_name(manifest.platform.os, args.console))?,
     };
     let binaries = resolve_binaries(args, manifest.platform.os)?;
 
@@ -131,10 +153,18 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // appended: rewriting a resource section moves bytes, so doing it to the
     // stub afterwards would leave the trailer pointing into the wrong place.
     let workshop = tempfile::tempdir().map_err(|e| Error::io(Path::new("temporary"), e))?;
-    let branded = brand_for_windows(&manifest, &binaries, args.icon.as_deref(), workshop.path())?;
+    let icon = resolve_icon(args, &manifest, &signing_key, workshop.path())?;
+    let windows_icon =
+        icon.as_ref().filter(|icon| icon.for_windows).map(|icon| icon.path.as_path());
+    let branded = brand_for_windows(&manifest, &binaries, windows_icon, workshop.path())?;
     let binaries = branded.as_ref().unwrap_or(&binaries);
 
-    let payload = xpack_installer::bundle::build(&plan, &args.package, binaries)?;
+    let payload = xpack_installer::bundle::build_with_licence(
+        &plan,
+        &args.package,
+        binaries,
+        licence.as_deref(),
+    )?;
 
     let target = manifest.platform.os;
     let output = match &args.out {
@@ -142,7 +172,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         None => args.out_dir.join(default_name(&manifest, target)),
     };
 
-    let stub = match brand_stub(&manifest, &stub, args.icon.as_deref(), workshop.path())? {
+    let stub = match brand_stub(&manifest, &stub, windows_icon, workshop.path())? {
         Some(branded) => branded,
         None => stub,
     };
@@ -150,7 +180,8 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     let layout = match target {
         // Appending to a Mach-O breaks its code signature beyond repair.
         Os::Macos => {
-            write_bundle(&output, &stub, &payload, &manifest.application.name)?;
+            let icns = icon.as_ref().filter(|icon| icon.is_icns()).map(|icon| icon.path.as_path());
+            write_bundle(&output, &stub, &payload, &manifest.application.name, icns)?;
             "bundle"
         }
         Os::Windows | Os::Linux => {
@@ -197,6 +228,97 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     }
 
     super::success()
+}
+
+/// Reads the wizard settings, and the licence they name.
+///
+/// The licence path is relative to the settings file. In the plan written
+/// into the installer it becomes the payload entry the licence travels as,
+/// so the one field says where the licence is in both places.
+fn load_ui(path: Option<&Path>) -> Result<(Option<xpack_installer::UiPlan>, Option<String>)> {
+    let Some(path) = path else {
+        return Ok((None, None));
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let mut ui: xpack_installer::UiPlan = serde_json::from_str(&text)
+        .map_err(|e| Error::invalid(path.display().to_string(), e.to_string()))?;
+    ui.validate()?;
+
+    let Some(relative) = &ui.license else {
+        return Ok((Some(ui), None));
+    };
+    let file = path.parent().unwrap_or(Path::new(".")).join(relative);
+    let bytes = std::fs::read(&file).map_err(|e| Error::io(&file, e))?;
+    let licence = xpack_installer::bundle::check_licence(&bytes)
+        .map_err(|e| Error::invalid(file.display().to_string(), e.to_string()))?
+        .to_string();
+    ui.license = Some(xpack_installer::bundle::LICENCE_ENTRY.to_string());
+    Ok((Some(ui), Some(licence)))
+}
+
+/// The icon the installer and its executables carry.
+struct ResolvedIcon {
+    /// A file holding it, in the workshop or where `--icon` named.
+    path: PathBuf,
+    /// Whether the Windows executables can carry it.
+    for_windows: bool,
+}
+
+impl ResolvedIcon {
+    fn is_icns(&self) -> bool {
+        self.path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("icns"))
+    }
+}
+
+/// Where the icon comes from: the package's own `desktop.icon`, the one
+/// source every other surface uses, unless `--icon` still names one.
+///
+/// Read from the package only after checking it against the key it declares,
+/// with the file's size and digest held to the signed manifest. A package
+/// that fails that is refused, as the installer would refuse it later. An
+/// icon that is merely unusable on Windows is left off the executables with
+/// a warning: a build that worked before an icon was inferred keeps working.
+fn resolve_icon(
+    args: &Args,
+    manifest: &xpack_core::Manifest,
+    signing_key: &str,
+    workshop: &Path,
+) -> Result<Option<ResolvedIcon>> {
+    if let Some(explicit) = &args.icon {
+        eprintln!(
+            "note: --icon is deprecated; the installer's icon now comes from the package's \
+             desktop.icon. It is still used because it was given."
+        );
+        return Ok(Some(ResolvedIcon { path: explicit.clone(), for_windows: true }));
+    }
+    let Some(name) = &manifest.desktop.icon else {
+        return Ok(None);
+    };
+
+    let key = xpack_security::PublicKey::parse_hex(signing_key)?;
+    let mut verified =
+        PackageReader::open(&args.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+    let bytes = match verified.read_payload_file(name, xpack_installer::MAX_ICON_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_integrity_failure() => return Err(error),
+        Err(error) => {
+            eprintln!("warning: the package's icon is not used: {error}");
+            return Ok(None);
+        }
+    };
+
+    let extension = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("icon");
+    let path = workshop.join(format!("application-icon.{extension}"));
+    xpack_core::atomic::write(&path, &bytes)?;
+
+    let for_windows = crate::branding::is_usable_icon(&bytes);
+    if manifest.platform.os == Os::Windows && !for_windows {
+        eprintln!(
+            "warning: {name} is not an .ico or an image this build can read, so the Windows \
+             executables carry no icon"
+        );
+    }
+    Ok(Some(ResolvedIcon { path, for_windows }))
 }
 
 /// Gives the runtime executables the application's name and icon.
@@ -314,6 +436,11 @@ fn brand_stub(
     Ok(Some(destination))
 }
 
+/// The installer build a target gets when no stub is named.
+fn stub_name(target: Os, console: bool) -> &'static str {
+    if target == Os::Windows && !console { "xpack-installerw" } else { "xpack-installer" }
+}
+
 /// The runtime binaries to ship, defaulting to those beside this executable.
 fn resolve_binaries(args: &Args, target: Os) -> Result<Vec<PathBuf>> {
     if !args.binaries.is_empty() {
@@ -371,7 +498,16 @@ fn write_appended(output: &Path, stub: &Path, payload: &[u8]) -> Result<()> {
 }
 
 /// Writes a macOS application bundle with the payload beside a pristine stub.
-fn write_bundle(output: &Path, stub: &Path, payload: &[u8], name: &str) -> Result<()> {
+///
+/// With an `.icns`, Finder shows the application's icon on the installer, as
+/// it will on the installed application.
+fn write_bundle(
+    output: &Path,
+    stub: &Path,
+    payload: &[u8],
+    name: &str,
+    icns: Option<&Path>,
+) -> Result<()> {
     let contents = output.join("Contents");
     let macos = contents.join("MacOS");
     let resources = contents.join("Resources");
@@ -386,9 +522,13 @@ fn write_bundle(output: &Path, stub: &Path, payload: &[u8], name: &str) -> Resul
     set_executable(&destination)?;
 
     xpack_core::atomic::write(&resources.join(SIDECAR_NAME), payload)?;
+    if let Some(icns) = icns {
+        let bytes = std::fs::read(icns).map_err(|e| Error::io(icns, e))?;
+        xpack_core::atomic::write(&resources.join(BUNDLE_ICON_FILE), &bytes)?;
+    }
     xpack_core::atomic::write(
         &contents.join("Info.plist"),
-        info_plist(name, &executable).as_bytes(),
+        info_plist(name, &executable, icns.is_some()).as_bytes(),
     )
 }
 
@@ -401,9 +541,17 @@ fn installer_display_name(application_name: &str) -> String {
     format!("Install {}", xpack_core::safe_file_name(application_name))
 }
 
+/// The icon's file name inside an installer bundle's `Resources`.
+const BUNDLE_ICON_FILE: &str = "AppIcon.icns";
+
 /// The bundle's `Info.plist`.
-fn info_plist(name: &str, executable: &str) -> String {
+fn info_plist(name: &str, executable: &str, has_icon: bool) -> String {
     let display = xml_escape(&installer_display_name(name));
+    let icon = if has_icon {
+        format!("\t<key>CFBundleIconFile</key>\n\t<string>{BUNDLE_ICON_FILE}</string>\n")
+    } else {
+        String::new()
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -413,7 +561,7 @@ fn info_plist(name: &str, executable: &str) -> String {
          \t<key>CFBundleExecutable</key>\n\t<string>{}</string>\n\
          \t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\
          \t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n\
-         </dict>\n</plist>\n",
+         {icon}</dict>\n</plist>\n",
         xml_escape(executable)
     )
 }
@@ -590,7 +738,7 @@ mod tests {
         // escaping is the only thing standing between it and a bundle that
         // will not launch. Angle brackets never arrive, because a filename
         // cannot carry them.
-        let plist = info_plist("Tom & Jerry <beta>", "app");
+        let plist = info_plist("Tom & Jerry <beta>", "app", false);
         assert!(plist.contains("Tom &amp; Jerry"), "{plist}");
         assert!(!plist.contains("<beta>"), "{plist}");
 
@@ -598,6 +746,70 @@ mod tests {
         // what Finder shows: the two disagreeing is a bundle that opens under
         // one name and is listed under another.
         assert!(plist.contains("Install Tom &amp; Jerry"), "{plist}");
+    }
+
+    #[test]
+    fn a_windows_installer_is_built_on_the_windowed_stub_unless_scripts_need_the_console() {
+        assert_eq!(stub_name(Os::Windows, false), "xpack-installerw");
+        assert_eq!(stub_name(Os::Windows, true), "xpack-installer");
+        // One build elsewhere, whatever was asked.
+        assert_eq!(stub_name(Os::Macos, false), "xpack-installer");
+        assert_eq!(stub_name(Os::Linux, true), "xpack-installer");
+    }
+
+    #[test]
+    fn the_plist_names_the_icon_only_when_there_is_one() {
+        assert!(info_plist("App", "app", true).contains("<string>AppIcon.icns</string>"));
+        assert!(!info_plist("App", "app", false).contains("CFBundleIconFile"));
+    }
+
+    /// Writes a settings file, and a licence beside it, into `dir`.
+    fn settings(dir: &Path, json: &str, licence: Option<&[u8]>) -> PathBuf {
+        let path = dir.join("ui.json");
+        std::fs::write(&path, json).unwrap();
+        if let Some(bytes) = licence {
+            std::fs::write(dir.join("LICENSE.txt"), bytes).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn no_settings_file_means_the_recommended_wizard() {
+        assert_eq!(load_ui(None).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn a_licence_is_read_beside_the_settings_file_and_carried_in_the_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings(dir.path(), r#"{"license": "LICENSE.txt"}"#, Some(b"Terms."));
+
+        let (ui, licence) = load_ui(Some(&path)).unwrap();
+        assert_eq!(licence.as_deref(), Some("Terms."));
+        assert_eq!(
+            ui.unwrap().license.as_deref(),
+            Some(xpack_installer::bundle::LICENCE_ENTRY),
+            "the plan points at where the licence travels"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_is_wrong_stops_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        for (json, licence) in [
+            // Misspelt: silently ignoring it would ship the default.
+            (r#"{"launchOnFinnish": true}"#, None),
+            // Branding has one source, the signed package.
+            (r#"{"logo": "logo.png"}"#, None),
+            // A placeholder that is not always available.
+            (r#"{"text": {"welcome": "By {publisher}"}}"#, None),
+            // A licence that is not there, or is empty, or is not text.
+            (r#"{"license": "missing.txt"}"#, None),
+            (r#"{"license": "LICENSE.txt"}"#, Some(&b"  \n"[..])),
+            (r#"{"license": "LICENSE.txt"}"#, Some(&[0xff, 0xfe, 0x00][..])),
+        ] {
+            let path = settings(dir.path(), json, licence);
+            assert!(load_ui(Some(&path)).is_err(), "{json} was accepted");
+        }
     }
 
     fn manifest_named(name: &str) -> xpack_core::Manifest {

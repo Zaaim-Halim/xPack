@@ -147,6 +147,9 @@ jobs:
           # to report to.
           if [ "${{ matrix.platform }}" = "windows-x64" ]; then
             cp "$out/xpack-launcherw$suffix" "staging/$name/"
+            # The installer a person double-clicks: it opens the wizard with
+            # no console behind it. Scripts use the console build.
+            cp "$out/xpack-installerw$suffix" "staging/$name/"
           fi
           # The update notifier ships where a dialog exists to be shown, and an
           # installation is given a copy only when its package asks to prompt.

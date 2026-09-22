@@ -79,6 +79,7 @@ pub(crate) fn build_package_named(
 ///
 /// The desktop entry refuses to point at a launcher that is not on disk, so a
 /// test exercising the entry has to supply something for it to find.
+#[allow(dead_code)]
 pub(crate) fn fake_binary(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
@@ -90,6 +91,7 @@ pub(crate) fn fake_binary(dir: &Path, name: &str) -> PathBuf {
 /// Every test that installs a package asking for a shortcut passes these.
 /// Without them the entry would land in the real application menu of whoever
 /// ran the suite, and stay there.
+#[allow(dead_code)]
 pub(crate) fn desktop_roots(base: &Path) -> xpack_install::integration::Roots {
     xpack_install::integration::Roots { data: base.join("data"), home: base.join("home") }
 }

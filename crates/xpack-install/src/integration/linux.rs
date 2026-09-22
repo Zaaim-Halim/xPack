@@ -92,6 +92,40 @@ pub(super) fn render(entry: &Entry) -> String {
     out
 }
 
+/// The launcher this user's `.desktop` entry for the application starts, if
+/// there is one.
+pub(super) fn recorded_target(application_id: &str, roots: &Roots) -> Option<PathBuf> {
+    let path = roots.data.join("applications").join(format!("{application_id}.desktop"));
+    parse_exec(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Reads back the path the `Exec=` line holds, exactly as it was written.
+fn parse_exec(entry: &str) -> Option<PathBuf> {
+    let line = entry.lines().find_map(|line| line.strip_prefix("Exec=\""))?;
+    let escaped = line.strip_suffix("\" %U")?;
+    Some(PathBuf::from(unescape(escaped)))
+}
+
+/// Undoes [`escape`].
+fn unescape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Escapes the characters the desktop entry format gives meaning to.
 ///
 /// A display name is free-form Unicode chosen by a publisher. A newline in one
@@ -103,6 +137,18 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_path_an_entry_starts_reads_back_exactly() {
+        let mut e = entry();
+        for target in
+            ["/home/me/.local/share/xpack/com.example.app/Example", "/home/My User/a\\b/Example"]
+        {
+            e.target = PathBuf::from(target);
+            let text = render(&e);
+            assert_eq!(parse_exec(&text), Some(PathBuf::from(target)), "{text}");
+        }
+    }
     use super::*;
     use std::path::Path;
 

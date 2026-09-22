@@ -17,23 +17,129 @@
 //! failure would appear on exactly the machines nobody can reproduce: the ones
 //! where the application was installed once and never touched again.
 //!
-//! # No window
+//! # No window here
 //!
-//! It reports on the console and returns an exit code. xPack draws no windows:
-//! a second, foreign-looking one that could not be themed or localised to
-//! match the application would be worse than none, and it would put a
-//! windowing stack inside a binary that has to stay small and cross-compile
-//! cleanly. A publisher wanting a graphical installer wraps this.
+//! This crate draws nothing. The installation wizard lives in
+//! `xpack-installer-ui`, which implements nothing of installing and reaches
+//! it only through [`xpack_installer_ui::Engine`], implemented here over
+//! [`VerifiedPayload`]. The executables that show it are built by
+//! `xpack-installer-stub`, the one crate that turns the window on: the
+//! developer CLI depends on this crate to build installers, and must not
+//! compile a windowing toolkit to do so.
 
 pub mod bundle;
+mod engine;
+
+pub use xpack_installer_ui::UiPlan;
 
 use std::path::{Path, PathBuf};
 
-use xpack_core::{Error, InstallPaths, Result};
-use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
+use xpack_core::{Error, InstallPaths, Manifest, Platform, ProgressReporter, Result};
+use xpack_install::{Existing, InstallOptions, Installer, TrustDecision, open_and_verify};
+use xpack_package::PackageReader;
 use xpack_platform::InstallLock;
+use xpack_security::PublicKey;
 
-use bundle::{BINARY_PREFIX, InstallPlan, PACKAGE_ENTRY, PLAN_ENTRY};
+use bundle::{BINARY_PREFIX, InstallPlan, LICENCE_ENTRY, PACKAGE_ENTRY, PLAN_ENTRY};
+
+/// Exit codes. Anything a script might branch on gets its own.
+///
+/// The same table `xpack` and `xpack-updater` use, so a monitoring system
+/// watching all three never has to ask which one a code came from.
+pub mod exit {
+    /// The application was installed.
+    pub const INSTALLED: u8 = 0;
+    /// The installation could not be completed.
+    pub const FAILED: u8 = 1;
+    /// A signature or checksum did not verify. Never worth retrying.
+    pub const INTEGRITY: u8 = 3;
+    /// Another xPack operation holds the lock. Worth retrying.
+    pub const BUSY: u8 = 4;
+    /// The person installing chose not to, before anything was changed.
+    pub const CANCELLED: u8 = 5;
+}
+
+/// Maps a failure to the exit code a script should branch on.
+///
+/// Uses the same predicate the CLI does rather than matching variants here, so
+/// the two cannot drift into disagreeing about what counts as a security
+/// failure — the one code a script must never retry.
+pub fn exit_code_for(error: &Error) -> u8 {
+    if error.is_integrity_failure() {
+        return exit::INTEGRITY;
+    }
+    match error {
+        Error::Locked(_) => exit::BUSY,
+        _ => exit::FAILED,
+    }
+}
+
+/// Where a root came from, which decides whether it may be changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSource {
+    /// Named on the command line or in `XPACK_INSTALL_ROOT`.
+    Given,
+    /// Where this user already has the application, found through its
+    /// desktop entry.
+    Found,
+    /// The per-user default.
+    Default,
+}
+
+/// The root an installation goes into, and why that one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRoot {
+    /// The directory holding the user's xPack applications.
+    pub root: PathBuf,
+    /// Where it came from.
+    pub source: RootSource,
+}
+
+/// Picks the root: the one given, else where the application already is,
+/// else the default.
+///
+/// An installation found elsewhere wins over the default because a second
+/// copy beside it would fight it over the same menu entry and uninstall
+/// entry, and removing either would take the other's entry with it.
+fn choose_root(
+    explicit: Option<&Path>,
+    recorded: impl FnOnce() -> Option<PathBuf>,
+    default: impl FnOnce() -> Result<PathBuf>,
+) -> Result<ResolvedRoot> {
+    if let Some(root) = explicit {
+        // Made absolute against the working directory, as the shell meant it.
+        // Kept relative, it would be written into the menu and uninstall
+        // entries, which then break the moment anything starts from elsewhere.
+        let root = std::path::absolute(root).map_err(|e| Error::io(root, e))?;
+        return Ok(ResolvedRoot { root, source: RootSource::Given });
+    }
+    if let Some(root) = recorded() {
+        return Ok(ResolvedRoot { root, source: RootSource::Found });
+    }
+    Ok(ResolvedRoot { root: default()?, source: RootSource::Default })
+}
+
+/// What the person installing chose.
+///
+/// Every field that is not the root defaults to what happens when nobody is
+/// asked, so an installer run without a window and one whose wizard was
+/// clicked straight through do exactly the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// The directory holding the user's xPack applications. The
+    /// application's own directory is made inside it.
+    pub root: PathBuf,
+    /// Whether to add the desktop entry the package asks for. `None` leaves
+    /// it to the package. See [`InstallOptions::desktop_entry`].
+    pub desktop_entry: Option<bool>,
+}
+
+impl Request {
+    /// Install into `root`, choosing nothing else.
+    pub fn new(root: PathBuf) -> Self {
+        Self { root, desktop_entry: None }
+    }
+}
 
 /// What an installation run produced.
 #[derive(Debug)]
@@ -54,15 +160,23 @@ pub struct Outcome {
 ///
 /// Held together with the directory so the files outlive the archive and are
 /// cleaned up when the installer exits, however it exits.
+///
+/// Nothing can be installed from this: see [`Payload::verify`].
 pub struct Payload {
     _directory: tempfile::TempDir,
     plan: InstallPlan,
     package: PathBuf,
     binaries: Vec<PathBuf>,
+    licence: Option<String>,
 }
 
 impl Payload {
     /// The install plan the publisher wrote at build time.
+    ///
+    /// Unsigned. It shapes how the wizard looks — which pages, the licence,
+    /// a few reworded lines — but no fact about the application and nothing
+    /// about where it is installed comes from it: those come from the verified
+    /// manifest and the root resolved by [`VerifiedPayload::resolve_root`].
     pub fn plan(&self) -> &InstallPlan {
         &self.plan
     }
@@ -85,6 +199,7 @@ impl Payload {
         let mut plan = None;
         let mut package = None;
         let mut binaries = Vec::new();
+        let mut licence = None;
 
         for index in 0..archive.len() {
             let mut entry = archive
@@ -114,6 +229,8 @@ impl Payload {
             } else if name.starts_with(BINARY_PREFIX) {
                 make_executable(&destination)?;
                 binaries.push(destination);
+            } else if name == LICENCE_ENTRY {
+                licence = Some(read_licence(&destination)?);
             }
         }
 
@@ -125,54 +242,36 @@ impl Payload {
         })?;
 
         binaries.sort();
-        Ok(Self { _directory: directory, plan, package, binaries })
+        Ok(Self { _directory: directory, plan, package, binaries, licence })
     }
 
-    /// Installs the application into `root`.
+    /// Checks the package before anything is shown or installed.
     ///
-    /// `root` is the directory holding every xPack application for this user,
-    /// not this application's own directory — the layout appends the
-    /// application id itself, exactly as every other entry point does.
-    pub fn install_into(&self, root: &Path) -> Result<Outcome> {
-        let paths = InstallPaths::new(root, &self.plan.application_id)?;
-        let key = xpack_security::PublicKey::parse_hex(&self.plan.signing_key)?;
+    /// Its signature against the key the publisher pinned into this
+    /// installer, and its platform against this machine. Only what this
+    /// returns can be inspected or installed, so neither the console nor a
+    /// window can reach an installation without passing through here first,
+    /// and every fact either of them shows comes from a manifest that has.
+    ///
+    /// The plan is held to the package too. It names the application so it
+    /// can be described before anything is read, but it is not signed; a plan
+    /// naming a different application than the signed package is a rewritten
+    /// installer, and nothing is installed from it.
+    pub fn verify(self) -> Result<VerifiedPayload> {
+        let key = PublicKey::parse_hex(&self.plan.signing_key)?;
+        let mut verified =
+            PackageReader::open(&self.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+        verified.ensure_installable_on(Platform::host()?)?;
+        let manifest = verified.manifest().clone();
 
-        let lock = InstallLock::acquire(&paths)?;
-
-        // Pinned, never trust-on-first-use. The key travelled inside the
-        // artefact the publisher built, so the package is held to *their* key
-        // rather than to whichever key happened to sign the first download.
-        // The same key is pinned into the installation, so every later update
-        // is held to it too.
-        let mut verified = open_and_verify(&self.package, &lock, &TrustDecision::Explicit(key))?;
-
-        let options = InstallOptions {
-            activate: self.plan.activate,
-            allow_downgrade: false,
-            launcher: self.binary("xpack-launcher"),
-            gui_launcher: self.binary("xpack-launcherw"),
-            updater: self.binary("xpack-updater"),
-            uninstaller: self.binary("xpack-uninstaller"),
-            notifier: self.binary("xpack-notify"),
-            desktop_roots: None,
-        };
-
-        let installed = Installer::new(&lock).install(&mut verified, &options)?;
-
-        // Read after the install, because that is when an installation is
-        // given the names its executables carry. Reporting the path this
-        // binary was built expecting would print one the user cannot run.
-        let names = lock
-            .load_or_new_state(&self.plan.application_id)
-            .map_or(xpack_core::BinaryNames::Xpack, |state| state.binary_names());
-
-        Ok(Outcome {
-            root: paths.root().to_path_buf(),
-            version: installed.version,
-            activated: installed.activated,
-            launcher: launcher_to_report(&paths, &names),
-            desktop: installed.desktop,
-        })
+        if manifest.application.id != self.plan.application_id {
+            return Err(Error::Integrity(format!(
+                "the installer names {:?} but its signed package is {:?}",
+                self.plan.application_id, manifest.application.id
+            )));
+        }
+        let icon = read_icon(&mut verified)?;
+        Ok(VerifiedPayload { payload: self, key, manifest, icon })
     }
 
     /// Finds a runtime binary in the payload by its stem.
@@ -185,6 +284,167 @@ impl Payload {
             .find(|path| path.file_stem().is_some_and(|found| found == stem))
             .cloned()
     }
+}
+
+/// The largest icon read out of a package for the installer to show.
+///
+/// A macOS `.icns` with every size up to 1024 pixels runs to a few megabytes;
+/// anything bigger is not an icon.
+pub const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The application's icon, as its package declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Icon {
+    /// Its path in the package, whose extension says what format it is.
+    pub name: String,
+    /// Its bytes, checked against the signed manifest.
+    pub bytes: Vec<u8>,
+}
+
+/// Reads the icon the manifest names, from the package that was just verified.
+///
+/// The one source of the application's icon: the same file the installed
+/// menu entry uses, covered by the same signature. An icon that fails its
+/// digest means a tampered package and refuses the install; one that is
+/// merely too large to show is left out, and the window falls back to a
+/// default.
+fn read_icon(package: &mut xpack_package::VerifiedPackage) -> Result<Option<Icon>> {
+    let Some(name) = package.manifest().desktop.icon.clone() else {
+        return Ok(None);
+    };
+    match package.read_payload_file(&name, MAX_ICON_BYTES) {
+        Ok(bytes) => Ok(Some(Icon { name, bytes })),
+        Err(error) if error.is_integrity_failure() => Err(error),
+        Err(error) => {
+            tracing::warn!(%error, "the application's icon cannot be shown");
+            Ok(None)
+        }
+    }
+}
+
+/// A payload whose package has been verified.
+pub struct VerifiedPayload {
+    payload: Payload,
+    key: PublicKey,
+    manifest: Manifest,
+    icon: Option<Icon>,
+}
+
+impl VerifiedPayload {
+    /// The verified manifest: the only source of what may be shown about the
+    /// application.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// The install plan the publisher wrote at build time. Unsigned.
+    pub fn plan(&self) -> &InstallPlan {
+        &self.payload.plan
+    }
+
+    /// The wizard's settings: the publisher's, or the recommended ones.
+    pub fn ui(&self) -> xpack_installer_ui::UiPlan {
+        self.payload.plan.ui.clone().unwrap_or_default()
+    }
+
+    /// The licence the wizard shows, when the installer carries one.
+    pub fn licence(&self) -> Option<&str> {
+        self.payload.licence.as_deref()
+    }
+
+    /// The application's icon, read from the verified package.
+    pub fn icon(&self) -> Option<&Icon> {
+        self.icon.as_ref()
+    }
+
+    /// The application's own directory under `root`.
+    pub fn paths(&self, root: &Path) -> Result<InstallPaths> {
+        InstallPaths::new(root, &self.manifest.application.id)
+    }
+
+    /// The root to install into: the one given, else where this user already
+    /// has the application, else the default. Every way of installing uses
+    /// this, so none of them makes a second copy the others would not.
+    pub fn resolve_root(&self, explicit: Option<&Path>) -> Result<ResolvedRoot> {
+        choose_root(explicit, || self.recorded_root(), xpack_core::paths::default_install_root)
+    }
+
+    /// Where this user already has the application, according to its desktop
+    /// entry, when that entry leads to a real installation of it.
+    pub fn recorded_root(&self) -> Option<PathBuf> {
+        let application = &self.manifest.application;
+        xpack_install::integration::recorded_installation_for_user(
+            &application.id,
+            &application.name,
+        )
+    }
+
+    /// What installing into `root` would find. Changes nothing.
+    pub fn inspect(&self, root: &Path) -> Result<Existing> {
+        Ok(xpack_install::inspect(&self.paths(root)?, &self.manifest.application.version))
+    }
+
+    /// Installs the application as `request` asks, reporting progress.
+    pub fn install_into(
+        &self,
+        request: &Request,
+        progress: &dyn ProgressReporter,
+    ) -> Result<Outcome> {
+        let paths = self.paths(&request.root)?;
+        let lock = InstallLock::acquire(&paths)?;
+
+        // Verified again, under the lock, by the path every install takes.
+        // The early check decided what could be shown; this one is what the
+        // installation is built from, and it pins the publisher's key so
+        // every later update is held to it too.
+        let mut verified = open_and_verify(
+            &self.payload.package,
+            &lock,
+            &TrustDecision::Explicit(self.key.clone()),
+        )?;
+
+        let payload = &self.payload;
+        let options = InstallOptions {
+            activate: payload.plan.activate,
+            allow_downgrade: false,
+            launcher: payload.binary("xpack-launcher"),
+            gui_launcher: payload.binary("xpack-launcherw"),
+            updater: payload.binary("xpack-updater"),
+            uninstaller: payload.binary("xpack-uninstaller"),
+            notifier: payload.binary("xpack-notify"),
+            desktop_roots: None,
+            desktop_entry: request.desktop_entry,
+        };
+
+        let installed =
+            Installer::new(&lock).install_with_progress(&mut verified, &options, progress)?;
+
+        // Read after the install, because that is when an installation is
+        // given the names its executables carry. Reporting the path this
+        // binary was built expecting would print one the user cannot run.
+        let names = lock
+            .load_or_new_state(&self.manifest.application.id)
+            .map_or(xpack_core::BinaryNames::Xpack, |state| state.binary_names());
+
+        Ok(Outcome {
+            root: paths.root().to_path_buf(),
+            version: installed.version,
+            activated: installed.activated,
+            launcher: launcher_to_report(&paths, &names),
+            desktop: installed.desktop,
+        })
+    }
+}
+
+/// Reads the licence out of the unpacked payload, held to the same rules it
+/// was built under: the payload is not signed, so nothing about it is assumed.
+fn read_licence(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path).map_err(|e| Error::io(path, e))?.len();
+    if usize::try_from(size).map_or(true, |size| size > bundle::MAX_LICENCE_BYTES) {
+        return Err(Error::invalid("licence", format!("is {size} bytes, over the limit")));
+    }
+    let bytes = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+    Ok(bundle::check_licence(&bytes)?.to_string())
 }
 
 /// The launcher to tell the user about, which has to be one that is there.
@@ -261,6 +521,42 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_given_root_wins_then_an_existing_installation_then_the_default() {
+        let found = || Some(PathBuf::from("/found"));
+        let nothing = || None;
+        let default = || Ok(PathBuf::from("/default"));
+
+        let given = choose_root(Some(Path::new("/given")), found, default).unwrap();
+        assert_eq!(given, ResolvedRoot { root: "/given".into(), source: RootSource::Given });
+
+        let existing = choose_root(None, found, default).unwrap();
+        assert_eq!(existing, ResolvedRoot { root: "/found".into(), source: RootSource::Found });
+
+        let fresh = choose_root(None, nothing, default).unwrap();
+        assert_eq!(fresh, ResolvedRoot { root: "/default".into(), source: RootSource::Default });
+    }
+
+    #[test]
+    fn a_relative_given_root_is_made_absolute_against_the_working_directory() {
+        let resolved =
+            choose_root(Some(Path::new("apps")), || None, || Ok(PathBuf::from("/default")))
+                .unwrap();
+        assert!(resolved.root.is_absolute(), "{}", resolved.root.display());
+        assert_eq!(resolved.root, std::env::current_dir().unwrap().join("apps"));
+    }
+
+    #[test]
+    fn a_given_root_is_used_without_looking_anywhere_else() {
+        // Looking reads the user's real entries; a given root must not.
+        let resolved = choose_root(
+            Some(Path::new("/given")),
+            || panic!("looked for an existing installation"),
+            || panic!("resolved the default"),
+        );
+        assert_eq!(resolved.unwrap().source, RootSource::Given);
+    }
 
     #[test]
     fn an_ordinary_entry_name_joins_under_the_root() {

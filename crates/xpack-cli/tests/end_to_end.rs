@@ -769,12 +769,23 @@ fn an_installer_installs_an_application_that_then_runs() {
     };
 
     let root = fixture.path().join("installed");
+    // `--silent` so this can never wait on a window: builds that open a
+    // wizard do so only when run without it.
     let ran = Command::new(&installer)
         .current_dir(fixture.path())
-        .args(["--root", &root.to_string_lossy()])
+        .args(["--root", &root.to_string_lossy(), "--silent"])
         .output()
         .expect("the installer should run");
     assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
+
+    // Asking again says what installing again would do, with its exit code,
+    // and changes nothing.
+    let asked = Command::new(&installer)
+        .args(["--root", &root.to_string_lossy(), "--silent", "--dry-run"])
+        .output()
+        .expect("the installer should run");
+    assert_eq!(asked.status.code(), Some(1), "{}", stdout(&asked));
+    assert!(stdout(&asked).contains("already installed"), "{}", stdout(&asked));
 
     // And now the application itself. Which launcher that is differs by
     // platform — Windows installs a windowed build as well as a console one
@@ -838,10 +849,84 @@ fn a_dry_run_installs_nothing() {
 
     let root = fixture.path().join("installed");
     let ran = Command::new(&installer)
-        .args(["--root", &root.to_string_lossy(), "--dry-run"])
+        .args(["--root", &root.to_string_lossy(), "--silent", "--dry-run"])
         .output()
         .expect("the installer should run");
 
     assert!(ran.status.success(), "{}", stderr(&ran));
     assert!(!root.exists(), "a dry run created {}", root.display());
+}
+
+#[test]
+fn an_installer_carries_the_wizard_settings_and_the_packages_icon() {
+    if !installer_binaries_are_built() {
+        eprintln!(
+            "skipping: run `cargo build --workspace` first; see installer_binaries_are_built"
+        );
+        return;
+    }
+
+    let fixture = Fixture::new();
+    fixture.keygen();
+    fixture.write_payload("1.0.0", 0);
+
+    // The icon is named once, in the package, and every surface takes it
+    // from there.
+    let icon: &[u8] = b"not a real icns, but the bytes must arrive intact";
+    std::fs::write(fixture.path().join("payload-1.0.0/icon.icns"), icon).unwrap();
+    let config_path = fixture.path().join("xpack-1.0.0.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["desktop"] = serde_json::json!({ "icon": "icon.icns" });
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let package = fixture.pack_existing("1.0.0");
+
+    std::fs::write(fixture.path().join("LICENSE.txt"), "Terms of use.").unwrap();
+    std::fs::write(fixture.path().join("ui.json"), r#"{"license": "LICENSE.txt"}"#).unwrap();
+
+    let built = fixture.run(&[
+        "installer",
+        &package,
+        "--out",
+        "Demo-installer",
+        "--stub",
+        &installer_stub().to_string_lossy(),
+        "--ui",
+        "ui.json",
+    ]);
+    assert!(built.status.success(), "building the installer failed: {}", stderr(&built));
+
+    let bundle = fixture.path().join("Demo-installer/Contents");
+    let installer = if bundle.is_dir() {
+        // macOS: Finder shows the package's icon on the installer itself.
+        assert_eq!(std::fs::read(bundle.join("Resources/AppIcon.icns")).unwrap(), icon);
+        let plist = std::fs::read_to_string(bundle.join("Info.plist")).unwrap();
+        assert!(plist.contains("CFBundleIconFile"), "{plist}");
+        std::fs::read_dir(bundle.join("MacOS")).unwrap().next().unwrap().unwrap().path()
+    } else {
+        fixture.path().join("Demo-installer")
+    };
+
+    // The settings change nothing for a run without a window.
+    let root = fixture.path().join("installed");
+    let ran = Command::new(&installer)
+        .args(["--root", &root.to_string_lossy(), "--silent", "--dry-run"])
+        .output()
+        .expect("the installer should run");
+    assert!(ran.status.success(), "{}", stderr(&ran));
+
+    // And a settings file that is wrong stops the build rather than shipping
+    // a default nobody asked for.
+    std::fs::write(fixture.path().join("bad.json"), r#"{"launchOnFinnish": true}"#).unwrap();
+    let refused = fixture.run(&[
+        "installer",
+        &package,
+        "--out",
+        "Refused-installer",
+        "--stub",
+        &installer_stub().to_string_lossy(),
+        "--ui",
+        "bad.json",
+    ]);
+    assert!(!refused.status.success(), "a misspelt setting was accepted");
 }

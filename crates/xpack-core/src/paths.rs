@@ -103,6 +103,27 @@ impl InstallPaths {
         self.state_dir().join("state.json")
     }
 
+    /// The user's recorded choice about a desktop entry, when they made one.
+    ///
+    /// A file of its own rather than a field in the state document. The
+    /// updater in an installation is never replaced, and an older one saving
+    /// state would drop a field it had never heard of; a file it never opens
+    /// it cannot lose.
+    pub fn desktop_preference_file(&self) -> PathBuf {
+        self.state_dir().join("desktop.json")
+    }
+
+    /// Whether a version's files are present: its directory and the manifest
+    /// it was installed from.
+    ///
+    /// State and the filesystem are separate sources of truth, and they can
+    /// diverge: a user deletes a directory, a removal half-succeeds, a disk
+    /// fails. Anything deciding whether a recorded version is really there
+    /// asks this, so installing and looking can never disagree about it.
+    pub fn has_version_files(&self, version: &Version) -> bool {
+        self.version_dir(version).is_dir() && self.version_manifest_file(version).is_file()
+    }
+
     /// The cross-process installation lock file.
     pub fn lock_file(&self) -> PathBuf {
         self.state_dir().join("update.lock")

@@ -16,10 +16,11 @@ path = "src/main.rs"
 xpack-core.workspace = true
 clap.workspace = true
 
-# The only graphical dependency in the workspace, and it is confined to this
-# crate and to Windows. Nothing else links it, so the launcher and the updater
-# keep their dependency lists — and a platform with no dialog still builds this
-# binary, it simply reports that it could not show one.
+# Graphical, and confined to this crate and to Windows. The launcher and the
+# updater never link it, so their dependency lists stay as they are — and a
+# platform with no dialog still builds this binary, it simply reports that it
+# could not show one. The installation wizard has its own, in
+# `xpack-installer-ui`, turned on only for the installer executables.
 [target.'cfg(windows)'.dependencies]
 native-windows-gui = { version = "1.0.13", default-features = false }
 

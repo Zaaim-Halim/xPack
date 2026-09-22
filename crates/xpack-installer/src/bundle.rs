@@ -63,6 +63,17 @@ pub const PLAN_ENTRY: &str = "install.json";
 /// Entry in the payload archive holding the application package.
 pub const PACKAGE_ENTRY: &str = "application.xpkg";
 
+/// Entry in the payload archive holding the licence the wizard shows.
+///
+/// The one piece of the wizard's content the signed package does not carry.
+/// Everything else it shows — name, publisher, icon — is read from the
+/// verified package itself.
+pub const LICENCE_ENTRY: &str = "ui/license.txt";
+
+/// The largest licence carried, in bytes. Longer than any licence a person
+/// reads in a wizard, and short enough that a window can show it whole.
+pub const MAX_LICENCE_BYTES: usize = 256 * 1024;
+
 /// Directory in the payload archive holding the xPack runtime binaries.
 pub const BINARY_PREFIX: &str = "bin/";
 
@@ -96,11 +107,26 @@ pub struct InstallPlan {
     pub signing_key: String,
     /// Whether the installed version should be made active immediately.
     pub activate: bool,
+    /// How the installation wizard looks, where the publisher said.
+    ///
+    /// Absent, the wizard is the recommended one and every choice in it
+    /// defaults to what the installer does without a window. Not a trust
+    /// input either: nothing in it can change what gets installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<xpack_installer_ui::UiPlan>,
 }
 
 impl InstallPlan {
-    /// Format written by this build.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// The newest format this build reads and writes.
+    pub const CURRENT_VERSION: u32 = 2;
+
+    /// The format a plan with these settings is written in.
+    ///
+    /// The oldest one that can express them, so that a plan with no wizard
+    /// settings stays readable by a stub built before they existed.
+    pub fn format_for(ui: Option<&xpack_installer_ui::UiPlan>) -> u32 {
+        if ui.is_some() { Self::CURRENT_VERSION } else { 1 }
+    }
 
     /// Rejects a plan from a newer installer than this one understands.
     pub fn ensure_supported(&self) -> Result<()> {
@@ -323,6 +349,16 @@ pub fn read(executable: &Path, source: &Source) -> Result<Vec<u8>> {
 /// to disagree, and the symptom would be an installer that fails on a user's
 /// machine and nowhere else.
 pub fn build(plan: &InstallPlan, package: &Path, binaries: &[PathBuf]) -> Result<Vec<u8>> {
+    build_with_licence(plan, package, binaries, None)
+}
+
+/// [`build`], also carrying the licence the wizard shows.
+pub fn build_with_licence(
+    plan: &InstallPlan,
+    package: &Path,
+    binaries: &[PathBuf],
+    licence: Option<&str>,
+) -> Result<Vec<u8>> {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
@@ -357,8 +393,33 @@ pub fn build(plan: &InstallPlan, package: &Path, binaries: &[PathBuf]) -> Result
         writer.write_all(&bytes).map_err(|e| Error::io(binary, e))?;
     }
 
+    if let Some(licence) = licence {
+        check_licence(licence.as_bytes())?;
+        writer.start_file(LICENCE_ENTRY, options).map_err(|e| zip_error(&e))?;
+        writer.write_all(licence.as_bytes()).map_err(|e| Error::io(Path::new(LICENCE_ENTRY), e))?;
+    }
+
     let cursor = writer.finish().map_err(|e| zip_error(&e))?;
     Ok(cursor.into_inner())
+}
+
+/// Checks licence text: present, within the size limit, and UTF-8.
+///
+/// Applied when an installer is built, so a publisher hears about it, and
+/// again when one is unpacked, because the payload is not signed.
+pub fn check_licence(bytes: &[u8]) -> Result<&str> {
+    if bytes.len() > MAX_LICENCE_BYTES {
+        return Err(Error::invalid(
+            "licence",
+            format!("is {} bytes; the limit is {MAX_LICENCE_BYTES}", bytes.len()),
+        ));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| Error::invalid("licence", format!("is not UTF-8 text: {e}")))?;
+    if text.trim().is_empty() {
+        return Err(Error::invalid("licence", "is empty"));
+    }
+    Ok(text)
 }
 
 fn zip_error(e: &zip::result::ZipError) -> Error {
@@ -443,7 +504,41 @@ mod tests {
             version: "1.0.0".into(),
             signing_key: "00".repeat(32),
             activate: true,
+            ui: None,
         };
         assert!(plan.ensure_supported().is_err());
+    }
+
+    /// A format 1 plan, exactly as a stub built before wizard settings wrote it.
+    const FORMAT_ONE: &str = r#"{
+        "formatVersion": 1,
+        "applicationId": "com.example.app",
+        "applicationName": "Example",
+        "version": "1.0.0",
+        "signingKey": "0000000000000000000000000000000000000000000000000000000000000000",
+        "activate": true
+    }"#;
+
+    #[test]
+    fn a_plan_from_before_wizard_settings_is_still_read() {
+        let plan: InstallPlan = serde_json::from_str(FORMAT_ONE).expect("a format 1 plan");
+        plan.ensure_supported().expect("still supported");
+        assert_eq!(plan.ui, None);
+    }
+
+    #[test]
+    fn a_plan_without_wizard_settings_is_written_in_the_old_format() {
+        // So a stub built before the settings existed can still read it: that
+        // stub refuses any field it does not know, and any newer format.
+        assert_eq!(InstallPlan::format_for(None), 1);
+        let plan: InstallPlan = serde_json::from_str(FORMAT_ONE).expect("a format 1 plan");
+        let written = serde_json::to_string(&plan).expect("serialises");
+        assert!(!written.contains("\"ui\""), "{written}");
+    }
+
+    #[test]
+    fn a_plan_with_wizard_settings_says_so_in_its_format() {
+        let ui = xpack_installer_ui::UiPlan::default();
+        assert_eq!(InstallPlan::format_for(Some(&ui)), 2);
     }
 }

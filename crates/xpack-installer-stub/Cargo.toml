@@ -1,0 +1,35 @@
+[package]
+name = "xpack-installer-stub"
+description = "The installer executables every xPack installer is built on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The console build: what scripts run, and on macOS what the installer bundle
+# runs, opening the wizard unless asked not to.
+[[bin]]
+name = "xpack-installer"
+path = "src/main.rs"
+
+# The windowed build, for Windows: what a person double-clicks. The same code;
+# only the subsystem differs, so no console opens behind the wizard.
+[[bin]]
+name = "xpack-installerw"
+path = "src/bin/installerw.rs"
+
+# The one crate that turns the wizard's window on. Kept apart from
+# `xpack-installer` because the developer CLI depends on that one to build
+# installers, and must not compile a windowing toolkit to do so.
+[dependencies]
+xpack-core.workspace = true
+xpack-install.workspace = true
+xpack-installer.workspace = true
+xpack-installer-ui = { workspace = true, features = ["window"] }
+xpack-log.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

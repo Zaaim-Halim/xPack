@@ -223,6 +223,43 @@ pub fn place_icon(paths: &InstallPaths, manifest: &Manifest, version: &Version) 
     }
 }
 
+/// The user's recorded choice about the desktop entry.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Preference {
+    format_version: u32,
+    entry: bool,
+}
+
+/// Records that the user does not want a desktop entry.
+///
+/// Written before the install does anything else, so there is no moment in
+/// which an entry could be created against the user's wish.
+pub(crate) fn record_declined(paths: &InstallPaths) -> xpack_core::Result<()> {
+    let file = paths.desktop_preference_file();
+    xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(&file)?)?;
+    xpack_core::atomic::write_json(&file, &Preference { format_version: 1, entry: false })
+}
+
+/// Whether the user declined a desktop entry for this installation.
+///
+/// A record that exists but cannot be read counts as declined. The only
+/// record ever written says "no", and guessing "yes" would write into a
+/// user's menu against what they most likely chose.
+pub(crate) fn is_declined(paths: &InstallPaths) -> bool {
+    let file = paths.desktop_preference_file();
+    if !file.exists() {
+        return false;
+    }
+    match xpack_core::atomic::read_json::<Preference>(&file) {
+        Ok(preference) => !preference.entry,
+        Err(error) => {
+            tracing::warn!(%error, "unreadable desktop preference; treating it as declined");
+            true
+        }
+    }
+}
+
 /// Where this platform's desktop entries live.
 ///
 /// Passed in rather than looked up inside each platform module, for the same
@@ -263,6 +300,56 @@ pub fn install(entry: &Entry) -> Outcome {
 /// Creates the entry under an explicit set of directories.
 pub fn install_into(entry: &Entry, roots: &Roots) -> Outcome {
     platform_install(entry, roots)
+}
+
+/// Where this user already has the application installed, according to its
+/// desktop entry: the root holding it, as `--root` would name it.
+///
+/// For finding an installation that is not in the default place, so a second
+/// copy is not made beside it. The entries are the ones xPack writes: the
+/// Add/Remove Programs record on Windows, the `~/Applications` bundle on
+/// macOS, the `.desktop` file on Linux.
+///
+/// What an entry says is only a lead. It is believed only if the directory it
+/// names is called after the application and holds that application's
+/// installation state: an entry left behind by a removed installation, or
+/// edited by hand, points nowhere useful and is ignored.
+pub fn recorded_installation(application_id: &str, name: &str, roots: &Roots) -> Option<PathBuf> {
+    let application_dir = recorded_application_dir(application_id, name, roots)?;
+    if application_dir.file_name()? != application_id {
+        return None;
+    }
+    let paths = InstallPaths::from_application_dir(&application_dir);
+    let state = xpack_core::InstallState::load(&paths.state_file()).ok()?.value;
+    if state.application_id != application_id {
+        return None;
+    }
+    application_dir.parent().map(Path::to_path_buf)
+}
+
+/// [`recorded_installation`], in this user's own directories.
+pub fn recorded_installation_for_user(application_id: &str, name: &str) -> Option<PathBuf> {
+    recorded_installation(application_id, name, &host_roots()?)
+}
+
+/// The application's own directory, as this platform's entry records it.
+#[cfg(target_os = "macos")]
+fn recorded_application_dir(_application_id: &str, name: &str, roots: &Roots) -> Option<PathBuf> {
+    macos::recorded_target(name, roots)?.parent().map(Path::to_path_buf)
+}
+
+/// The application's own directory, as this platform's entry records it.
+#[cfg(target_os = "linux")]
+fn recorded_application_dir(application_id: &str, _name: &str, roots: &Roots) -> Option<PathBuf> {
+    linux::recorded_target(application_id, roots)?.parent().map(Path::to_path_buf)
+}
+
+/// The application's own directory, as this platform's entry records it.
+///
+/// Read from the registry, which has no directory to redirect in a test.
+#[cfg(windows)]
+fn recorded_application_dir(application_id: &str, _name: &str, _roots: &Roots) -> Option<PathBuf> {
+    windows::recorded_root(application_id)
 }
 
 /// Removes the entry from under an explicit set of directories.

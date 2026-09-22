@@ -52,7 +52,53 @@ pub(crate) struct Branding<'a> {
     pub publisher: Option<&'a str>,
 }
 
-/// Rewrites an executable's icon and version information in place.
+/// Whether these bytes are an icon a Windows executable can carry.
+///
+/// An `.ico` as it is, or any image this build can decode. Asked of an icon
+/// that was not handed over explicitly, so a package whose icon suits another
+/// platform still builds, only without one.
+pub(crate) fn is_usable_icon(bytes: &[u8]) -> bool {
+    (bytes.len() >= 4 && bytes[..4] == ICO_MAGIC) || image::load_from_memory(bytes).is_ok()
+}
+
+/// The application manifest every branded executable carries.
+///
+/// Three things Windows otherwise decides for itself, each wrongly for xPack:
+///
+/// * **`asInvoker`.** Without a declared execution level, Windows guesses
+///   from the file name whether a program is an installer, and names with
+///   "Setup", "Install" or "Update" in them — which every one of these has —
+///   are guessed to need administrator rights. The guess applies to 32-bit
+///   programs only, but it must never be made: nothing xPack runs is elevated.
+/// * **System DPI awareness.** Without it Windows draws a window at 96 DPI
+///   and stretches the bitmap, which blurs every word on a scaled display.
+///   System-aware rather than per-monitor, because the windows these programs
+///   draw are laid out once, at the DPI they start with.
+/// * **Common Controls 6.** The current look of buttons and checkboxes, rather
+///   than the one from Windows 95.
+const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+
+/// Rewrites an executable's icon, version information and manifest in place.
 ///
 /// The file is read, rewritten in memory and written back atomically, so an
 /// interrupted run cannot leave a half-edited executable behind.
@@ -69,6 +115,9 @@ pub(crate) fn apply(binary: &Path, branding: &Branding, icon: Option<&Path>) -> 
     resources
         .set_version_info(&version_info(branding))
         .map_err(|e| Error::invalid("executable", format!("version information: {e}")))?;
+    resources
+        .set_manifest(MANIFEST)
+        .map_err(|e| Error::invalid("executable", format!("manifest: {e}")))?;
 
     image
         .set_resource_directory(resources)
@@ -212,6 +261,42 @@ mod tests {
 
         assert_eq!(info.strings[0].key, LANGUAGE);
         assert_eq!(info.vars, vec![VersionU16 { major: LANGUAGE_ID, minor: CODEPAGE }]);
+    }
+
+    #[test]
+    fn the_manifest_never_asks_for_elevation_and_declares_system_dpi_awareness() {
+        assert!(MANIFEST.contains(r#"<requestedExecutionLevel level="asInvoker""#));
+        assert!(!MANIFEST.contains("requireAdministrator"));
+        assert!(!MANIFEST.contains("highestAvailable"));
+        assert!(MANIFEST.contains(">true</dpiAware>"));
+        // Per-monitor would promise a relayout on every monitor change that
+        // these windows do not do.
+        assert!(!MANIFEST.contains("PerMonitor"));
+        assert!(MANIFEST.contains(r#"name="Microsoft.Windows.Common-Controls" version="6.0.0.0""#));
+    }
+
+    #[test]
+    fn the_manifest_is_well_formed_xml_windows_will_load() {
+        // A manifest Windows cannot parse stops the program from starting at
+        // all, with a side-by-side configuration error. Every element opened
+        // is closed, and in order.
+        let mut open: Vec<String> = Vec::new();
+        let mut rest = MANIFEST;
+        while let Some(start) = rest.find('<') {
+            let end = rest[start..].find('>').expect("a closed tag") + start;
+            let tag = &rest[start + 1..end];
+            rest = &rest[end + 1..];
+            if tag.starts_with('?') || tag.ends_with('/') {
+                continue;
+            }
+            let name = tag.trim_start_matches('/').split_whitespace().next().unwrap();
+            if tag.starts_with('/') {
+                assert_eq!(open.pop().as_deref(), Some(name), "</{name}> closes the wrong element");
+            } else {
+                open.push(name.to_string());
+            }
+        }
+        assert!(open.is_empty(), "left open: {open:?}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The one window xPack draws.
+//! The dialog that tells a user an update is waiting.
 //!
 //! An update that is downloaded, verified and sitting on disk is useless to a
 //! user who never learns it is there. Somebody has to say so, and the choices

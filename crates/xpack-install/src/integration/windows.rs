@@ -101,6 +101,14 @@ pub(super) fn shortcut_file_name(name: &str) -> String {
     xpack_core::safe_file_name(name)
 }
 
+/// The installation directory this user's Add/Remove Programs entry records.
+pub(super) fn recorded_root(application_id: &str) -> Option<PathBuf> {
+    let root = RegKey::predef(HKEY_CURRENT_USER);
+    let key = root.open_subkey(format!(r"{UNINSTALL_KEY}\{application_id}")).ok()?;
+    let location: String = key.get_value("InstallLocation").ok()?;
+    Some(PathBuf::from(location))
+}
+
 /// Writes the per-user Add/Remove Programs entry.
 fn write_uninstall_entry(entry: &Entry) -> std::io::Result<()> {
     let root = RegKey::predef(HKEY_CURRENT_USER);

@@ -65,6 +65,19 @@ pub struct InstallOptions {
     /// host platform, so a cross-platform bootstrap installer stays in charge
     /// of what it ships.
     pub gui_launcher: Option<PathBuf>,
+    /// Whether the user wants the desktop entry the package asks for.
+    ///
+    /// `None` leaves it to the manifest, or to a choice recorded earlier,
+    /// which is what every update does. `Some(true)` is the same thing said
+    /// out loud: it can never add an entry the package did not ask for.
+    ///
+    /// `Some(false)` declines the entry and records that, so every later
+    /// update honours it. It is accepted only on a **first** installation.
+    /// An existing installation keeps the updater it was first installed
+    /// with, which may predate the record and would put the entry back at
+    /// its next update; a choice that is silently undone is worse than one
+    /// that is refused.
+    pub desktop_entry: Option<bool>,
 }
 
 /// What installing a launcher did.
@@ -285,6 +298,9 @@ impl<'lock> Installer<'lock> {
 
         let mut state = self.load_state()?;
 
+        // Before anything is written, so a refusal leaves no trace.
+        Self::apply_desktop_choice(&state, paths, options.desktop_entry)?;
+
         // Named after the application from here on, but only for an
         // installation that has no executables yet.
         //
@@ -419,6 +435,34 @@ impl<'lock> Installer<'lock> {
             desktop,
             recovery: report,
         })
+    }
+
+    /// Records a declined desktop entry, or refuses to.
+    ///
+    /// See [`InstallOptions::desktop_entry`] for why declining is accepted
+    /// only on a first installation.
+    fn apply_desktop_choice(
+        state: &InstallState,
+        paths: &xpack_core::InstallPaths,
+        choice: Option<bool>,
+    ) -> Result<()> {
+        if choice != Some(false) {
+            // A first installation that did not decline clears any record an
+            // earlier, failed first attempt left: that person's answer is not
+            // this one's.
+            if state.versions.is_empty() {
+                xpack_core::atomic::remove_file_if_exists(&paths.desktop_preference_file())?;
+            }
+            return Ok(());
+        }
+        if !state.versions.is_empty() {
+            return Err(Error::invalid(
+                "desktop entry",
+                "can only be declined on a first installation; this installation's updater \
+                 may not know the choice and would add the entry back",
+            ));
+        }
+        crate::integration::record_declined(paths)
     }
 
     /// Moves a fully verified staging tree into place.
@@ -679,6 +723,14 @@ impl<'lock> Installer<'lock> {
             return crate::integration::Outcome::NotRequested;
         };
 
+        // The package asked; the user said no, at this install or an earlier
+        // one. Reported as not requested, because from the user's side it was
+        // not.
+        if crate::integration::is_declined(paths) {
+            tracing::info!("the user declined a desktop entry; none is written");
+            return crate::integration::Outcome::NotRequested;
+        }
+
         // The launcher the entry names has to be on disk. A shortcut to a
         // missing executable is worse than no shortcut: it looks correct, and
         // it fails with "no such file" naming a path the user can see.
@@ -862,14 +914,14 @@ impl<'lock> Installer<'lock> {
         Ok(out)
     }
 
-    /// Returns `true` when a version is recorded *and* present on disk.
+    /// Returns `true` when a version's files are present on disk.
     ///
-    /// State and the filesystem are separate sources of truth, and they can
-    /// diverge: a user deletes a directory, a removal half-succeeds, a disk
-    /// fails. Every operation that makes a version active consults both.
+    /// See [`InstallPaths::has_version_files`], which this defers to so that
+    /// [`crate::inspect`] applies exactly the same test.
+    ///
+    /// [`InstallPaths::has_version_files`]: xpack_core::InstallPaths::has_version_files
     pub fn is_usable(&self, version: &Version) -> bool {
-        let paths = self.lock.paths();
-        paths.version_dir(version).is_dir() && paths.version_manifest_file(version).is_file()
+        self.lock.paths().has_version_files(version)
     }
 
     fn load_state(&self) -> Result<InstallState> {

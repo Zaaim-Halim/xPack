@@ -452,6 +452,46 @@ impl VerifiedPackage {
         Ok(checked)
     }
 
+    /// Reads one payload file, checked against the signed manifest.
+    ///
+    /// For the few files something needs before installing, such as the icon
+    /// an installer shows. The file must be declared by the manifest, no
+    /// larger than `limit`, and its size and digest must match the signed
+    /// values; bytes are returned only after all three hold, so nothing
+    /// unverified ever leaves this function.
+    pub fn read_payload_file(&mut self, path: &str, limit: u64) -> Result<Vec<u8>> {
+        let expected =
+            self.manifest.payload.files.iter().find(|file| file.path == path).cloned().ok_or_else(
+                || Error::invalid("package", format!("{path:?} is not in its payload")),
+            )?;
+        if expected.size > limit {
+            return Err(Error::invalid(
+                "package",
+                format!("{path:?} is {} bytes; at most {limit} are read", expected.size),
+            ));
+        }
+
+        let name = format!("{}{path}", xpack_core::manifest::PAYLOAD_PREFIX);
+        let entry = self.archive.by_name(&name).map_err(|e| {
+            Error::Integrity(format!("{path:?} is declared but cannot be read: {e}"))
+        })?;
+        let mut bytes = Vec::new();
+        entry
+            .take(expected.size.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|e| Error::Integrity(format!("{path:?} could not be read: {e}")))?;
+
+        let (actual, size) = xpack_security::sha256_reader(&mut bytes.as_slice())?;
+        if size != expected.size {
+            return Err(Error::Integrity(format!(
+                "{path:?} is {size} bytes but the signed manifest declares {}",
+                expected.size
+            )));
+        }
+        xpack_security::verify_digest(path, actual, expected.sha256)?;
+        Ok(bytes)
+    }
+
     /// The archive and manifest, for assembly from a delta.
     ///
     /// Crate-private: handing out the open archive is what keeps assembly

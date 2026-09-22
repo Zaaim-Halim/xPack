@@ -27,7 +27,7 @@ use crate::{Answer, Buttons, Prompt};
 
 /// Sets the icon the Dock shows while the dialog is open.
 ///
-/// # The only unsafe in this workspace
+/// # The only unsafe in this crate
 ///
 /// `setApplicationIconImage:` and `NSAlert`'s `setIcon:` are the two calls
 /// this crate needs that objc2 declares unsafe; every other `AppKit` call it

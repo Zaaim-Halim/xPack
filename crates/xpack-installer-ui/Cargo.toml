@@ -1,0 +1,103 @@
+[package]
+name = "xpack-installer-ui"
+description = "The installation wizard an xPack installer shows on Windows and macOS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The wizard's model: pages, navigation, validation and every word it shows.
+# Nothing here draws a window, so it builds and is tested on every platform.
+# The toolkit bindings join later, scoped to their own target the way
+# `xpack-notify` scopes them.
+[dependencies]
+xpack-core.workspace = true
+xpack-install.workspace = true
+serde.workspace = true
+
+# The window, for the installer executables and nothing else. Off by default,
+# so the developer CLI, which builds installers through `xpack-installer`,
+# never compiles a windowing toolkit.
+[features]
+window = [
+    "dep:native-windows-gui",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-app-kit",
+]
+
+# Win32 controls, as `xpack-notify` uses them, plus the few a wizard needs.
+[target.'cfg(windows)'.dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, optional = true, features = [
+    "textbox",
+    "progress-bar",
+    "file-dialog",
+    "notice",
+    "frame",
+    "image-decoder",
+    "high-dpi",
+] }
+
+# AppKit, scoped the same way. Only the classes the wizard uses are enabled.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "NSAlert",
+    "NSAppearance",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSImageRep",
+    "NSBox",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSImage",
+    "NSImageView",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSProgressIndicator",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSScrollView",
+    "NSText",
+    "NSTextField",
+    "NSTextView",
+    "NSView",
+    "NSWindow",
+    # Sizes and radii are `CGFloat`s, which live there.
+    "objc2-core-foundation",
+] }
+
+[[example]]
+name = "pages"
+required-features = ["window"]
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# As the workspace sets them, except `unsafe_code`, lowered from `forbid` to
+# `deny` for the same reason `xpack-notify` lowers it: a few AppKit calls are
+# marked unsafe by their bindings, and `forbid` cannot be lifted where they
+# are written. Every other line stays under the ban.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"

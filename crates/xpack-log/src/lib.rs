@@ -115,7 +115,7 @@
 mod retention;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -225,12 +225,31 @@ impl FileLogging {
 /// Safe to call more than once: later calls are ignored rather than failing,
 /// because a test binary and the code under test may both reach it.
 pub fn init(config: &Config<'_>) -> FileLogging {
+    let file = config.file.map(|paths| open_file_layer(paths, config.format));
+    install(config.console, file)
+}
+
+/// Installs the logging subscriber, with the durable copy in one named file.
+///
+/// For a run with no installation to log into yet, whose record still has to
+/// outlive it: an installer run from a window has no console for anyone to
+/// read, so when it fails, this file is the only account of why. Appended to,
+/// so a second attempt does not erase the first.
+pub fn init_with_file(console: Console, file: &Path, format: Format) -> FileLogging {
+    install(console, Some(open_single_file(file, format)))
+}
+
+/// Installs the console layer, and the file layer when there is one.
+fn install(
+    console: Console,
+    file: Option<std::result::Result<(BoxedLayer, PathBuf), String>>,
+) -> FileLogging {
     // Both layers are boxed into one list rather than chained. Chaining
     // changes the subscriber's type at each step, so a boxed layer built for
     // the bare registry no longer fits once another has been added.
     let mut layers: Vec<BoxedLayer> = Vec::new();
 
-    if config.console != Console::Silent {
+    if console != Console::Silent {
         // Colour only when a person is actually looking at a terminal.
         // Without this, every `xpack ... 2> log` and every CI job captures
         // escape codes in its logs, and xPack is expected to run headless —
@@ -242,19 +261,17 @@ pub fn init(config: &Config<'_>) -> FileLogging {
                 .with_ansi(std::io::stderr().is_terminal())
                 .without_time()
                 .with_target(false)
-                .with_filter(filter(config.console.directive())),
+                .with_filter(filter(console.directive())),
         ));
     }
 
-    let outcome = match config.file {
+    let outcome = match file {
         None => FileLogging::Disabled,
-        Some(paths) => match open_file_layer(paths, config.format) {
-            Ok((layer, path)) => {
-                layers.push(layer);
-                FileLogging::Enabled(path)
-            }
-            Err(reason) => FileLogging::Unavailable(reason),
-        },
+        Some(Ok((layer, path))) => {
+            layers.push(layer);
+            FileLogging::Enabled(path)
+        }
+        Some(Err(reason)) => FileLogging::Unavailable(reason),
     };
 
     let _ = tracing_subscriber::registry().with(layers).try_init();
@@ -304,6 +321,35 @@ fn open_file_layer(
         }
     };
     Ok((layer, dir))
+}
+
+/// Builds a layer writing to one file, appending.
+fn open_single_file(
+    path: &Path,
+    format: Format,
+) -> std::result::Result<(BoxedLayer, PathBuf), String> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // Blocking, for the reason the rolling file is: nothing may be lost when
+    // the process ends. Everything this project emits, whatever the console
+    // is set to, because this is the record of a failure nobody watched.
+    let writer = std::sync::Mutex::new(file);
+    let filter = default_filter("debug");
+    let layer: BoxedLayer = match format {
+        Format::Text => {
+            Box::new(fmt::layer().with_writer(writer).with_ansi(false).with_filter(filter))
+        }
+        Format::Json => {
+            Box::new(fmt::layer().json().with_writer(writer).with_ansi(false).with_filter(filter))
+        }
+    };
+    Ok((layer, path.to_path_buf()))
 }
 
 /// Builds the console filter, honouring the environment override.
