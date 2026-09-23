@@ -181,7 +181,12 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         // Appending to a Mach-O breaks its code signature beyond repair.
         Os::Macos => {
             let icns = icon.as_ref().filter(|icon| icon.is_icns()).map(|icon| icon.path.as_path());
-            write_bundle(&output, &stub, &payload, &manifest.application.name, icns)?;
+            let identity = BundleIdentity {
+                name: &manifest.application.name,
+                id: &manifest.application.id,
+                version: &manifest.application.version.to_string(),
+            };
+            write_bundle(&output, &stub, &payload, &identity, icns)?;
             "bundle"
         }
         Os::Windows | Os::Linux => {
@@ -505,9 +510,11 @@ fn write_bundle(
     output: &Path,
     stub: &Path,
     payload: &[u8],
-    name: &str,
+    identity: &BundleIdentity<'_>,
     icns: Option<&Path>,
 ) -> Result<()> {
+    replace_previous_bundle(output)?;
+    let name = identity.name;
     let contents = output.join("Contents");
     let macos = contents.join("MacOS");
     let resources = contents.join("Resources");
@@ -528,8 +535,43 @@ fn write_bundle(
     }
     xpack_core::atomic::write(
         &contents.join("Info.plist"),
-        info_plist(name, &executable, icns.is_some()).as_bytes(),
+        info_plist(identity, &executable, icns.is_some()).as_bytes(),
     )
+}
+
+/// What an installer bundle says about itself.
+struct BundleIdentity<'a> {
+    /// The application's display name.
+    name: &'a str,
+    /// The application's id, from which the installer's own is made.
+    id: &'a str,
+    /// The version the installer installs.
+    version: &'a str,
+}
+
+/// Clears a bundle an earlier build left at `output`, so this one is written
+/// afresh rather than over it.
+///
+/// Written over, a bundle keeps files the new build no longer has, and keeps
+/// its directory's timestamp, which is what Finder goes by to decide whether
+/// the icon it cached is still current: a rebuilt installer would go on
+/// showing the old icon. Only a directory that is recognisably an installer
+/// bundle is removed; anything else at that path is refused, not deleted.
+fn replace_previous_bundle(output: &Path) -> Result<()> {
+    if !output.exists() {
+        return Ok(());
+    }
+    let payload = output.join("Contents").join("Resources").join(SIDECAR_NAME);
+    if !payload.is_file() {
+        return Err(Error::invalid(
+            "installer",
+            format!(
+                "{} already exists and is not an installer bundle; refusing to replace it",
+                output.display()
+            ),
+        ));
+    }
+    std::fs::remove_dir_all(output).map_err(|e| Error::io(output, e))
 }
 
 /// What a user is told this artefact does.
@@ -545,8 +587,17 @@ fn installer_display_name(application_name: &str) -> String {
 const BUNDLE_ICON_FILE: &str = "AppIcon.icns";
 
 /// The bundle's `Info.plist`.
-fn info_plist(name: &str, executable: &str, has_icon: bool) -> String {
-    let display = xml_escape(&installer_display_name(name));
+///
+/// The identifier is the application's own with `.installer` appended: the
+/// installer is a different program from the application, and Launch Services
+/// keys what it knows about a bundle — its icon above all — by identifier.
+/// High resolution is declared because a bundle that does not say so may be
+/// run in low-resolution mode, which blurs every word of the wizard on a
+/// Retina display.
+fn info_plist(identity: &BundleIdentity<'_>, executable: &str, has_icon: bool) -> String {
+    let display = xml_escape(&installer_display_name(identity.name));
+    let id = xml_escape(&format!("{}.installer", identity.id));
+    let version = xml_escape(identity.version);
     let icon = if has_icon {
         format!("\t<key>CFBundleIconFile</key>\n\t<string>{BUNDLE_ICON_FILE}</string>\n")
     } else {
@@ -558,6 +609,11 @@ fn info_plist(name: &str, executable: &str, has_icon: bool) -> String {
          \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n<dict>\n\
          \t<key>CFBundleName</key>\n\t<string>{display}</string>\n\
+         \t<key>CFBundleDisplayName</key>\n\t<string>{display}</string>\n\
+         \t<key>CFBundleIdentifier</key>\n\t<string>{id}</string>\n\
+         \t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n\
+         \t<key>CFBundleVersion</key>\n\t<string>{version}</string>\n\
+         \t<key>NSHighResolutionCapable</key>\n\t<true/>\n\
          \t<key>CFBundleExecutable</key>\n\t<string>{}</string>\n\
          \t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\
          \t<key>CFBundleInfoDictionaryVersion</key>\n\t<string>6.0</string>\n\
@@ -738,7 +794,9 @@ mod tests {
         // escaping is the only thing standing between it and a bundle that
         // will not launch. Angle brackets never arrive, because a filename
         // cannot carry them.
-        let plist = info_plist("Tom & Jerry <beta>", "app", false);
+        let identity =
+            BundleIdentity { name: "Tom & Jerry <beta>", id: "com.example.tj", version: "1.0.0" };
+        let plist = info_plist(&identity, "app", false);
         assert!(plist.contains("Tom &amp; Jerry"), "{plist}");
         assert!(!plist.contains("<beta>"), "{plist}");
 
@@ -759,8 +817,58 @@ mod tests {
 
     #[test]
     fn the_plist_names_the_icon_only_when_there_is_one() {
-        assert!(info_plist("App", "app", true).contains("<string>AppIcon.icns</string>"));
-        assert!(!info_plist("App", "app", false).contains("CFBundleIconFile"));
+        let identity = BundleIdentity { name: "App", id: "com.example.app", version: "1.2.3" };
+        assert!(info_plist(&identity, "app", true).contains("<string>AppIcon.icns</string>"));
+        assert!(!info_plist(&identity, "app", false).contains("CFBundleIconFile"));
+    }
+
+    #[test]
+    fn the_plist_gives_the_installer_its_own_identity_and_high_resolution() {
+        let identity = BundleIdentity { name: "App", id: "com.example.app", version: "1.2.3" };
+        let plist = info_plist(&identity, "app", false);
+        assert!(
+            plist.contains(
+                "<key>CFBundleIdentifier</key>\n\t<string>com.example.app.installer</string>"
+            ),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<key>CFBundleShortVersionString</key>\n\t<string>1.2.3</string>"),
+            "{plist}"
+        );
+        assert!(plist.contains("<key>NSHighResolutionCapable</key>\n\t<true/>"), "{plist}");
+    }
+
+    #[test]
+    fn a_rebuilt_bundle_replaces_the_old_one_rather_than_writing_over_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("Install App.app");
+        let stub = dir.path().join("stub");
+        std::fs::write(&stub, b"stub").unwrap();
+        let icns = dir.path().join("icon.icns");
+        std::fs::write(&icns, b"icon").unwrap();
+        let identity = BundleIdentity { name: "App", id: "com.example.app", version: "1.0.0" };
+
+        write_bundle(&output, &stub, b"payload", &identity, Some(&icns)).unwrap();
+        // The next build has no icon; the old one must not survive it.
+        write_bundle(&output, &stub, b"payload", &identity, None).unwrap();
+
+        assert!(!output.join("Contents/Resources").join(BUNDLE_ICON_FILE).exists());
+        assert!(output.join("Contents/Resources").join(SIDECAR_NAME).is_file());
+    }
+
+    #[test]
+    fn something_else_at_the_output_path_is_refused_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("Install App.app");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("precious.txt"), b"keep me").unwrap();
+        let stub = dir.path().join("stub");
+        std::fs::write(&stub, b"stub").unwrap();
+        let identity = BundleIdentity { name: "App", id: "com.example.app", version: "1.0.0" };
+
+        assert!(write_bundle(&output, &stub, b"payload", &identity, None).is_err());
+        assert!(output.join("precious.txt").is_file(), "an unrelated directory was deleted");
     }
 
     /// Writes a settings file, and a licence beside it, into `dir`.
