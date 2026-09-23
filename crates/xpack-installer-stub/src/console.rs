@@ -67,17 +67,17 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     // package whose signature has been checked.
     let payload = crate::load()?;
     let application = &payload.manifest().application;
-    println!("{} {}", application.name, application.version);
+    xpack_core::outln!("{} {}", application.name, application.version);
 
     let resolved = payload.resolve_root(args.root.as_deref())?;
     let root = resolved.root;
     match resolved.source {
-        RootSource::Found => println!("already installed under {}", root.display()),
+        RootSource::Found => xpack_core::outln!("already installed under {}", root.display()),
         RootSource::Given => {
             // Allowed, because it was asked for; said, because the menu entry
             // and the uninstall entry will point here afterwards, not there.
             if let Some(other) = payload.recorded_root().filter(|other| *other != root) {
-                eprintln!(
+                xpack_core::errln!(
                     "note: {} is also installed under {}; after this, its menu entry points here",
                     application.name,
                     other.display()
@@ -88,12 +88,12 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     }
     let existing = payload.inspect(&root)?;
     if let Some(line) = describe(&existing) {
-        println!("{line}");
+        xpack_core::outln!("{line}");
     }
 
     if args.dry_run {
-        println!("would install into {}", payload.paths(&root)?.root().display());
-        println!("signed by       {}", short_key(&payload.plan().signing_key));
+        xpack_core::outln!("would install into {}", payload.paths(&root)?.root().display());
+        xpack_core::outln!("signed by       {}", short_key(&payload.plan().signing_key));
         return Ok(ExitCode::from(dry_run_code(&existing)));
     }
 
@@ -101,15 +101,15 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
         Request { root, desktop_entry: if args.no_shortcut { Some(false) } else { None } };
     let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
 
-    println!();
-    println!("Installed into {}", outcome.root.display());
+    xpack_core::outln!();
+    xpack_core::outln!("Installed into {}", outcome.root.display());
     if let xpack_install::DesktopOutcome::Done(entries) = &outcome.desktop {
         for entry in entries {
-            println!("Added         {}", entry.display());
+            xpack_core::outln!("Added         {}", entry.display());
         }
     }
-    println!();
-    println!("Run it with:   {}", outcome.launcher.display());
+    xpack_core::outln!();
+    xpack_core::outln!("Run it with:   {}", outcome.launcher.display());
 
     Ok(ExitCode::from(exit::INSTALLED))
 }

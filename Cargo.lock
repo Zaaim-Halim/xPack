@@ -1772,11 +1772,14 @@ name = "xpack-installer-stub"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "tempfile",
  "xpack-core",
  "xpack-install",
  "xpack-installer",
  "xpack-installer-ui",
  "xpack-log",
+ "xpack-package",
+ "xpack-security",
 ]
 
 [[package]]

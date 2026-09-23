@@ -51,7 +51,7 @@ pub fn main(build: Build) -> ExitCode {
     match console::run(&args) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("xpack-installer: {error}");
+            xpack_core::errln!("xpack-installer: {error}");
             ExitCode::from(exit_code_for(&error))
         }
     }
