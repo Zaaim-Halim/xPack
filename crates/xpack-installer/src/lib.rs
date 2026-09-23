@@ -372,6 +372,22 @@ impl VerifiedPayload {
         self.icon.as_ref()
     }
 
+    /// Whether another program already owns the name of the command this
+    /// package names, for the current user. `None` when it names none.
+    ///
+    /// Asked before installing, so a wizard can show the box unusable with
+    /// the reason rather than tick it and quietly not deliver.
+    pub fn command_taken(&self, root: &Path) -> Option<bool> {
+        use xpack_install::integration::command::{self, Availability, CommandRoots};
+        let paths = self.paths(root).ok()?;
+        // The names only decide which launcher the command runs, not where it
+        // goes, so the ones a new installation would get are good enough.
+        let names = xpack_core::BinaryNames::from_display_name(&self.manifest().application.name);
+        let wanted = command::Command::from_manifest(self.manifest(), &paths, &names)?;
+        let roots = CommandRoots::host()?;
+        Some(matches!(command::availability(&wanted, &roots), Availability::Foreign(_)))
+    }
+
     /// The application's own directory under `root`.
     pub fn paths(&self, root: &Path) -> Result<InstallPaths> {
         InstallPaths::new(root, &self.manifest.application.id)

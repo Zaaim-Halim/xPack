@@ -12,7 +12,7 @@ use xpack_install::Existing;
 use xpack_installer::{RootSource, exit, exit_code_for};
 use xpack_installer_ui::window::{self, Shown};
 use xpack_installer_ui::{
-    Conclusion, Engine, Facts, FailureKind, Flavour, Key, Texts, Wizard, WizardSpec,
+    CommandOffer, Conclusion, Engine, Facts, FailureKind, Flavour, Key, Texts, Wizard, WizardSpec,
 };
 
 use crate::console::Args;
@@ -63,6 +63,13 @@ pub(crate) fn run(args: &Args, log: Option<std::path::PathBuf>) -> Option<ExitCo
     if args.no_shortcut {
         plan.shortcut_default = false;
     }
+    if args.no_path {
+        plan.path_default = false;
+    }
+    let command = manifest.command.as_ref().map(|command| CommandOffer {
+        name: command.name.clone(),
+        taken: payload.command_taken(&root).unwrap_or(false),
+    });
     let spec = WizardSpec {
         flavour,
         facts: Facts {
@@ -74,6 +81,7 @@ pub(crate) fn run(args: &Args, log: Option<std::path::PathBuf>) -> Option<ExitCo
         plan,
         licence: payload.licence().map(str::to_owned),
         shortcut_requested: manifest.desktop.shortcut,
+        command,
         root,
         root_fixed,
         log,

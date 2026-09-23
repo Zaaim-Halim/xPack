@@ -197,16 +197,32 @@ impl App {
         y -= 12.0;
         y = self.draw_status(inner, y);
 
-        if self.session.wizard().shortcut_offered() {
+        let wizard = self.session.wizard();
+        if wizard.shortcut_offered() {
+            y -= 30.0;
             let shortcut = checkbox(
                 &texts.line(Key::LocationShortcut),
-                self.session.wizard().shortcut(),
+                wizard.shortcut(),
                 &self.controller,
                 sel!(toggleShortcut:),
                 mtm,
             );
-            shortcut.setFrame(rect(INSET, (y - 30.0).max(INSET), width, 22.0));
+            shortcut.setFrame(rect(INSET, y.max(INSET), width, 22.0));
             inner.addSubview(&shortcut);
+        }
+        if let Some(text) = wizard.command_label() {
+            y -= 26.0;
+            let command =
+                checkbox(&text, wizard.command(), &self.controller, sel!(toggleCommand:), mtm);
+            command.setFrame(rect(INSET, y.max(INSET), width, 22.0));
+            command.setEnabled(wizard.command_visibility() == Visibility::Enabled);
+            inner.addSubview(&command);
+            if let Some(note) = wizard.command_taken_note() {
+                y -= 34.0;
+                let note = wrapping(mtm, &note, INSET + 20.0, y.max(INSET), width - 20.0, 32.0);
+                note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                inner.addSubview(&note);
+            }
         }
     }
 
@@ -366,6 +382,11 @@ impl App {
         }
         if let Some(shortcut) = &view.shortcut {
             add(shortcut, 18.0, Some(NSColor::secondaryLabelColor()));
+        }
+        // The instruction fits a line; the note about the PATH needs two.
+        for (index, line) in view.command.iter().enumerate() {
+            let height = if index == 0 { 18.0 } else { 36.0 };
+            add(line, height, Some(NSColor::secondaryLabelColor()));
         }
         if let Some(details) = &view.details {
             add(&self.session.wizard().texts().line(Key::FailedDetails), 18.0, None);

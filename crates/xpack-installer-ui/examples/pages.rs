@@ -11,8 +11,8 @@ use std::sync::Arc;
 use xpack_core::{Error, ProgressEvent, ProgressReporter, Version};
 use xpack_install::Existing;
 use xpack_installer_ui::{
-    Choices, Engine, Facts, Failure, FailureKind, Flavour, Inspection, Installed, Page, Step,
-    UiPlan, Wizard, WizardSpec,
+    Choices, CommandOffer, Engine, Facts, Failure, FailureKind, Flavour, Inspection, Installed,
+    Page, Step, UiPlan, Wizard, WizardSpec,
 };
 
 /// An engine that answers with a fixed verdict and installs nothing.
@@ -36,7 +36,7 @@ fn version(text: &str) -> Version {
     Version::parse(text).expect("a version")
 }
 
-fn wizard(licence: bool, launch: bool) -> Wizard {
+fn wizard(licence: bool, launch: bool, taken: bool) -> Wizard {
     Wizard::new(WizardSpec {
         flavour: Flavour::Mac,
         facts: Facts {
@@ -50,6 +50,7 @@ fn wizard(licence: bool, launch: bool) -> Wizard {
             "Demo licence.\n\nYou may use this demo for trying the installer.\n".repeat(12)
         }),
         shortcut_requested: true,
+        command: Some(CommandOffer { name: "demo".into(), taken }),
         root: PathBuf::from("/Users/demo/Applications/xPack"),
         root_fixed: false,
         log: Some(PathBuf::from("/tmp/xpack-installer.log")),
@@ -58,7 +59,12 @@ fn wizard(licence: bool, launch: bool) -> Wizard {
 
 /// A wizard walked forward to `page` against `existing`.
 fn at(page: Page, existing: &Existing) -> Wizard {
-    let mut wizard = wizard(true, true);
+    at_with(page, existing, false)
+}
+
+/// The same, with the command's name already owned by another program.
+fn at_with(page: Page, existing: &Existing, taken: bool) -> Wizard {
+    let mut wizard = wizard(true, true, taken);
     let engine = Fixed(existing.clone());
     let root = wizard.root().to_path_buf();
     wizard.inspected(&root, engine.inspect(&root));
@@ -99,6 +105,7 @@ fn main() {
         ),
         ("3-location-busy", at(Page::Location, &Existing::Busy), nothing.clone()),
         ("3-location-installed", at(Page::Location, &Existing::Installed), nothing.clone()),
+        ("3-location-command-taken", at_with(Page::Location, &nothing, true), nothing.clone()),
         ("4-ready", at(Page::Ready, &nothing), nothing.clone()),
     ];
 
@@ -118,6 +125,8 @@ fn main() {
         directory: PathBuf::from("/Users/demo/Applications/xPack/com.example.demo"),
         version: version("2.0.0"),
         shortcut_added: true,
+        command: Some("demo".into()),
+        command_off_path: Some(PathBuf::from("/Users/demo/.local/bin")),
     }));
     states.push(("6-finish", done, nothing.clone()));
 
@@ -143,7 +152,7 @@ fn main() {
 }
 
 fn wizard_on_licence() -> Wizard {
-    let mut wizard = wizard(true, true);
+    let mut wizard = wizard(true, true, false);
     wizard.advance();
     wizard
 }

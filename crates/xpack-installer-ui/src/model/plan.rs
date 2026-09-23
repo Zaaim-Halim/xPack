@@ -55,6 +55,13 @@ pub struct UiPlan {
     #[serde(default = "enabled")]
     pub shortcut_default: bool,
 
+    /// Whether the command box starts ticked, where it is offered at all.
+    ///
+    /// Ticked by default, for the same reason as the shortcut: a package
+    /// names a command because it is meant to be typed.
+    #[serde(default = "enabled")]
+    pub path_default: bool,
+
     /// Whether the last page offers to start the application.
     ///
     /// Off by default, because the installer without a window never starts
@@ -72,6 +79,7 @@ impl Default for UiPlan {
             license: None,
             text: BTreeMap::new(),
             shortcut_default: true,
+            path_default: true,
             launch_on_finish: false,
         }
     }
@@ -176,6 +184,14 @@ mod tests {
     }
 
     #[test]
+    fn the_command_box_starts_ticked_unless_the_publisher_says_otherwise() {
+        assert!(UiPlan::default().path_default);
+        assert!(parse("{}").expect("parses").path_default);
+        // A misspelling is an error, not a setting quietly ignored.
+        assert!(parse(r#"{"pathDefalt": false}"#).is_err());
+    }
+
+    #[test]
     fn a_full_document_parses() {
         let plan = parse(
             r#"{
@@ -184,12 +200,14 @@ mod tests {
                 "license": "LICENSE.txt",
                 "text": { "welcome": "Hello {name}.", "finish": "Done." },
                 "shortcutDefault": false,
+                "pathDefault": false,
                 "launchOnFinish": true
             }"#,
         )
         .expect("a document");
         plan.validate().expect("valid");
         assert!(!plan.shortcut_default);
+        assert!(!plan.path_default);
         assert!(plan.launch_on_finish);
         assert_eq!(plan.text.len(), 2);
     }

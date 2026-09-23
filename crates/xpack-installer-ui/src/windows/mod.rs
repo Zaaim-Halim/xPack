@@ -166,6 +166,10 @@ impl App {
                 let on = is_checked(&self.controls.shortcut);
                 self.session.change(|wizard| wizard.set_shortcut(on))
             }
+            Action::Command => {
+                let on = is_checked(&self.controls.command);
+                self.session.change(|wizard| wizard.set_command(on))
+            }
             Action::Launch => {
                 let on = is_checked(&self.controls.launch);
                 self.session.change(|wizard| wizard.set_launch(on))

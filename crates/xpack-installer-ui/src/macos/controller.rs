@@ -94,6 +94,12 @@ define_class!(
             with_app(|app| app.toggle(|wizard| wizard.set_shortcut(on)));
         }
 
+        #[unsafe(method(toggleCommand:))]
+        fn toggle_command(&self, sender: Option<&AnyObject>) {
+            let on = is_on(sender);
+            with_app(|app| app.toggle(|wizard| wizard.set_command(on)));
+        }
+
         #[unsafe(method(toggleLaunch:))]
         fn toggle_launch(&self, sender: Option<&AnyObject>) {
             let on = is_on(sender);

@@ -66,6 +66,8 @@ pub struct Choices {
     /// `Some(false)` when they declined the desktop entry. Never `Some(true)`:
     /// agreeing to what the package asks for is the same as not being asked.
     pub desktop_entry: Option<bool>,
+    /// `Some(false)` when they declined the command, on the same terms.
+    pub command: Option<bool>,
 }
 
 /// What a successful installation produced.
@@ -78,6 +80,11 @@ pub struct Installed {
     /// Whether a desktop entry exists now. Reported, not predicted: an entry
     /// that could not be written does not fail an install.
     pub shortcut_added: bool,
+    /// What the person types to start the application, when the command was
+    /// put in place. Reported, like the shortcut.
+    pub command: Option<String>,
+    /// Where the command went, when a terminal would not look there yet.
+    pub command_off_path: Option<PathBuf>,
 }
 
 /// Why the engine did not do what it was asked.

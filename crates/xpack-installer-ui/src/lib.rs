@@ -39,7 +39,7 @@ mod windows;
 pub use engine::{Choices, Engine, Failure, FailureKind, Inspection, Installed, RootProblem};
 pub use installation::Installation;
 pub use model::{
-    Buttons, CloseRequest, Conclusion, Counts, Facts, FinishView, Flavour, InstallKind, Key, Page,
-    PageSet, Progress, Severity, Status, Step, TextOverride, Texts, UiPlan, Visibility, Wizard,
-    WizardSpec,
+    Buttons, CloseRequest, CommandOffer, Conclusion, Counts, Facts, FinishView, Flavour,
+    InstallKind, Key, Page, PageSet, Progress, Severity, Status, Step, TextOverride, Texts, UiPlan,
+    Visibility, Wizard, WizardSpec,
 };

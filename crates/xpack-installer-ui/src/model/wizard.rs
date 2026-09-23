@@ -32,6 +32,9 @@ pub struct WizardSpec {
     pub licence: Option<String>,
     /// Whether the signed manifest asks for a desktop entry.
     pub shortcut_requested: bool,
+    /// The command the signed manifest names, if any, and whether its name is
+    /// free to take.
+    pub command: Option<CommandOffer>,
     /// Where to install: the root the console installer would use.
     pub root: PathBuf,
     /// Whether the root is fixed because the application is already
@@ -40,6 +43,17 @@ pub struct WizardSpec {
     pub root_fixed: bool,
     /// Where this run is logged, for the failure page to name.
     pub log: Option<PathBuf>,
+}
+
+/// The command a package names, as the wizard offers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOffer {
+    /// What the person would type.
+    pub name: String,
+    /// Whether another program already owns that name where the command
+    /// would go. The box is then shown, unusable, with the reason: the
+    /// installer never replaces what is not its own.
+    pub taken: bool,
 }
 
 /// Whether a control is drawn, and whether it can be used.
@@ -133,6 +147,9 @@ pub struct FinishView {
     pub location: Option<String>,
     /// That a desktop entry was added, when one was.
     pub shortcut: Option<String>,
+    /// How to start the application from a terminal, when the command was
+    /// added, and what to do when a terminal would not find it yet.
+    pub command: Vec<String>,
     /// The engine's own message, on failure.
     pub details: Option<String>,
     /// Where the log is, on failure, when there is one.
@@ -151,10 +168,15 @@ enum Phase {
 }
 
 /// What the person has chosen so far.
+///
+/// One `bool` per checkbox: each is an independent yes or no, and nothing
+/// combines them into states an enum would name.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 struct Selections {
     accepted: bool,
     shortcut: bool,
+    command: bool,
     launch: bool,
 }
 
@@ -167,6 +189,7 @@ pub struct Wizard {
     phase: Phase,
     licence: Option<String>,
     shortcut_requested: bool,
+    command_offer: Option<CommandOffer>,
     launch_on_finish: bool,
     root: PathBuf,
     root_fixed: bool,
@@ -191,6 +214,7 @@ impl Wizard {
             phase: Phase::Choosing,
             licence: spec.licence,
             shortcut_requested: spec.shortcut_requested,
+            command_offer: spec.command,
             launch_on_finish: spec.plan.launch_on_finish,
             root: spec.root,
             root_fixed: spec.root_fixed,
@@ -198,6 +222,7 @@ impl Wizard {
             selections: Selections {
                 accepted: false,
                 shortcut: spec.plan.shortcut_default,
+                command: spec.plan.path_default,
                 // Ticked when offered: the publisher offering it is the
                 // reason it is there.
                 launch: true,
@@ -287,6 +312,45 @@ impl Wizard {
     /// Whether the desktop-entry box is ticked.
     pub fn shortcut(&self) -> bool {
         self.selections.shortcut
+    }
+
+    /// Whether the command box is drawn, and whether it can be ticked.
+    ///
+    /// Hidden unless the package names a command, and on the same terms as
+    /// the shortcut box: only on a first installation. Drawn but unusable
+    /// when another program owns the name, so the person sees why their
+    /// command will not be added rather than wondering where it went.
+    pub fn command_visibility(&self) -> Visibility {
+        match &self.command_offer {
+            Some(offer) if self.is_first_install() => Visibility::enabled_if(!offer.taken),
+            _ => Visibility::Hidden,
+        }
+    }
+
+    /// The command box's label, when it is drawn.
+    pub fn command_label(&self) -> Option<String> {
+        let offer = self.command_offer.as_ref()?;
+        (self.command_visibility() != Visibility::Hidden)
+            .then(|| self.texts.line_with(Key::LocationCommand, &[("command", &offer.name)]))
+    }
+
+    /// Why the command box cannot be ticked, when it cannot.
+    pub fn command_taken_note(&self) -> Option<String> {
+        let offer = self.command_offer.as_ref()?;
+        (self.command_visibility() == Visibility::Disabled)
+            .then(|| self.texts.line_with(Key::LocationCommandTaken, &[("command", &offer.name)]))
+    }
+
+    /// Whether the command box is ticked. Never, when it cannot be used.
+    pub fn command(&self) -> bool {
+        self.selections.command && self.command_visibility() == Visibility::Enabled
+    }
+
+    fn is_first_install(&self) -> bool {
+        matches!(
+            self.inspection.as_ref().map(|inspection| &inspection.verdict),
+            Some(Ok(existing)) if existing.is_first_install()
+        )
     }
 
     /// The installation's progress.
@@ -410,6 +474,13 @@ impl Wizard {
     pub fn set_shortcut(&mut self, wanted: bool) {
         if self.is_choosing() && self.shortcut_offered() {
             self.selections.shortcut = wanted;
+        }
+    }
+
+    /// The command box. Ignored where it cannot be used.
+    pub fn set_command(&mut self, wanted: bool) {
+        if self.is_choosing() && self.command_visibility() == Visibility::Enabled {
+            self.selections.command = wanted;
         }
     }
 
@@ -545,7 +616,15 @@ impl Wizard {
     /// `None`, which is what the installer does when nobody is asked.
     fn choices(&self) -> Choices {
         let declined = self.shortcut_offered() && !self.selections.shortcut;
-        Choices { root: self.root.clone(), desktop_entry: declined.then_some(false) }
+        // A taken name is not a decline: nothing was asked, and the installer
+        // leaves another program's command alone by itself.
+        let command_declined =
+            self.command_visibility() == Visibility::Enabled && !self.selections.command;
+        Choices {
+            root: self.root.clone(),
+            desktop_entry: declined.then_some(false),
+            command: command_declined.then_some(false),
+        }
     }
 
     /// The summary rows on the Ready page: label, then value.
@@ -573,6 +652,16 @@ impl Wizard {
             };
             rows.push((texts.line(Key::ReadyShortcutLabel), value));
         }
+        if let Some(offer) = &self.command_offer
+            && self.command_visibility() != Visibility::Hidden
+        {
+            let value = if self.command() {
+                texts.line_with(Key::ReadyCommandYes, &[("command", &offer.name)])
+            } else {
+                texts.line(Key::ReadyCommandNo)
+            };
+            rows.push((texts.line(Key::ReadyCommandLabel), value));
+        }
         rows.push((texts.line(Key::ReadyAccountLabel), texts.line(Key::ReadyAccountValue)));
         rows
     }
@@ -594,6 +683,7 @@ impl Wizard {
                     &[("path", &installed.directory.display().to_string())],
                 )),
                 shortcut: installed.shortcut_added.then(|| texts.line(Key::FinishShortcut)),
+                command: command_lines(texts, installed),
                 details: None,
                 log: None,
                 launch: self.launch_on_finish.then(|| texts.line(Key::Launch)),
@@ -612,6 +702,7 @@ impl Wizard {
                     body: texts.line(body),
                     location: None,
                     shortcut: None,
+                    command: Vec::new(),
                     details: Some(failure.message.clone()),
                     log: self.log.as_ref().map(|log| {
                         texts.line_with(Key::FailedLog, &[("log", &log.display().to_string())])
@@ -621,6 +712,21 @@ impl Wizard {
             }
         })
     }
+}
+
+/// The finish page's lines about the command, when one was added.
+fn command_lines(texts: &Texts, installed: &Installed) -> Vec<String> {
+    let Some(name) = &installed.command else {
+        return Vec::new();
+    };
+    let mut lines = vec![texts.line_with(Key::FinishCommand, &[("command", name)])];
+    if let Some(dir) = &installed.command_off_path {
+        lines.push(texts.line_with(
+            Key::FinishCommandOffPath,
+            &[("command", name), ("path", &dir.display().to_string())],
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -646,6 +752,7 @@ mod tests {
             plan: UiPlan::default(),
             licence: Some("Terms.".into()),
             shortcut_requested: true,
+            command: None,
             root: PathBuf::from("/home/u/apps"),
             root_fixed: false,
             log: Some(PathBuf::from("/tmp/install.log")),
@@ -688,6 +795,8 @@ mod tests {
             directory: PathBuf::from("/home/u/apps/com.example.app"),
             version: v("2.0.0"),
             shortcut_added: true,
+            command: None,
+            command_off_path: None,
         }
     }
 
@@ -865,6 +974,105 @@ mod tests {
         assert!(!wizard.shortcut_offered());
     }
 
+    // --- the command box -------------------------------------------------------
+
+    fn commanding(taken: bool) -> WizardSpec {
+        WizardSpec { command: Some(CommandOffer { name: "mytool".into(), taken }), ..spec() }
+    }
+
+    #[test]
+    fn the_command_box_is_offered_ticked_and_can_be_declined() {
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.command_visibility(), Visibility::Enabled);
+        assert_eq!(
+            wizard.command_label().as_deref(),
+            Some("Add \u{201c}mytool\u{201d} to the command line")
+        );
+        assert!(wizard.command(), "ticked by default");
+        wizard.set_command(false);
+        assert_eq!(start_install(&mut wizard).command, Some(false));
+    }
+
+    #[test]
+    fn keeping_the_command_passes_nothing_on() {
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Nothing));
+        assert_eq!(start_install(&mut wizard).command, None);
+    }
+
+    #[test]
+    fn a_publisher_can_start_the_command_box_unticked() {
+        let mut spec = commanding(false);
+        spec.plan.path_default = false;
+        let mut wizard = wizard_with(spec, Ok(Existing::Nothing));
+        assert!(!wizard.command());
+        assert_eq!(start_install(&mut wizard).command, Some(false));
+    }
+
+    #[test]
+    fn a_name_someone_else_owns_is_shown_unusable_with_the_reason() {
+        let mut wizard = wizard_with(commanding(true), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.command_visibility(), Visibility::Disabled);
+        assert!(!wizard.command(), "shown ticked while it cannot happen");
+        assert!(wizard.command_taken_note().unwrap().contains("mytool"));
+        wizard.set_command(true);
+        assert!(!wizard.command(), "a box that cannot be used was ticked");
+        // Not a decline: nothing was asked.
+        assert_eq!(start_install(&mut wizard).command, None);
+    }
+
+    #[test]
+    fn the_command_box_is_hidden_without_a_command_and_on_an_existing_installation() {
+        let wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        assert_eq!(wizard.command_visibility(), Visibility::Hidden);
+        assert_eq!(wizard.command_label(), None);
+
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Older(v("1.0.0"))));
+        assert_eq!(wizard.command_visibility(), Visibility::Hidden);
+        wizard.set_command(false);
+        assert_eq!(start_install(&mut wizard).command, None);
+    }
+
+    #[test]
+    fn the_summary_says_whether_the_command_is_added() {
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Ready);
+        let row = |wizard: &Wizard| {
+            wizard.summary().into_iter().find(|(label, _)| label == "Command line").map(|r| r.1)
+        };
+        assert_eq!(row(&wizard).as_deref(), Some("Adds \u{201c}mytool\u{201d}"));
+
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        wizard.set_command(false);
+        advance_to(&mut wizard, Page::Ready);
+        assert_eq!(row(&wizard).as_deref(), Some("Not added"));
+    }
+
+    #[test]
+    fn the_last_page_says_how_to_start_it_from_a_terminal() {
+        let mut wizard = wizard_with(commanding(false), Ok(Existing::Nothing));
+        start_install(&mut wizard);
+        wizard.finished(Ok(Installed {
+            command: Some("mytool".into()),
+            command_off_path: Some(PathBuf::from("/home/u/.local/bin")),
+            ..installed()
+        }));
+        let lines = wizard.finish_view().unwrap().command;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("Type mytool in a new terminal window"), "{lines:?}");
+        assert!(lines[1].contains("/home/u/.local/bin is not on your PATH"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_command_that_was_not_added_is_not_described() {
+        let mut wizard = wizard_with(commanding(true), Ok(Existing::Nothing));
+        start_install(&mut wizard);
+        wizard.finished(Ok(installed()));
+        assert!(wizard.finish_view().unwrap().command.is_empty());
+    }
+
     // --- ready and installing -------------------------------------------------
 
     #[test]
@@ -1017,6 +1225,9 @@ mod tests {
         plain.licence = None;
         let mut wizard = wizard_with(plain, Ok(Existing::Nothing));
         let choices = start_install(&mut wizard);
-        assert_eq!(choices, Choices { root: PathBuf::from("/home/u/apps"), desktop_entry: None });
+        assert_eq!(
+            choices,
+            Choices { root: PathBuf::from("/home/u/apps"), desktop_entry: None, command: None }
+        );
     }
 }

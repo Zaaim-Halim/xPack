@@ -147,6 +147,8 @@ pub enum Key {
     LocationTarget,
     LocationFixed,
     LocationShortcut,
+    LocationCommand,
+    LocationCommandTaken,
 
     StatusChecking,
     StatusNew,
@@ -171,6 +173,9 @@ pub enum Key {
     ReadyShortcutLabel,
     ReadyShortcutYes,
     ReadyShortcutNo,
+    ReadyCommandLabel,
+    ReadyCommandYes,
+    ReadyCommandNo,
     ReadyAccountLabel,
     ReadyAccountValue,
     ReadyHint,
@@ -184,6 +189,8 @@ pub enum Key {
     Finish,
     FinishLocation,
     FinishShortcut,
+    FinishCommand,
+    FinishCommandOffPath,
     FailedTitle,
     FailedBody,
     FailedDetails,
@@ -210,7 +217,7 @@ pub enum Key {
 impl Key {
     /// Every key, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 76] = {
+    pub(crate) const ALL: [Self; 83] = {
         use Key::*;
         [
             WindowTitle,
@@ -238,6 +245,8 @@ impl Key {
             LocationTarget,
             LocationFixed,
             LocationShortcut,
+            LocationCommand,
+            LocationCommandTaken,
             StatusChecking,
             StatusNew,
             StatusUpgrade,
@@ -260,6 +269,9 @@ impl Key {
             ReadyShortcutLabel,
             ReadyShortcutYes,
             ReadyShortcutNo,
+            ReadyCommandLabel,
+            ReadyCommandYes,
+            ReadyCommandNo,
             ReadyAccountLabel,
             ReadyAccountValue,
             ReadyHint,
@@ -271,6 +283,8 @@ impl Key {
             Finish,
             FinishLocation,
             FinishShortcut,
+            FinishCommand,
+            FinishCommandOffPath,
             FailedTitle,
             FailedBody,
             FailedDetails,
@@ -347,6 +361,11 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
             Some("{name} is already installed for your account, so Setup uses the same folder.")
         }
         Key::LocationShortcut => either("Add to Start Menu", "Add to Applications"),
+        Key::LocationCommand => Some("Add \u{201c}{command}\u{201d} to the command line"),
+        Key::LocationCommandTaken => Some(
+            "Another program already uses the name \u{201c}{command}\u{201d}, so it is not \
+             added.",
+        ),
 
         Key::StatusChecking => Some("Checking this folder…"),
         Key::StatusNew => Some("{name} {new} will be installed here."),
@@ -376,6 +395,9 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::ReadyShortcutLabel => either("Start Menu", "Applications"),
         Key::ReadyShortcutYes => either("Add a shortcut", "Adds {name} to ~/Applications"),
         Key::ReadyShortcutNo => Some("No shortcut"),
+        Key::ReadyCommandLabel => Some("Command line"),
+        Key::ReadyCommandYes => Some("Adds \u{201c}{command}\u{201d}"),
+        Key::ReadyCommandNo => Some("Not added"),
         Key::ReadyAccountLabel => Some("Account"),
         Key::ReadyAccountValue => {
             either("Current user only, no administrator rights", "Current user only")
@@ -403,6 +425,11 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::FinishShortcut => {
             either("A shortcut was added to the Start Menu.", "Added to ~/Applications")
         }
+        Key::FinishCommand => Some("Type {command} in a new terminal window to start it."),
+        Key::FinishCommandOffPath => Some(
+            "{path} is not on your PATH yet. Add it in your shell\u{2019}s profile, or {command} \
+             will not be found.",
+        ),
         Key::FailedTitle => Some("Setup could not install {name}"),
         Key::FailedBody => Some(
             "{name} was not installed. If an earlier version was installed, it is still there \

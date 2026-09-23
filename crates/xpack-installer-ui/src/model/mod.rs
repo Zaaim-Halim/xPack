@@ -18,5 +18,6 @@ pub use progress::{Counts, Progress};
 pub use status::{InstallKind, Severity, Status};
 pub use text::{Facts, Flavour, Key, TextOverride, Texts};
 pub use wizard::{
-    Buttons, CloseRequest, Conclusion, FinishView, Step, Visibility, Wizard, WizardSpec,
+    Buttons, CloseRequest, CommandOffer, Conclusion, FinishView, Step, Visibility, Wizard,
+    WizardSpec,
 };

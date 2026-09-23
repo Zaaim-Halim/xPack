@@ -207,6 +207,8 @@ mod tests {
                 directory: PathBuf::from("/r/app"),
                 version: Version::parse("2.0.0").unwrap(),
                 shortcut_added: false,
+                command: None,
+                command_off_path: None,
             })
         }
 
@@ -245,6 +247,7 @@ mod tests {
             plan: UiPlan { launch_on_finish, ..UiPlan::default() },
             licence: None,
             shortcut_requested: false,
+            command: None,
             root: PathBuf::from("/r"),
             root_fixed: false,
             log: None,

@@ -46,6 +46,7 @@ pub(super) enum Action {
     LaunchExisting,
     Accept,
     Shortcut,
+    Command,
     Launch,
 }
 
@@ -72,6 +73,7 @@ pub(super) struct Controls {
     launch_existing: nwg::Button,
     pub(super) accept: nwg::CheckBox,
     pub(super) shortcut: nwg::CheckBox,
+    pub(super) command: nwg::CheckBox,
     pub(super) launch: nwg::CheckBox,
     progress: nwg::ProgressBar,
     back: nwg::Button,
@@ -145,7 +147,7 @@ impl Controls {
         ] {
             nwg::Button::builder().font(Some(&c.normal)).parent(window).build(button)?;
         }
-        for checkbox in [&mut c.accept, &mut c.shortcut, &mut c.launch] {
+        for checkbox in [&mut c.accept, &mut c.shortcut, &mut c.command, &mut c.launch] {
             nwg::CheckBox::builder().font(Some(&c.normal)).parent(window).build(checkbox)?;
         }
         Ok(c)
@@ -162,6 +164,7 @@ impl Controls {
             (&self.launch_existing.handle, Action::LaunchExisting),
             (&self.accept.handle, Action::Accept),
             (&self.shortcut.handle, Action::Shortcut),
+            (&self.command.handle, Action::Command),
             (&self.launch.handle, Action::Launch),
         ]
         .into_iter()
@@ -301,14 +304,17 @@ impl Controls {
         }
         y = self.status(wizard, y);
 
+        y += 10;
         if wizard.shortcut_offered() {
-            check(
-                &self.shortcut,
-                &texts.line(Key::LocationShortcut),
-                wizard.shortcut(),
-                BODY_X,
-                y + 10,
-            );
+            check(&self.shortcut, &texts.line(Key::LocationShortcut), wizard.shortcut(), BODY_X, y);
+            y += 26;
+        }
+        if let Some(label) = wizard.command_label() {
+            check(&self.command, &label, wizard.command(), BODY_X, y);
+            self.command.set_enabled(wizard.command_visibility() == Visibility::Enabled);
+            if let Some(note) = wizard.command_taken_note() {
+                text(&self.lines[3], &note, BODY_X + 20, y + 24, BODY_WIDTH - 20, 36);
+            }
         }
     }
 
@@ -384,6 +390,9 @@ impl Controls {
         for line in [&view.location, &view.shortcut].into_iter().flatten() {
             add(line, 40);
         }
+        for line in &view.command {
+            add(line, 40);
+        }
         if let Some(details) = &view.details {
             add(&wizard.texts().line(Key::FailedDetails), 20);
             add(details, 80);
@@ -450,7 +459,7 @@ impl Controls {
         {
             button.set_visible(false);
         }
-        for checkbox in [&self.accept, &self.shortcut, &self.launch] {
+        for checkbox in [&self.accept, &self.shortcut, &self.command, &self.launch] {
             checkbox.set_visible(false);
         }
     }

@@ -477,7 +477,7 @@ fn the_wizard_installs_and_launches_through_the_same_call() {
     // Nothing to start before anything is installed.
     assert!(Engine::launch(&verified, &root).is_err());
 
-    let choices = Choices { root: root.clone(), desktop_entry: None };
+    let choices = Choices { root: root.clone(), desktop_entry: None, command: None };
     let installed = Engine::install(&verified, &choices, &xpack_core::NoProgress).unwrap();
     assert_eq!(installed.directory, root.join("com.example.demo"));
     assert_eq!(installed.version, Version::parse("1.0.0").unwrap());
