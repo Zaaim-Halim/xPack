@@ -35,6 +35,7 @@ fn spec(executable: &str, arguments: &[&str]) -> LaunchSpec {
         executable: executable.into(),
         arguments: arguments.iter().map(|s| (*s).to_string()).collect(),
         working_directory: None,
+        keep_working_directory: false,
         environment: BTreeMap::new(),
     }
 }

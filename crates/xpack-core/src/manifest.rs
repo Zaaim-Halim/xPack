@@ -33,7 +33,12 @@ pub const SIGNATURE_ENTRY: &str = "manifest.sig";
 /// Archive prefix under which every payload file is stored.
 pub const PAYLOAD_PREFIX: &str = "payload/";
 /// Highest [`FormatVersion`] this build can interpret.
-pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 1;
+///
+/// | Format | Adds |
+/// | --- | --- |
+/// | 1 | Everything else. |
+/// | 2 | `launch.keepWorkingDirectory` |
+pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
 
 /// Upper bound on a manifest document, to bound work before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
@@ -59,8 +64,13 @@ pub const MAX_PAYLOAD_PATH_LEN: usize = 1024;
 pub struct FormatVersion(pub u32);
 
 impl FormatVersion {
-    /// The version this build writes.
-    pub const CURRENT: Self = Self(MAX_SUPPORTED_FORMAT_VERSION);
+    /// The version written unless a manifest uses something newer.
+    ///
+    /// Deliberately not the highest supported version: installations already
+    /// in the field refuse any format above the one they know, including
+    /// their updaters. A package declares a newer format only when it needs
+    /// one; see [`Manifest::required_format_version`].
+    pub const CURRENT: Self = Self(1);
 
     /// Fails closed when the package is newer than this build understands.
     ///
@@ -123,8 +133,23 @@ pub struct LaunchSpec {
     #[serde(default)]
     pub arguments: Vec<String>,
     /// Working directory, relative to the version directory.
+    ///
+    /// When neither this nor [`keep_working_directory`](Self::keep_working_directory)
+    /// is set, the application starts in the version directory itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Starts the application in the directory it was invoked from.
+    ///
+    /// For command-line tools, which resolve the paths a user types against
+    /// the directory the user is in. A windowed application wants the
+    /// default: started from a desktop entry, the invoking directory is
+    /// wherever the desktop happened to be, usually `/`.
+    ///
+    /// Requires [`FormatVersion`] 2. Left out of the document when `false`,
+    /// so a manifest that does not use it stays readable by every release
+    /// that reads format 1.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_working_directory: bool,
     /// Extra environment variables set for the child process.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
@@ -283,6 +308,12 @@ pub struct UpdateSpec {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_severity(severity: &UpdateSeverity) -> bool {
     *severity == UpdateSeverity::default()
+}
+
+/// `serde` passes the field by reference; see [`is_default_severity`].
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for UpdateSpec {
@@ -526,17 +557,38 @@ impl Manifest {
     /// Callers must verify the signature over these same bytes *before*
     /// trusting the returned value; see `xpack_package::PackageReader`.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Declared {
+            format_version: FormatVersion,
+        }
+
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(Error::invalid(
                 "manifest",
                 format!("document is {} bytes, limit is {MAX_MANIFEST_BYTES}", bytes.len()),
             ));
         }
+        // The version is read on its own first. A newer format may add fields
+        // this build does not know, and the strict parse below would reject
+        // those as unknown, which reads like a corrupt package rather than
+        // one that needs a newer xPack.
+        let declared: Declared =
+            serde_json::from_slice(bytes).map_err(|e| Error::json(MANIFEST_ENTRY, e))?;
+        declared.format_version.ensure_supported()?;
+
         let manifest: Self =
             serde_json::from_slice(bytes).map_err(|e| Error::json(MANIFEST_ENTRY, e))?;
-        manifest.format_version.ensure_supported()?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// The lowest format that can express this manifest.
+    ///
+    /// What a packager should declare: anything higher shuts out
+    /// installations that could have read the package.
+    pub fn required_format_version(&self) -> FormatVersion {
+        if self.launch.keep_working_directory { FormatVersion(2) } else { FormatVersion(1) }
     }
 
     /// Serialises the manifest to the exact bytes that will be signed.
@@ -564,6 +616,26 @@ impl Manifest {
         }
         if let Some(dir) = &self.launch.working_directory {
             validate_relative_path("launch.workingDirectory", dir)?;
+            if self.launch.keep_working_directory {
+                return Err(Error::invalid(
+                    "manifest",
+                    "launch.workingDirectory and launch.keepWorkingDirectory contradict each \
+                     other; set one",
+                ));
+            }
+        }
+        // A manifest must declare every format it relies on. One that claims
+        // an older format than its contents need tells an older reader it can
+        // interpret the package, which that reader cannot.
+        let required = self.required_format_version();
+        if self.format_version < required {
+            return Err(Error::invalid(
+                "manifest",
+                format!(
+                    "formatVersion is {} but its contents need at least {}",
+                    self.format_version.0, required.0
+                ),
+            ));
         }
 
         if let Some(url) = &self.update.url {
@@ -843,6 +915,7 @@ mod tests {
                 executable: "runtime/bin/java".into(),
                 arguments: vec!["-jar".into(), "application/app.jar".into()],
                 working_directory: None,
+                keep_working_directory: false,
                 environment: BTreeMap::new(),
             },
             update: UpdateSpec::default(),
@@ -1112,6 +1185,64 @@ mod tests {
         let err = Manifest::from_slice(&bytes).unwrap_err();
         assert!(matches!(err, Error::UnsupportedFormatVersion { .. }), "got {err:?}");
         assert!(err.is_integrity_failure());
+    }
+
+    #[test]
+    fn a_future_format_with_fields_this_build_has_never_seen_is_reported_as_newer() {
+        // Not as a malformed document: the fix is a newer xPack, and a user
+        // told their package is corrupt goes looking in the wrong place.
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value["formatVersion"] = serde_json::json!(MAX_SUPPORTED_FORMAT_VERSION + 1);
+        value["launch"]["somethingFromTheFuture"] = serde_json::json!(true);
+        let err = Manifest::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(matches!(err, Error::UnsupportedFormatVersion { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn a_manifest_that_does_not_keep_the_working_directory_is_still_format_1() {
+        // Byte-identical to what the first release wrote, so installations
+        // of that release keep accepting it as an update.
+        let manifest = sample();
+        assert_eq!(manifest.required_format_version(), FormatVersion(1));
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(json.contains("\"formatVersion\": 1"), "{json}");
+        assert!(!json.contains("keepWorkingDirectory"), "{json}");
+    }
+
+    #[test]
+    fn keeping_the_working_directory_needs_format_2_and_survives_the_signed_bytes() {
+        let mut manifest = sample();
+        manifest.launch.keep_working_directory = true;
+        assert_eq!(manifest.required_format_version(), FormatVersion(2));
+
+        manifest.format_version = manifest.required_format_version();
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        assert!(json.contains("\"keepWorkingDirectory\": true"), "{json}");
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+    }
+
+    #[test]
+    fn a_manifest_that_understates_its_format_is_refused() {
+        // Declaring format 1 while relying on format 2 would tell a reader
+        // that knows only format 1 that it can interpret the package.
+        let mut manifest = sample();
+        manifest.launch.keep_working_directory = true;
+        manifest.format_version = FormatVersion(1);
+        let err = manifest.validate().unwrap_err();
+        assert!(err.to_string().contains("need at least 2"), "{err}");
+        let bytes = manifest.to_signed_bytes().unwrap();
+        assert!(Manifest::from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_working_directory_and_keeping_the_invoking_one_are_refused_together() {
+        let mut manifest = sample();
+        manifest.format_version = FormatVersion(2);
+        manifest.launch.keep_working_directory = true;
+        manifest.launch.working_directory = Some("application".into());
+        let err = manifest.validate().unwrap_err();
+        assert!(err.to_string().contains("contradict"), "{err}");
     }
 
     #[test]

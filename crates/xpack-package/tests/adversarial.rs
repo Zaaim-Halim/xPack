@@ -50,6 +50,7 @@ fn template(platform: Platform) -> Manifest {
             executable: "runtime/bin/java".into(),
             arguments: vec!["-jar".into(), "application/app.jar".into()],
             working_directory: None,
+            keep_working_directory: false,
             environment: BTreeMap::new(),
         },
         update: UpdateSpec::default(),
@@ -699,6 +700,7 @@ fn payload_entries_that_collide_on_this_filesystem_are_refused() {
         executable: NFC.into(),
         arguments: vec![],
         working_directory: None,
+        keep_working_directory: false,
         environment: BTreeMap::new(),
     };
     manifest.payload = PayloadSpec {

@@ -57,6 +57,7 @@ fn build_package_with(
             executable: "bin/app".into(),
             arguments: Vec::new(),
             working_directory: None,
+            keep_working_directory: false,
             environment: std::collections::BTreeMap::new(),
         },
         update: xpack_core::UpdateSpec::default(),

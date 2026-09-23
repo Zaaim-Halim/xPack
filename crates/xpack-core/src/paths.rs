@@ -660,6 +660,7 @@ mod tests {
             executable: executable.to_string(),
             arguments: Vec::new(),
             working_directory: working_directory.map(str::to_string),
+            keep_working_directory: false,
             environment: std::collections::BTreeMap::new(),
         }
     }

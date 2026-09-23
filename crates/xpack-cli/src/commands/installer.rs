@@ -940,6 +940,7 @@ mod tests {
                 executable: "bin/app".into(),
                 arguments: vec![],
                 working_directory: None,
+                keep_working_directory: false,
                 environment: BTreeMap::new(),
             },
             update: UpdateSpec::default(),

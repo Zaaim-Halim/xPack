@@ -192,7 +192,13 @@ pub fn launch_spec(
     arguments: Vec<String>,
     environment: BTreeMap<String, String>,
 ) -> LaunchSpec {
-    LaunchSpec { executable: executable.into(), arguments, working_directory: None, environment }
+    LaunchSpec {
+        executable: executable.into(),
+        arguments,
+        working_directory: None,
+        keep_working_directory: false,
+        environment,
+    }
 }
 
 /// Asks a process to close itself, the way a user clicking its close button would.

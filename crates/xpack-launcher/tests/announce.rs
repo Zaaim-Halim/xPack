@@ -50,6 +50,7 @@ fn build(dir: &Path, key: &KeyPair, version: &str, update: UpdateSpec) -> PathBu
             executable: "bin/app".into(),
             arguments: vec![],
             working_directory: None,
+            keep_working_directory: false,
             environment: BTreeMap::new(),
         },
         update,

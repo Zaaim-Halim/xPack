@@ -79,6 +79,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
             executable: "bin/app".into(),
             arguments: vec![],
             working_directory: None,
+            keep_working_directory: false,
             environment: BTreeMap::new(),
         },
         update: UpdateSpec { url: Some(BASE.to_string()), ..UpdateSpec::default() },

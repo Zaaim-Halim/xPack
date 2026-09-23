@@ -54,6 +54,7 @@ fn manifest(version: &str) -> Manifest {
             executable: "application/app.jar".into(),
             arguments: Vec::new(),
             working_directory: None,
+            keep_working_directory: false,
             environment: BTreeMap::new(),
         },
         update: xpack_core::UpdateSpec::default(),

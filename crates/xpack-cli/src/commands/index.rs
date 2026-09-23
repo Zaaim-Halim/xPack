@@ -489,6 +489,7 @@ mod tests {
                 executable: "app".into(),
                 arguments: Vec::new(),
                 working_directory: None,
+                keep_working_directory: false,
                 environment: BTreeMap::new(),
             },
             update: xpack_core::UpdateSpec {
