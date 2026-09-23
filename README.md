@@ -63,19 +63,7 @@ xPack becomes part of your application.
 
 ## Installing xPack
 
-**From source** (works today; needs Rust 1.89 or newer):
-
-```sh
-git clone https://github.com/Zaaim-Halim/xPack.git
-cd xPack
-cargo build --release --workspace
-```
-
-The binaries are in `target/release`. Keep them together in one directory and
-put it on your `PATH`: the `xpack` command finds the launcher, updater and
-installer stubs beside itself.
-
-**From a release** (once releases are published):
+**From a release** on macOS or Linux:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Zaaim-Halim/xPack/main/install.sh | sh
@@ -83,6 +71,25 @@ curl -fsSL https://raw.githubusercontent.com/Zaaim-Halim/xPack/main/install.sh |
 
 The script installs into `~/.local/xpack`. Set `XPACK_VERSION` to pick a
 version and `XPACK_INSTALL_DIR` to install elsewhere.
+
+On Windows, or to install by hand, download the archive for your platform from
+the [releases page](https://github.com/Zaaim-Halim/xPack/releases), check it
+against `SHA256SUMS`, unpack it and put the directory on your `PATH`. The
+binaries are not code signed yet, so a browser download is quarantined on
+macOS and flagged by SmartScreen on Windows.
+
+**From source** (needs Rust 1.89 or newer):
+
+```sh
+git clone https://github.com/Zaaim-Halim/xPack.git
+cd xPack
+cargo build --release --workspace
+```
+
+The binaries are in `target/release`.
+
+Either way, keep the binaries together in one directory: the `xpack` command
+finds the launcher, updater and installer stubs beside itself.
 
 ## Quick start
 
