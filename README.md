@@ -178,7 +178,7 @@ user's machine.
 | Section | What it does |
 | --- | --- |
 | `application` | Identity. `id` is a stable reverse-DNS name; `name`, `publisher` and the icon are what users see everywhere. |
-| `launch` | The executable to start, relative to the payload (a bundled runtime) or a bare name found on `PATH` (a system one), with its arguments and environment. |
+| `launch` | The executable to start, relative to the payload (a bundled runtime) or a bare name found on `PATH` (a system one), with its arguments and environment. It starts in its installed version directory; a command-line tool sets `"keepWorkingDirectory": true` to start where the user ran it, so the paths they type mean what they meant. Installations made with xPack 0.1.0 cannot update to a package that sets it. |
 | `update` | Where this platform's update index lives, and the channel to follow. `mandatory` stops older versions from starting. |
 | `health` | How long a new version has to prove it starts. With `requireStartupReport`, the application must write the file named in `XPACK_HEALTH_FILE`. |
 | `desktop` | A Start Menu entry, a `~/Applications` bundle or a `.desktop` file, and the icon: `.ico` or `.png` on Windows, `.icns` on macOS, `.png` or `.svg` on Linux. |

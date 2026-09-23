@@ -45,8 +45,11 @@ impl ProjectConfig {
     ///
     /// The payload is left empty on purpose: the packager fills it from the
     /// files it actually reads.
+    ///
+    /// It declares the lowest format that can express it, so a package that
+    /// uses nothing new stays installable by every release already out there.
     pub(crate) fn to_manifest(&self, platform: Platform) -> Manifest {
-        Manifest {
+        let mut manifest = Manifest {
             format_version: FormatVersion::CURRENT,
             application: self.application.clone(),
             platform: self.platform.unwrap_or(platform),
@@ -57,6 +60,8 @@ impl ProjectConfig {
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,
-        }
+        };
+        manifest.format_version = manifest.required_format_version();
+        manifest
     }
 }

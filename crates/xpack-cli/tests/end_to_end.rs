@@ -350,6 +350,67 @@ fn installing_a_downgrade_is_refused_until_asked_for() {
     assert!(allowed.status.success(), "{}", stderr(&allowed));
 }
 
+/// The directory the test payload reported starting in.
+fn reported_cwd(run: &Output) -> PathBuf {
+    let out = stdout(run);
+    let line = out.lines().find_map(|l| l.strip_prefix("cwd=")).expect("the payload reports cwd");
+    std::fs::canonicalize(line).unwrap()
+}
+
+#[test]
+fn a_command_line_tool_runs_where_the_user_invoked_it() {
+    // A tool the user types `mytool build src` into must see `src` relative
+    // to where they are, not to wherever it happens to be installed.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    fixture.write_payload("1.0.0", 0);
+    let config = fixture.path().join("xpack-1.0.0.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(r#""launch":{"#, r#""launch":{"keepWorkingDirectory":true,"#),
+    )
+    .unwrap();
+    let package = fixture.pack_existing("1.0.0");
+
+    let install = fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    // The package declares the format that can express it, and no lower.
+    let manifest = fixture.root().join("com.example.demo/versions/1.0.0/.xpack/manifest.json");
+    let manifest = std::fs::read_to_string(&manifest).unwrap();
+    assert!(manifest.contains("\"formatVersion\": 2"), "{manifest}");
+
+    let elsewhere = fixture.path().join("where-the-user-is");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let run = Command::new(xpack())
+        .current_dir(&elsewhere)
+        .args(["--root", &fixture.root().to_string_lossy(), "run", "com.example.demo"])
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert_eq!(reported_cwd(&run), std::fs::canonicalize(&elsewhere).unwrap());
+}
+
+#[test]
+fn an_application_that_does_not_ask_still_starts_in_its_version_directory() {
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+    let install = fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    // Format 1 still: nothing in it needs more, so every earlier release can
+    // install it.
+    let version_dir = fixture.root().join("com.example.demo/versions/1.0.0");
+    let manifest = std::fs::read_to_string(version_dir.join(".xpack/manifest.json")).unwrap();
+    assert!(manifest.contains("\"formatVersion\": 1"), "{manifest}");
+
+    let run = fixture.run_in_root(&["run", "com.example.demo"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert_eq!(reported_cwd(&run), std::fs::canonicalize(&version_dir).unwrap());
+}
+
 /// Returns the distinct ANSI escape sequences in a byte stream.
 ///
 /// Looks for the CSI introducer rather than colour specifically: any escape at
