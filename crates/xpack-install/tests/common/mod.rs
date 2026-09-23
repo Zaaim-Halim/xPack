@@ -10,11 +10,13 @@ use xpack_package::PackageBuilder;
 use xpack_security::KeyPair;
 
 /// Builds a real, signed `.xpkg` for `version`.
+#[allow(dead_code)]
 pub(crate) fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
     build_package_with(dir, key, version, &xpack_core::DesktopSpec::default())
 }
 
 /// Builds a package that also asks for a desktop entry.
+#[allow(dead_code)]
 pub(crate) fn build_package_with(
     dir: &Path,
     key: &KeyPair,
@@ -35,6 +37,28 @@ pub(crate) fn build_package_named(
     version: &str,
     display_name: &str,
     desktop: &xpack_core::DesktopSpec,
+) -> PathBuf {
+    build_package_full(dir, key, version, display_name, desktop, None)
+}
+
+/// Builds a package that names the command a terminal starts it by.
+#[allow(dead_code)]
+pub(crate) fn build_package_commanding(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    command: Option<&str>,
+) -> PathBuf {
+    build_package_full(dir, key, version, "Example", &xpack_core::DesktopSpec::default(), command)
+}
+
+fn build_package_full(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    display_name: &str,
+    desktop: &xpack_core::DesktopSpec,
+    command: Option<&str>,
 ) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
@@ -69,8 +93,10 @@ pub(crate) fn build_package_named(
         desktop: desktop.clone(),
         payload: PayloadSpec::default(),
         created_at: None,
-        command: None,
+        command: command.map(|name| xpack_core::CommandSpec { name: name.into() }),
     };
+    // The format a command needs; what `xpack pack` would declare.
+    let manifest = Manifest { format_version: manifest.required_format_version(), ..manifest };
 
     let out = dir.join(format!("app-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

@@ -53,6 +53,7 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 
+pub mod command;
 pub mod lnk;
 
 /// What creating or removing a desktop entry did.
@@ -223,7 +224,9 @@ pub fn place_icon(paths: &InstallPaths, manifest: &Manifest, version: &Version) 
     }
 }
 
-/// The user's recorded choice about the desktop entry.
+/// A choice the user made against something a package asked for.
+///
+/// One shape for every such choice, the desktop entry and the command alike.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Preference {
@@ -231,30 +234,33 @@ struct Preference {
     entry: bool,
 }
 
-/// Records that the user does not want a desktop entry.
-///
-/// Written before the install does anything else, so there is no moment in
-/// which an entry could be created against the user's wish.
-pub(crate) fn record_declined(paths: &InstallPaths) -> xpack_core::Result<()> {
-    let file = paths.desktop_preference_file();
-    xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(&file)?)?;
-    xpack_core::atomic::write_json(&file, &Preference { format_version: 1, entry: false })
+/// Whether the user declined a desktop entry for this installation.
+pub(crate) fn is_declined(paths: &InstallPaths) -> bool {
+    is_declined_at(&paths.desktop_preference_file())
 }
 
-/// Whether the user declined a desktop entry for this installation.
+/// Records a decline in `file`.
+///
+/// Written before the install does anything else, so there is no moment in
+/// which the thing declined could be created against the user's wish.
+pub(crate) fn record_declined_at(file: &Path) -> xpack_core::Result<()> {
+    xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(file)?)?;
+    xpack_core::atomic::write_json(file, &Preference { format_version: 1, entry: false })
+}
+
+/// Whether `file` records a decline.
 ///
 /// A record that exists but cannot be read counts as declined. The only
-/// record ever written says "no", and guessing "yes" would write into a
-/// user's menu against what they most likely chose.
-pub(crate) fn is_declined(paths: &InstallPaths) -> bool {
-    let file = paths.desktop_preference_file();
+/// record ever written says "no", and guessing "yes" would write where the
+/// user most likely said not to.
+pub(crate) fn is_declined_at(file: &Path) -> bool {
     if !file.exists() {
         return false;
     }
-    match xpack_core::atomic::read_json::<Preference>(&file) {
+    match xpack_core::atomic::read_json::<Preference>(file) {
         Ok(preference) => !preference.entry,
         Err(error) => {
-            tracing::warn!(%error, "unreadable desktop preference; treating it as declined");
+            tracing::warn!(%error, file = %file.display(), "unreadable preference; treating it as declined");
             true
         }
     }

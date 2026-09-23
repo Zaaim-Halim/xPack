@@ -1,5 +1,6 @@
 //! Installing, activating, rolling back and removing versions.
 
+use crate::integration::command::CommandRoots;
 use std::path::{Path, PathBuf};
 
 use xpack_core::atomic;
@@ -78,6 +79,18 @@ pub struct InstallOptions {
     /// its next update; a choice that is silently undone is worse than one
     /// that is refused.
     pub desktop_entry: Option<bool>,
+    /// Whether the user wants the command the package asks for.
+    ///
+    /// The same rules as [`desktop_entry`](Self::desktop_entry): `None`
+    /// leaves it to the package and any earlier choice, and `Some(false)`
+    /// declines it, on a first installation only.
+    pub command: Option<bool>,
+    /// Where the command goes, when the package names one.
+    ///
+    /// `None` uses the current user's `~/.local/bin` and `PATH`, which every
+    /// real installation wants. Tests supply their own, for the reason given
+    /// on [`desktop_roots`](Self::desktop_roots).
+    pub command_roots: Option<crate::integration::command::CommandRoots>,
 }
 
 /// What installing a launcher did.
@@ -111,6 +124,8 @@ pub struct Installed {
     pub notifier: Option<LauncherOutcome>,
     /// What happened to the desktop entry the manifest asked for.
     pub desktop: crate::integration::Outcome,
+    /// What happened to the command the manifest asked for.
+    pub command: crate::integration::Outcome,
     /// What recovery cleaned up beforehand.
     pub recovery: RecoveryReport,
 }
@@ -299,7 +314,11 @@ impl<'lock> Installer<'lock> {
         let mut state = self.load_state()?;
 
         // Before anything is written, so a refusal leaves no trace.
-        Self::apply_desktop_choice(&state, paths, options.desktop_entry)?;
+        Self::apply_choices(&state, paths, options)?;
+
+        // The command the version being replaced put in place, so one this
+        // package renames or drops is taken away rather than left behind.
+        let previous_command = previous_command(paths, &state);
 
         // Named after the application from here on, but only for an
         // installation that has no executables yet.
@@ -412,6 +431,9 @@ impl<'lock> Installer<'lock> {
         // Never fails the install: see the integration module for why.
         let desktop =
             self.update_desktop_entry(&manifest, &version, options.desktop_roots.as_ref());
+        // After the binaries too: the command runs the launcher.
+        let command =
+            self.update_command(&manifest, previous_command, options.command_roots.as_ref());
 
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
@@ -433,36 +455,58 @@ impl<'lock> Installer<'lock> {
             uninstaller,
             notifier,
             desktop,
+            command,
             recovery: report,
         })
     }
 
-    /// Records a declined desktop entry, or refuses to.
+    /// Records what the user declined of what the package asks for.
+    fn apply_choices(
+        state: &InstallState,
+        paths: &xpack_core::InstallPaths,
+        options: &InstallOptions,
+    ) -> Result<()> {
+        Self::apply_choice(
+            state,
+            &paths.desktop_preference_file(),
+            options.desktop_entry,
+            "desktop entry",
+        )?;
+        Self::apply_choice(
+            state,
+            &crate::integration::command::preference_file(paths),
+            options.command,
+            "command",
+        )
+    }
+
+    /// Records a declined desktop entry or command, or refuses to.
     ///
     /// See [`InstallOptions::desktop_entry`] for why declining is accepted
     /// only on a first installation.
-    fn apply_desktop_choice(
+    fn apply_choice(
         state: &InstallState,
-        paths: &xpack_core::InstallPaths,
+        file: &Path,
         choice: Option<bool>,
+        what: &str,
     ) -> Result<()> {
         if choice != Some(false) {
             // A first installation that did not decline clears any record an
             // earlier, failed first attempt left: that person's answer is not
             // this one's.
             if state.versions.is_empty() {
-                xpack_core::atomic::remove_file_if_exists(&paths.desktop_preference_file())?;
+                xpack_core::atomic::remove_file_if_exists(file)?;
             }
             return Ok(());
         }
         if !state.versions.is_empty() {
             return Err(Error::invalid(
-                "desktop entry",
+                what,
                 "can only be declined on a first installation; this installation's updater \
-                 may not know the choice and would add the entry back",
+                 may not know the choice and would add it back",
             ));
         }
-        crate::integration::record_declined(paths)
+        crate::integration::record_declined_at(file)
     }
 
     /// Moves a fully verified staging tree into place.
@@ -764,6 +808,50 @@ impl<'lock> Installer<'lock> {
         outcome
     }
 
+    /// Puts the command the manifest asks for in place, and takes away one
+    /// an earlier version put there that this one renamed or dropped.
+    ///
+    /// Never fails the install, for the reason the desktop entry does not.
+    fn update_command(
+        &self,
+        manifest: &xpack_core::Manifest,
+        previous: Option<crate::integration::command::Command>,
+        roots: Option<&crate::integration::command::CommandRoots>,
+    ) -> crate::integration::Outcome {
+        use crate::integration::{Outcome, command};
+
+        let Some(roots) = roots.cloned().or_else(command::CommandRoots::host) else {
+            return Outcome::Failed("no home directory for the current user".to_string());
+        };
+        let paths = self.lock.paths();
+        let wanted = command::Command::from_manifest(manifest, paths, &self.binary_names());
+
+        if let Some(previous) = previous
+            && wanted.as_ref().is_none_or(|wanted| wanted.name != previous.name)
+        {
+            command::remove(&previous, &roots).log("remove the previous command");
+        }
+
+        let Some(wanted) = wanted else {
+            return Outcome::NotRequested;
+        };
+        if crate::integration::is_declined_at(&command::preference_file(paths)) {
+            tracing::info!("the user declined the command; none is put in place");
+            return Outcome::NotRequested;
+        }
+        // The script and the Windows copy both run the console launcher; a
+        // command that names a missing one would fail every time it is typed.
+        if !wanted.launcher.is_file() {
+            return Outcome::Failed(format!(
+                "{} is not installed, so the command would run nothing",
+                wanted.launcher.display()
+            ));
+        }
+        let outcome = command::install(&wanted, &roots);
+        outcome.log("command");
+        outcome
+    }
+
     /// Places the windowed launcher in the installation root.
     ///
     /// Same rule as the console build, and it is the build a desktop shortcut
@@ -1000,6 +1088,8 @@ pub struct Removal {
     pub remaining: Vec<PathBuf>,
     /// What happened to the desktop entry, if there was one.
     pub desktop: crate::integration::Outcome,
+    /// What happened to the command, if there was one.
+    pub command: crate::integration::Outcome,
 }
 
 impl Removal {
@@ -1060,6 +1150,19 @@ pub fn uninstall_with_roots(
     lock: InstallLock,
     desktop_roots: Option<&crate::integration::Roots>,
 ) -> Result<Removal> {
+    uninstall_into(lock, desktop_roots, None)
+}
+
+/// Removes an installation, writing desktop and command changes under
+/// explicit roots.
+///
+/// See [`InstallOptions::desktop_roots`] and [`InstallOptions::command_roots`]
+/// for why this exists.
+pub fn uninstall_into(
+    lock: InstallLock,
+    desktop_roots: Option<&crate::integration::Roots>,
+    command_roots: Option<&crate::integration::command::CommandRoots>,
+) -> Result<Removal> {
     let paths = lock.paths().clone();
     let root = paths.root().to_path_buf();
 
@@ -1069,6 +1172,7 @@ pub fn uninstall_with_roots(
     // there is nothing left to read it from, and the entry is orphaned in the
     // user's menu with no way to find it again.
     let desktop_entry = desktop_entry_for_removal(&lock);
+    let command = command_for_removal(&lock);
 
     // Cleared and persisted before anything is deleted, so an interruption
     // cannot leave state describing versions that no longer exist.
@@ -1130,6 +1234,17 @@ pub fn uninstall_with_roots(
         }
         None => crate::integration::Outcome::NothingToDo,
     };
+    let command = match (&command, command_roots.cloned().or_else(CommandRoots::host)) {
+        (Some(command), Some(roots)) => {
+            let outcome = crate::integration::command::remove(command, &roots);
+            outcome.log("uninstall");
+            outcome
+        }
+        (Some(_), None) => crate::integration::Outcome::Failed(
+            "no home directory for the current user".to_string(),
+        ),
+        (None, _) => crate::integration::Outcome::NothingToDo,
+    };
 
     // Releases the lock and closes the handle to the file inside `state/`.
     // Everything after this point runs unlocked, which is why it is ordered
@@ -1153,7 +1268,7 @@ pub fn uninstall_with_roots(
         );
     }
     tracing::info!(root = %root.display(), root_removed, "installation removed");
-    Ok(Removal { root, root_removed, remaining, desktop })
+    Ok(Removal { root, root_removed, remaining, desktop, command })
 }
 
 /// Picks a launcher that actually exists for a desktop entry to point at.
@@ -1171,6 +1286,28 @@ fn resolve_entry_target(
     [entry.target.clone(), paths.launcher_file_named(names), paths.gui_launcher_file_named(names)]
         .into_iter()
         .find(|candidate| candidate.is_file())
+}
+
+/// The command the active version put in place, if it asked for one.
+fn previous_command(
+    paths: &xpack_core::InstallPaths,
+    state: &InstallState,
+) -> Option<crate::integration::command::Command> {
+    let version = state.current_version.as_ref()?;
+    let bytes = std::fs::read(paths.version_manifest_file(version)).ok()?;
+    let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
+    crate::integration::command::Command::from_manifest(&manifest, paths, &state.binary_names())
+}
+
+/// Rebuilds the command an installation would have put in place.
+fn command_for_removal(lock: &InstallLock) -> Option<crate::integration::command::Command> {
+    let paths = lock.paths();
+    let id = paths.application_id()?;
+    let state = lock.load_or_new_state(id).ok()?;
+    let version = state.current_version.clone().or_else(|| state.previous_version.clone())?;
+    let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
+    let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
+    crate::integration::command::Command::from_manifest(&manifest, paths, &state.binary_names())
 }
 
 /// Rebuilds the desktop entry an installation would have created.

@@ -493,6 +493,10 @@ impl<'a> Updater<'a> {
             // An update never asks. The choice made at the first install, if
             // any, is recorded and honoured by the installer.
             desktop_entry: None,
+            // The same for the command: never asked, a recorded decline
+            // honoured, and the user's real `~/.local/bin` and `PATH`.
+            command: None,
+            command_roots: None,
         };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
 

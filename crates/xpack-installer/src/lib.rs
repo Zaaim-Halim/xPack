@@ -414,6 +414,8 @@ impl VerifiedPayload {
             notifier: payload.binary("xpack-notify"),
             desktop_roots: None,
             desktop_entry: request.desktop_entry,
+            command: None,
+            command_roots: None,
         };
 
         let installed =

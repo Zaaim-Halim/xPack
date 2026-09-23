@@ -117,6 +117,9 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         desktop_roots: None,
         // The manifest's request, or a choice recorded at an earlier install.
         desktop_entry: None,
+        // The same for the command, in the user's own `~/.local/bin` and `PATH`.
+        command: None,
+        command_roots: None,
     };
     let installed = Installer::new(&lock).install(&mut verified, &options)?;
 
