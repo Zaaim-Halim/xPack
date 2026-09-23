@@ -81,7 +81,7 @@ fn main() -> ExitCode {
             Err(error) => {
                 // No installation means nowhere to log, so this one line is
                 // the only place it can go.
-                eprintln!("xpack-updater: {error}");
+                xpack_core::errln!("xpack-updater: {error}");
                 return ExitCode::from(exit::FAILED);
             }
         },
