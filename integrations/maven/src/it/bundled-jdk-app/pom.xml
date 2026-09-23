@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A complete example: every setting the plugin has, each with a note on what
+  it does. Build it with the steps in README.md beside this file.
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -17,6 +21,10 @@
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Set per operating system by the profiles at the end: an application
+         icon has a different format on each platform. -->
+    <demo.icon>icon.png</demo.icon>
+    <demo.icons>${project.basedir}/src/xpack/icons/linux</demo.icons>
   </properties>
 
   <build>
@@ -26,11 +34,76 @@
         <artifactId>xpack-maven-plugin</artifactId>
         <version>0.1.0-SNAPSHOT</version>
         <configuration>
-          <mainClass>com.example.demo.Main</mainClass>
+
+          <!-- ============================================== the application -->
+
+          <!-- Identity. Each defaults to the project: `groupId.artifactId`,
+               `<name>`, `<version>`, `<description>`. Set here to show them;
+               the publisher has no Maven default. -->
+          <id>com.example.demo</id>
+          <name>xPack Demo</name>
           <publisher>Example Ltd</publisher>
+
+          <!-- What the launcher starts: `java [jvmArgs] -cp application/*
+               <mainClass> [appArgs]`, with the bundled runtime. -->
+          <mainClass>com.example.demo.Main</mainClass>
+          <jvmArgs>
+            <jvmArg>-Xmx256m</jvmArg>
+            <!-- How long the demo's window stays open, in milliseconds. -->
+            <jvmArg>-Ddemo.lifetime=8000</jvmArg>
+          </jvmArgs>
+          <appArgs>
+            <!-- Opens the demo's window, so starting it is visible. -->
+            <appArg>--gui</appArg>
+          </appArgs>
+          <environment>
+            <DEMO_GREETING>hello from the manifest</DEMO_GREETING>
+          </environment>
+
+          <!-- Files copied into the payload as they are: here, the icon
+               `<desktop><icon>` names. Per platform; see the profiles. -->
+          <payloadResources>${demo.icons}</payloadResources>
+
+          <!-- ================================================== the runtime -->
+
+          <!-- A runtime linked with jlink and shipped inside the package, so
+               the user's machine needs no Java. -->
+          <runtime>
+            <bundled>true</bundled>
+            <modules>
+              <module>java.base</module>
+              <module>java.desktop</module>
+              <module>java.logging</module>
+            </modules>
+            <compress>zip-6</compress>
+            <stripDebug>true</stripDebug>
+            <noHeaderFiles>true</noHeaderFiles>
+            <noManPages>true</noManPages>
+          </runtime>
+
+          <!-- Platforms to build, as `<os>-<arch>`. Left out, the build
+               machine's own. Another platform needs its JDK to link a runtime
+               from (`<targetJdks>`) and its xPack binaries to build an
+               installer from (`<targetBinaries>`, on xpack:installer):
+
+          <targets>
+            <target>macos-arm64</target>
+            <target>windows-x64</target>
+          </targets>
+          <targetJdks>
+            <windows-x64>/path/to/jdk-windows-x64</windows-x64>
+          </targetJdks>
+          -->
+
+          <!-- ================================================== updating -->
+
+          <!-- Where updates come from. `<os>-<arch>` is appended per target;
+               override with -Dxpack.updateBaseUrl for a release build. -->
           <updateBaseUrl>https://updates.example.com/demo</updateBaseUrl>
           <update>
             <channel>stable</channel>
+            <!-- Mandatory releases stop older versions from starting. -->
+            <mandatory>false</mandatory>
             <!-- Keep looking while the application is open, no more than once
                  every three hours, and say so when something is waiting. -->
             <checkWhileRunning>true</checkWhileRunning>
@@ -42,29 +115,67 @@
               <message>It has been downloaded and checked already.</message>
             </prompt>
           </update>
-          <environment>
-            <DEMO_GREETING>hello from the manifest</DEMO_GREETING>
-          </environment>
-          <runtime>
-            <modules>
-              <module>java.base</module>
-              <module>java.desktop</module>
-              <module>java.logging</module>
-            </modules>
-          </runtime>
+
+          <!-- A new version is kept only once it proves it starts: it must
+               report within this long, by writing XPACK_HEALTH_FILE. -->
           <health>
             <startupTimeoutSeconds>15</startupTimeoutSeconds>
             <requireStartupReport>true</requireStartupReport>
           </health>
+
+          <!-- ========================================= the desktop and branding -->
+
+          <!-- The Start Menu entry, `~/Applications` bundle or `.desktop`
+               file. The icon is the one source of branding: the entry, the
+               installer file and the wizard all show it. -->
           <desktop>
             <shortcut>true</shortcut>
+            <icon>${demo.icon}</icon>
             <categories>
               <category>Utility</category>
             </categories>
+            <terminal>false</terminal>
           </desktop>
+
+          <!-- ================================================== the installer -->
+
+          <!-- What the installation wizard shows. Every setting has a default,
+               and so does the block. Name, publisher and icon are not here:
+               they come from the signed package. -->
+          <installerUi>
+            <license>${project.basedir}/LICENSE.txt</license>
+            <!-- Which pages appear; their order is fixed. -->
+            <pages>
+              <page>welcome</page>
+              <page>license</page>
+              <page>location</page>
+              <page>ready</page>
+              <page>install</page>
+              <page>finish</page>
+            </pages>
+            <!-- Only these two lines can be reworded, with {name} and
+                 {version}. -->
+            <text>
+              <welcome>This will install {name} {version} for your user account. It brings its own Java, so nothing else is needed.</welcome>
+              <finish>{name} is ready. Open it from your applications at any time.</finish>
+            </text>
+            <shortcutDefault>true</shortcutDefault>
+            <launchOnFinish>true</launchOnFinish>
+          </installerUi>
+
+          <!-- A Windows installer is the windowed build by default, which a
+               person double-clicks. `true` builds the console one instead,
+               for installers only scripts run. -->
+          <console>false</console>
+          <!-- Leave the installed version inactive: for staging installs. -->
+          <noActivate>false</noActivate>
+
         </configuration>
         <executions>
           <execution>
+            <!-- Every release. The installer is not here: it is the
+                 `installer` profile below, so an ordinary build does not
+                 produce tens of megabytes nobody asked for. -->
             <goals>
               <goal>runtime</goal>
               <goal>payload</goal>
@@ -78,4 +189,58 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- `mvn package -Pinstaller` also builds the setup file a user
+         downloads: `Install xPack Demo.app` on macOS, `…-Setup.exe` on
+         Windows, `…-installer` on Linux, beside the package in
+         target/xpack/dist. A profile rather than a default, because an
+         installer changes rarely and a release build that makes one every
+         time spends minutes and megabytes on nothing. -->
+    <profile>
+      <id>installer</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>io.xpack</groupId>
+            <artifactId>xpack-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>installer</id>
+                <!-- After pack, which also runs at package: goals bound to one
+                     phase run in the order they are declared, and this
+                     profile's executions come after the main build's. -->
+                <phase>package</phase>
+                <goals>
+                  <goal>installer</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- Each platform reads its own icon format. -->
+    <profile>
+      <id>macos-icon</id>
+      <activation>
+        <os><family>mac</family></os>
+      </activation>
+      <properties>
+        <demo.icon>icon.icns</demo.icon>
+        <demo.icons>${project.basedir}/src/xpack/icons/macos</demo.icons>
+      </properties>
+    </profile>
+    <profile>
+      <id>windows-icon</id>
+      <activation>
+        <os><family>windows</family></os>
+      </activation>
+      <properties>
+        <demo.icon>icon.ico</demo.icon>
+        <demo.icons>${project.basedir}/src/xpack/icons/windows</demo.icons>
+      </properties>
+    </profile>
+  </profiles>
 </project>

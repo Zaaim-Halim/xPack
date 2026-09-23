@@ -1,0 +1,6 @@
+xPack Demo licence
+
+This is a demonstration licence. The xPack Demo exists to show what an xPack
+installer looks like and does nothing else.
+
+You may install it, run it and remove it as often as you like.

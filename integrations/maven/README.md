@@ -55,6 +55,37 @@ mvn xpack:installer
 the whole package plus the runtime binaries and changes almost never; building
 one on every commit is tens of megabytes of nothing.
 
+To build it in the same run as everything else when you do want one, bind it
+in a profile, so `mvn package -Pinstaller` makes the package and the setup
+file together and a plain `mvn package` stays as it was:
+
+```xml
+<profiles>
+  <profile>
+    <id>installer</id>
+    <build>
+      <plugins>
+        <plugin>
+          <groupId>io.xpack</groupId>
+          <artifactId>xpack-maven-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>installer</id>
+              <phase>package</phase>
+              <goals><goal>installer</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </build>
+  </profile>
+</profiles>
+```
+
+It runs after `xpack:pack`, which it needs: goals bound to the same phase run
+in the order they are declared, and a profile's executions come after the main
+build's. The demo project in `src/it/bundled-jdk-app` does exactly this.
+
 ## The runtime is shipped once, not every release
 
 `xpack:pack` puts a full runtime in every package — a package is
