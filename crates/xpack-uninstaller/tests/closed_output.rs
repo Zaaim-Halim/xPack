@@ -93,7 +93,8 @@ fn the_installed_uninstaller_finishes_with_nobody_reading() {
     // handing over to a copy of itself outside it.
     let dir = tempfile::tempdir().unwrap();
     let paths = install(dir.path());
-    let installed = paths.root().join(BinaryNames::from_display_name("Example").uninstaller());
+    // Named by the installation's own rule, which adds `.exe` on Windows.
+    let installed = paths.uninstaller_file_named(&BinaryNames::from_display_name("Example"));
     assert!(installed.is_file(), "the uninstaller was not placed");
 
     let first = Command::new(&installed)
@@ -110,8 +111,13 @@ fn the_installed_uninstaller_finishes_with_nobody_reading() {
 
     eventually("the installation is removed", || !paths.root().exists());
     // The copy's last act, after every line it prints: without it, a stray
-    // uninstaller is left in the temporary directory.
+    // uninstaller is left in the temporary directory. Unix only: on Windows a
+    // running program cannot delete its own file, so the copy is left there
+    // for the system to clear, by design, and there is nothing to wait for.
+    #[cfg(unix)]
     eventually("the relocated copy removes itself", || !copy_dir.exists());
+    #[cfg(not(unix))]
+    let _ = copy_dir;
 }
 
 #[test]
