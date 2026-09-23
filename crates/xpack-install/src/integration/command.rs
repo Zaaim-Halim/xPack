@@ -222,10 +222,22 @@ mod imp {
         Outcome::Done(vec![path])
     }
 
+    /// Removes the script only when it is exactly the one this installation
+    /// writes. Carrying this application's mark is enough to be replaced, so
+    /// an update or a reinstall can refresh it, but not to be deleted: the
+    /// same application installed a second time, elsewhere, points the
+    /// command at itself, and uninstalling the first copy must leave it.
     pub(super) fn remove(command: &Command, roots: &CommandRoots) -> Outcome {
+        let path = super::script_path(command, roots);
         match script_availability(command, roots) {
+            Availability::Ours
+                if std::fs::read_to_string(&path).is_ok_and(|text| text == script(command)) =>
+            {
+                super::super::remove_paths(vec![path])
+            }
             Availability::Ours => {
-                super::super::remove_paths(vec![super::script_path(command, roots)])
+                tracing::info!(path = %path.display(), "the command runs another copy; left alone");
+                Outcome::NothingToDo
             }
             Availability::Free => Outcome::NothingToDo,
             Availability::Foreign(path) => {

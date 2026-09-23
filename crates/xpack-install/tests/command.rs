@@ -221,6 +221,38 @@ mod unix {
     }
 
     #[test]
+    fn uninstalling_one_copy_leaves_the_command_another_copy_now_owns() {
+        // The same application installed twice, in two roots, sharing one
+        // `~/.local/bin`. The second install points the command at itself;
+        // removing the first must not take the second's command with it.
+        let first = World::new();
+        let second_paths = common::install_paths(&first.dir.path().join("elsewhere"));
+        first.install("1.0.0", Some("mytool"), &first.options(None)).unwrap();
+
+        let lock = InstallLock::acquire(&second_paths).unwrap();
+        let source = first.dir.path().join("build-second");
+        std::fs::create_dir_all(&source).unwrap();
+        let package =
+            common::build_package_commanding(&source, &first.key, "1.0.0", Some("mytool"));
+        let mut verified = xpack_install::open_and_verify(
+            &package,
+            &lock,
+            &TrustDecision::Explicit(first.key.public()),
+        )
+        .unwrap();
+        Installer::new(&lock).install(&mut verified, &first.options(None)).unwrap();
+        drop(lock);
+        let pointed_at_second = std::fs::read_to_string(script(&first, "mytool")).unwrap();
+
+        first.uninstall();
+        assert_eq!(
+            std::fs::read_to_string(script(&first, "mytool")).ok().as_deref(),
+            Some(pointed_at_second.as_str()),
+            "removing one copy took away the command the other copy owns"
+        );
+    }
+
+    #[test]
     fn uninstalling_takes_the_command_away() {
         let world = World::new();
         world.install("1.0.0", Some("mytool"), &world.options(None)).unwrap();
