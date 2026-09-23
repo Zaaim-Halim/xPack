@@ -18,7 +18,9 @@ pub mod link;
 pub mod lock;
 pub mod process;
 pub mod sharing;
+pub mod windows_manifest;
 
 pub use link::{LinkOutcome, update_current_link};
 pub use lock::{DownloadLease, InstallLock};
 pub use process::{LaunchRequest, launch, request_close, resolve_executable};
+pub use windows_manifest::WINDOWS_MANIFEST;
