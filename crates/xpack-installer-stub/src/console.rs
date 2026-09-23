@@ -41,6 +41,13 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) no_shortcut: bool,
 
+    /// Do not add the command the application asks for.
+    ///
+    /// The command is what a terminal starts the application by. On the same
+    /// terms as `--no-shortcut`: only on a first installation.
+    #[arg(long)]
+    pub(crate) no_path: bool,
+
     /// Describe what would be installed, without installing it.
     ///
     /// Exits with the code the installation itself would, so a script can ask
@@ -94,11 +101,19 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     if args.dry_run {
         xpack_core::outln!("would install into {}", payload.paths(&root)?.root().display());
         xpack_core::outln!("signed by       {}", short_key(&payload.plan().signing_key));
+        if let Some(command) = &payload.manifest().command
+            && !args.no_path
+        {
+            xpack_core::outln!("would add       the command {}", command.name);
+        }
         return Ok(ExitCode::from(dry_run_code(&existing)));
     }
 
-    let request =
-        Request { root, desktop_entry: if args.no_shortcut { Some(false) } else { None } };
+    let request = Request {
+        root,
+        desktop_entry: if args.no_shortcut { Some(false) } else { None },
+        command: if args.no_path { Some(false) } else { None },
+    };
     let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
 
     xpack_core::outln!();
@@ -110,8 +125,31 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     }
     xpack_core::outln!();
     xpack_core::outln!("Run it with:   {}", outcome.launcher.display());
+    report_command(&outcome, payload.manifest());
 
     Ok(ExitCode::from(exit::INSTALLED))
+}
+
+/// Says how to start the application from a terminal, or why that was not set
+/// up, when the package asked for a command.
+fn report_command(outcome: &xpack_installer::Outcome, manifest: &xpack_core::Manifest) {
+    if let Some(name) = &outcome.command_name {
+        xpack_core::outln!("Or type:       {name}   (in a new terminal window)");
+        if let Some(dir) = &outcome.command_off_path {
+            xpack_core::outln!();
+            xpack_core::outln!(
+                "{} is not on your PATH, so a terminal will not find it yet.",
+                dir.display()
+            );
+            xpack_core::outln!("Add this line to your shell's profile, then open a new terminal:");
+            xpack_core::outln!("  export PATH=\"{}:$PATH\"", dir.display());
+        }
+    } else if let (Some(command), xpack_install::DesktopOutcome::Failed(reason)) =
+        (&manifest.command, &outcome.command)
+    {
+        // The installation is fine; only the shortcut to it by name is not.
+        xpack_core::errln!("note: the command {} was not added: {reason}", command.name);
+    }
 }
 
 /// A line saying what the installation will be, where that is worth saying.

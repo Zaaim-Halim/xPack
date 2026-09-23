@@ -24,7 +24,12 @@ impl Engine for VerifiedPayload {
     }
 
     fn install(&self, choices: &Choices, progress: &dyn ProgressReporter) -> Result<Installed> {
-        let request = Request { root: choices.root.clone(), desktop_entry: choices.desktop_entry };
+        // The command follows the package until the wizard can ask about it.
+        let request = Request {
+            root: choices.root.clone(),
+            desktop_entry: choices.desktop_entry,
+            command: None,
+        };
         let outcome = self.install_into(&request, progress)?;
         Ok(Installed {
             directory: outcome.root,

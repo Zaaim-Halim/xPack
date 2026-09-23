@@ -132,12 +132,15 @@ pub struct Request {
     /// Whether to add the desktop entry the package asks for. `None` leaves
     /// it to the package. See [`InstallOptions::desktop_entry`].
     pub desktop_entry: Option<bool>,
+    /// Whether to add the command the package asks for. `None` leaves it to
+    /// the package. See [`InstallOptions::command`].
+    pub command: Option<bool>,
 }
 
 impl Request {
     /// Install into `root`, choosing nothing else.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, desktop_entry: None }
+        Self { root, desktop_entry: None, command: None }
     }
 }
 
@@ -154,6 +157,18 @@ pub struct Outcome {
     pub launcher: PathBuf,
     /// What happened to the desktop entry, if the package asked for one.
     pub desktop: xpack_install::DesktopOutcome,
+    /// What happened to the command, if the package asked for one.
+    pub command: xpack_install::DesktopOutcome,
+    /// What the user types to start the application, when a command was put
+    /// in place.
+    pub command_name: Option<String>,
+    /// Where the command was put, when a terminal started the way this
+    /// installer was would not look there.
+    ///
+    /// Only ever on macOS and Linux, where the command is a script in
+    /// `~/.local/bin` and that directory is on the `PATH` only if the user's
+    /// shell puts it there. On Windows the installer adds its own directory.
+    pub command_off_path: Option<PathBuf>,
 }
 
 /// The payload, unpacked into a temporary directory.
@@ -414,7 +429,7 @@ impl VerifiedPayload {
             notifier: payload.binary("xpack-notify"),
             desktop_roots: None,
             desktop_entry: request.desktop_entry,
-            command: None,
+            command: request.command,
             command_roots: None,
         };
 
@@ -434,8 +449,40 @@ impl VerifiedPayload {
             activated: installed.activated,
             launcher: launcher_to_report(&paths, &names),
             desktop: installed.desktop,
+            command_name: installed
+                .command
+                .is_done()
+                .then(|| self.manifest.command.as_ref().map(|c| c.name.clone()))
+                .flatten(),
+            command_off_path: command_off_path(&installed.command),
+            command: installed.command,
         })
     }
+}
+
+/// The directory a new command went into, if a terminal would not look there.
+fn command_off_path(outcome: &xpack_install::DesktopOutcome) -> Option<PathBuf> {
+    if cfg!(windows) || !outcome.is_done() {
+        return None;
+    }
+    let bin = xpack_install::integration::command::CommandRoots::host()?.bin;
+    (!is_on_path(&bin, std::env::var_os("PATH").as_deref())).then_some(bin)
+}
+
+/// Whether `dir` is one of the directories in a `PATH` value.
+///
+/// Compared as written and, where both exist, as resolved, so `~/.local/bin`
+/// reached through a link still counts. The `PATH` is this process's: right
+/// for an installer run from a terminal, and a guess for one started from a
+/// desktop, which inherits whatever the desktop was given instead.
+fn is_on_path(dir: &Path, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let resolved = std::fs::canonicalize(dir).ok();
+    std::env::split_paths(path).any(|entry| {
+        entry == dir || resolved.is_some() && std::fs::canonicalize(&entry).ok() == resolved
+    })
 }
 
 /// Reads the licence out of the unpacked payload, held to the same rules it
@@ -523,6 +570,32 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_on_the_path_is_found_and_one_off_it_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let on = std::env::join_paths([&other, &bin]).unwrap();
+        let off = std::env::join_paths([&other]).unwrap();
+        assert!(is_on_path(&bin, Some(&on)));
+        assert!(!is_on_path(&bin, Some(&off)));
+        assert!(!is_on_path(&bin, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_entry_that_leads_to_the_directory_through_a_link_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&bin, &link).unwrap();
+        assert!(is_on_path(&bin, Some(link.as_os_str())));
+    }
 
     #[test]
     fn a_given_root_wins_then_an_existing_installation_then_the_default() {

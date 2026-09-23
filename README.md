@@ -277,6 +277,7 @@ MyApp-1.3.0-windows-x64-Setup.exe --silent
 | `--dry-run` | Report what installing would do, and exit with the code it would return. |
 | `--root <DIR>` | Install somewhere other than the per-user default. |
 | `--no-shortcut` | Skip the Start Menu / Applications entry (first install only). |
+| `--no-path` | Skip the command the application asks for, so a terminal cannot start it by name (first install only). |
 | `--log <FILE>` | Also write a log of the run. |
 
 On Windows, `xpack installer` produces a windowed installer by default. A shell
