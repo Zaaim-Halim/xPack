@@ -10,6 +10,7 @@ pub mod digest;
 pub mod error;
 pub mod manifest;
 pub mod naming;
+pub mod output;
 pub mod paths;
 pub mod platform;
 pub mod policy;
