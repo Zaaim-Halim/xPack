@@ -1883,7 +1883,9 @@ dependencies = [
  "xpack-core",
  "xpack-install",
  "xpack-log",
+ "xpack-package",
  "xpack-platform",
+ "xpack-security",
 ]
 
 [[package]]

@@ -51,7 +51,7 @@ pub fn plan(paths: &InstallPaths, executable: &Path, already_relocated: bool) ->
     if already_relocated || !is_inside(executable, paths.root()) {
         return Ok(Plan::RemoveNow);
     }
-    Ok(Plan::Relocate { to: relocation_target(paths)? })
+    Ok(Plan::Relocate { to: relocation_target(paths) })
 }
 
 /// Returns `true` when `executable` lives inside `root`.
@@ -72,12 +72,16 @@ fn is_inside(executable: &Path, root: &Path) -> bool {
 }
 
 /// Picks a private directory outside the installation to run from.
-fn relocation_target(paths: &InstallPaths) -> Result<PathBuf> {
+///
+/// Only named here. The directory is created when something is copied into
+/// it, so deciding to relocate leaves nothing behind when the copy never
+/// happens.
+fn relocation_target(paths: &InstallPaths) -> PathBuf {
     let application = paths.application_id().unwrap_or("xpack");
     let unique = format!("xpack-uninstall-{application}-{}", std::process::id());
-    let dir = std::env::temp_dir().join(unique);
-    xpack_core::atomic::create_dir_all(&dir)?;
-    Ok(dir.join(format!("xpack-uninstaller{}", std::env::consts::EXE_SUFFIX)))
+    std::env::temp_dir()
+        .join(unique)
+        .join(format!("xpack-uninstaller{}", std::env::consts::EXE_SUFFIX))
 }
 
 /// Copies this binary to `destination` and makes it runnable.
@@ -85,6 +89,9 @@ pub fn relocate(executable: &Path, destination: &Path) -> Result<()> {
     let bytes = std::fs::read(executable).map_err(|e| Error::io(executable, e))?;
     if bytes.is_empty() {
         return Err(Error::invalid("uninstaller", "this binary reads as empty"));
+    }
+    if let Some(parent) = destination.parent() {
+        xpack_core::atomic::create_dir_all(parent)?;
     }
     xpack_core::atomic::write(destination, &bytes)?;
     set_executable(destination)
@@ -142,7 +149,12 @@ mod tests {
         let exe = paths.root().join("xpack-uninstaller");
         std::fs::write(&exe, b"binary").unwrap();
 
-        assert!(matches!(plan(&paths, &exe, false).unwrap(), Plan::Relocate { .. }));
+        let Plan::Relocate { to } = plan(&paths, &exe, false).unwrap() else {
+            panic!("a binary inside the installation must relocate");
+        };
+        // Deciding creates nothing: a directory made here would be left in
+        // the temporary directory whenever the copy never follows.
+        assert!(!to.parent().unwrap().exists(), "planning created {}", to.display());
     }
 
     #[test]
@@ -184,7 +196,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         std::fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
-        let destination = dir.path().join("copy");
+        // Into a directory that does not exist yet, as a planned target is.
+        let destination = dir.path().join("relocated/copy");
 
         relocate(&source, &destination).unwrap();
 

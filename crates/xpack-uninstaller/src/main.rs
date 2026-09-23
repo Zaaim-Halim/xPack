@@ -32,17 +32,17 @@ fn main() -> ExitCode {
     let paths = match resolve(&args) {
         Ok(paths) => paths,
         Err(error) => {
-            eprintln!("xpack-uninstaller: {error}");
+            xpack_core::errln!("xpack-uninstaller: {error}");
             return ExitCode::FAILURE;
         }
     };
 
     if !args.yes {
-        eprintln!(
+        xpack_core::errln!(
             "xpack-uninstaller: this removes every installed version of {}.",
             paths.application_id().unwrap_or("this application")
         );
-        eprintln!("Pass --yes to confirm.");
+        xpack_core::errln!("Pass --yes to confirm.");
         return ExitCode::FAILURE;
     }
 
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("xpack-uninstaller: cannot locate this binary: {error}");
+            xpack_core::errln!("xpack-uninstaller: cannot locate this binary: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         Ok(Plan::Relocate { to }) => hand_over(&executable, &to, &paths),
         Ok(Plan::RemoveNow) => remove(&paths, args.relocated, &executable),
         Err(error) => {
-            eprintln!("xpack-uninstaller: {error}");
+            xpack_core::errln!("xpack-uninstaller: {error}");
             ExitCode::FAILURE
         }
     }
@@ -78,7 +78,7 @@ fn main() -> ExitCode {
 /// Copies this binary out of the installation and lets the copy finish the job.
 fn hand_over(executable: &std::path::Path, to: &std::path::Path, paths: &InstallPaths) -> ExitCode {
     if let Err(error) = relocate(executable, to) {
-        eprintln!("xpack-uninstaller: could not prepare removal: {error}");
+        xpack_core::errln!("xpack-uninstaller: could not prepare removal: {error}");
         return ExitCode::FAILURE;
     }
 
@@ -95,7 +95,7 @@ fn hand_over(executable: &std::path::Path, to: &std::path::Path, paths: &Install
         // does; waiting here would deadlock the two against each other.
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("xpack-uninstaller: could not start the removal: {error}");
+            xpack_core::errln!("xpack-uninstaller: could not start the removal: {error}");
             ExitCode::FAILURE
         }
     }
@@ -106,7 +106,7 @@ fn remove(paths: &InstallPaths, relocated: bool, executable: &std::path::Path) -
     let lock = match InstallLock::acquire(paths) {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!("xpack-uninstaller: {error}");
+            xpack_core::errln!("xpack-uninstaller: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -114,30 +114,30 @@ fn remove(paths: &InstallPaths, relocated: bool, executable: &std::path::Path) -
     let removal = match xpack_install::uninstall(lock) {
         Ok(removal) => removal,
         Err(error) => {
-            eprintln!("xpack-uninstaller: {error}");
+            xpack_core::errln!("xpack-uninstaller: {error}");
             return ExitCode::FAILURE;
         }
     };
 
     if let xpack_install::DesktopOutcome::Done(entries) = &removal.desktop {
         for entry in entries {
-            eprintln!("Removed the desktop entry at {}", entry.display());
+            xpack_core::errln!("Removed the desktop entry at {}", entry.display());
         }
     }
 
     if removal.is_complete() {
-        eprintln!("Removed {}", removal.root.display());
+        xpack_core::errln!("Removed {}", removal.root.display());
     } else {
-        eprintln!(
+        xpack_core::errln!(
             "Removed everything xPack installed in {}, but the directory was not empty.",
             removal.root.display()
         );
-        eprintln!("These were left alone because they are not ours to delete:");
+        xpack_core::errln!("These were left alone because they are not ours to delete:");
         for path in &removal.remaining {
-            eprintln!("  {}", path.display());
+            xpack_core::errln!("  {}", path.display());
         }
     }
-    eprintln!(
+    xpack_core::errln!(
         "Application data was not touched. xPack does not know where an application stores \
          its data, so it does not guess."
     );

@@ -22,6 +22,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+xpack-package.workspace = true
+xpack-security.workspace = true
 
 [lints]
 workspace = true
