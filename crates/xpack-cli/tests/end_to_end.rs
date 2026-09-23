@@ -368,7 +368,10 @@ fn a_command_line_tool_runs_where_the_user_invoked_it() {
     let text = std::fs::read_to_string(&config).unwrap();
     std::fs::write(
         &config,
-        text.replace(r#""launch":{"#, r#""launch":{"keepWorkingDirectory":true,"#),
+        text.replace(
+            r#""launch":{"#,
+            r#""launch":{"keepWorkingDirectory":true,"arguments":["{versionDir}/data"],"#,
+        ),
     )
     .unwrap();
     let package = fixture.pack_existing("1.0.0");
@@ -390,6 +393,12 @@ fn a_command_line_tool_runs_where_the_user_invoked_it() {
         .unwrap();
     assert!(run.status.success(), "{}", stderr(&run));
     assert_eq!(reported_cwd(&run), std::fs::canonicalize(&elsewhere).unwrap());
+
+    // Started somewhere else, it still finds its own files: the argument
+    // naming one arrives as the version directory's absolute path.
+    let version_dir = fixture.root().join("com.example.demo/versions/1.0.0");
+    let expected = format!("args={}/data", version_dir.display());
+    assert!(stdout(&run).contains(&expected), "{}", stdout(&run));
 }
 
 #[test]

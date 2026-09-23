@@ -178,10 +178,34 @@ user's machine.
 | Section | What it does |
 | --- | --- |
 | `application` | Identity. `id` is a stable reverse-DNS name; `name`, `publisher` and the icon are what users see everywhere. |
-| `launch` | The executable to start, relative to the payload (a bundled runtime) or a bare name found on `PATH` (a system one), with its arguments and environment. It starts in its installed version directory; a command-line tool sets `"keepWorkingDirectory": true` to start where the user ran it, so the paths they type mean what they meant. Installations made with xPack 0.1.0 cannot update to a package that sets it. |
+| `launch` | The executable to start, relative to the payload (a bundled runtime) or a bare name found on `PATH` (a system one), with its arguments and environment. See [command-line tools](#command-line-tools) for where it starts. |
 | `update` | Where this platform's update index lives, and the channel to follow. `mandatory` stops older versions from starting. |
 | `health` | How long a new version has to prove it starts. With `requireStartupReport`, the application must write the file named in `XPACK_HEALTH_FILE`. |
 | `desktop` | A Start Menu entry, a `~/Applications` bundle or a `.desktop` file, and the icon: `.ico` or `.png` on Windows, `.icns` on macOS, `.png` or `.svg` on Linux. |
+
+### Command-line tools
+
+An application starts in its installed version directory, which is what a
+program opened from a menu or Finder wants. **Set `keepWorkingDirectory` when
+your application is also used from a command line**: a command-line tool, or
+an application that takes file paths in a terminal (`myeditor notes.txt`,
+`mytool build src`). It then starts in the directory the user ran it from, so
+the paths they type mean what they meant.
+
+Paths into your own package then need `{versionDir}`, which the launcher
+replaces with the installed version directory:
+
+```json
+"launch": {
+  "executable": "runtime/bin/java",
+  "arguments": ["-cp", "{versionDir}/application/*", "com.example.Main"],
+  "keepWorkingDirectory": true
+}
+```
+
+The executable needs nothing: it is always found inside the package. Either
+setting makes the package format 2, which installations made with xPack 0.1.0
+cannot install or update to.
 
 The platform defaults to the machine you build on; `xpack pack --platform
 windows-x64` builds for another.
