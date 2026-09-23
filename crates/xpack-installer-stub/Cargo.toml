@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Embeds the Windows application manifest; see the script.
+build = "../xpack-platform/embed-windows-manifest.rs"
 
 # The console build: what scripts run, and on macOS what the installer bundle
 # runs, opening the wizard unless asked not to.

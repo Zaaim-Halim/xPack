@@ -1,9 +1,14 @@
-//! Links the Windows application manifest into both installer executables.
+//! Links the Windows application manifest into a crate's executables.
+//!
+//! The build script of every crate whose program opens a window: the
+//! installer stub and the update notice. One script, kept beside the manifest
+//! it embeds, so neither can be updated without the other; each crate names it
+//! with `build = "../xpack-platform/embed-windows-manifest.rs"`.
 //!
 //! Without it Windows refuses to start them: the windowing code imports
 //! functions that only the Common Controls 6 library has, and only a manifest
 //! asks Windows for that version. `xpack installer` writes the same manifest
-//! again when it brands an installer; this makes the executable start as it
+//! again when it brands an executable; this makes the executable start as it
 //! was built, before or without that.
 //!
 //! The Microsoft linker embeds it, so no resource compiler is needed. Other
