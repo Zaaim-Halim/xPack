@@ -21,7 +21,7 @@ use std::sync::Arc;
 use native_windows_gui as nwg;
 
 use crate::engine::Engine;
-use crate::model::{Key, Texts, Wizard};
+use crate::model::{Key, Texts, Visibility, Wizard};
 use crate::session::{Host, Session, Update};
 use crate::window::Shown;
 use controls::{Action, Controls};
@@ -119,6 +119,15 @@ impl App {
                 }
                 self.session.close_requested(&self.dialogs);
             }
+            // The dialog manager turns Return and Escape into these, whatever
+            // has focus. Return does what the primary button would, and only
+            // when it could be pressed; Escape is Cancel, with its question.
+            nwg::Event::OnKeyEnter => {
+                if self.session.wizard().buttons().primary == Visibility::Enabled {
+                    self.act(Action::Primary);
+                }
+            }
+            nwg::Event::OnKeyEsc => self.session.close_requested(&self.dialogs),
             nwg::Event::OnNotice => {
                 let update = self.session.tick();
                 self.apply(update);
