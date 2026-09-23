@@ -991,3 +991,69 @@ fn an_installer_carries_the_wizard_settings_and_the_packages_icon() {
     ]);
     assert!(!refused.status.success(), "a misspelt setting was accepted");
 }
+
+/// A stream whose reader has gone away: every write to it fails.
+fn closed_pipe() -> std::process::Stdio {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    writer.into()
+}
+
+/// Runs a command scoped to this fixture's root with both streams unread.
+fn run_unread(fixture: &Fixture, args: &[&str]) -> std::process::ExitStatus {
+    Command::new(xpack())
+        .current_dir(fixture.path())
+        .arg("--root")
+        .arg(fixture.root())
+        .args(args)
+        .stdout(closed_pipe())
+        .stderr(closed_pipe())
+        .status()
+        .expect("the xpack binary should run")
+}
+
+#[test]
+fn an_install_nobody_reads_about_still_happens() {
+    // `xpack install … | head -1` in a script, or a CI step whose log
+    // collector died: the output is lost, the install must not be.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let status = run_unread(&fixture, &["install", &package, "--trust", "signing.pub.json"]);
+    assert_eq!(status.code(), Some(0), "{status:?}");
+
+    let list = fixture.run_in_root(&["list", "com.example.demo"]);
+    assert!(stdout(&list).contains("1.0.0"), "not installed: {}", stdout(&list));
+}
+
+#[test]
+fn a_report_piped_into_something_that_stops_reading_is_not_a_crash() {
+    // `xpack list --json | head -c 1`: the reader has what it wanted.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+    let install = fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    for args in [
+        &["list", "com.example.demo", "--json"][..],
+        &["list", "com.example.demo"][..],
+        &["inspect", &package][..],
+    ] {
+        let status = run_unread(&fixture, args);
+        assert_eq!(status.code(), Some(0), "xpack {args:?}: {status:?}");
+    }
+}
+
+#[test]
+fn a_failure_nobody_can_read_keeps_its_exit_code() {
+    // The code is the only report left, so it must be the failure's own:
+    // 3 for a package that does not verify, not the 101 of a crash.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let status = run_unread(&fixture, &["install", &package]);
+    assert_eq!(status.code(), Some(3), "{status:?}");
+}

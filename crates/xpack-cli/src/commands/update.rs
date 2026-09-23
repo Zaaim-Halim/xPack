@@ -116,7 +116,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
                 crate::output::field("notes", notes);
             }
         } else {
-            println!("up to date");
+            xpack_core::outln!("up to date");
         }
         return super::success();
     }
@@ -133,7 +133,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     if let Some(version) = version {
         crate::output::field("updated to", &version);
     } else {
-        println!("up to date");
+        xpack_core::outln!("up to date");
     }
     super::success()
 }

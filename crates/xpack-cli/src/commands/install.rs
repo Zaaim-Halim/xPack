@@ -121,7 +121,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let installed = Installer::new(&lock).install(&mut verified, &options)?;
 
     if !installed.recovery.is_empty() {
-        eprintln!("note: recovered from an interrupted operation before installing");
+        xpack_core::errln!("note: recovered from an interrupted operation before installing");
     }
 
     crate::output::field("application", &application_id);
@@ -146,8 +146,8 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     report_binary("uninstaller", installed.uninstaller, &paths.uninstaller_file_named(&names));
 
     if matches!(decision, TrustDecision::OnFirstUse) {
-        eprintln!();
-        eprintln!(
+        xpack_core::errln!();
+        xpack_core::errln!(
             "warning: the signing key was pinned on first use. Every later update must be \
              signed by the same key, but this install itself was trusted on sight."
         );
@@ -183,7 +183,7 @@ fn resolve_launcher(args: &Args) -> Result<Option<PathBuf>> {
     }
 
     let Some(sibling) = super::default_launcher() else {
-        eprintln!("note: no launcher was installed; pass --launcher to supply one");
+        xpack_core::errln!("note: no launcher was installed; pass --launcher to supply one");
         return Ok(None);
     };
     Ok(Some(sibling))

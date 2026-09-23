@@ -92,8 +92,8 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         ),
     );
 
-    eprintln!();
-    eprintln!(
+    xpack_core::errln!();
+    xpack_core::errln!(
         "note: publish this beside the full package. A delta is an optimisation — a client \
          that cannot use one falls back to the full package."
     );

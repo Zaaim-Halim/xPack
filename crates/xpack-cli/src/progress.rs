@@ -57,10 +57,10 @@ impl TerminalProgress {
         if let Ok(slot) = self.bar.lock()
             && let Some(bar) = slot.as_ref()
         {
-            bar.suspend(|| eprintln!("{text}"));
+            bar.suspend(|| xpack_core::errln!("{text}"));
             return;
         }
-        eprintln!("{text}");
+        xpack_core::errln!("{text}");
     }
 }
 

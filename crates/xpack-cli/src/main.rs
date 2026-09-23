@@ -156,13 +156,13 @@ fn main() -> std::process::ExitCode {
     match outcome {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("error: {error}");
+            xpack_core::errln!("error: {error}");
             // Chained causes carry the detail that makes a failure diagnosable
             // — which file, which syscall — so they are printed rather than
             // collapsed into the top-level message.
             let mut source = std::error::Error::source(&error);
             while let Some(cause) = source {
-                eprintln!("  caused by: {cause}");
+                xpack_core::errln!("  caused by: {cause}");
                 source = cause.source();
             }
             exit_code_for(&error)

@@ -43,7 +43,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // The environment is worth naming rather than leaving someone to wonder
     // why a file they just wrote had no effect.
     if decision == AutomaticChecks::StoppedByEnvironment {
-        eprintln!(
+        xpack_core::errln!(
             "note: {NO_UPDATE_ENV} is set in this environment, which stops automatic checks \
              for every installation regardless of this setting"
         );
@@ -57,7 +57,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         && let Ok(state) = lock.load_or_new_state(&args.application)
         && let UpdatePhase::Staged { version } = &state.update
     {
-        eprintln!(
+        xpack_core::errln!(
             "note: {version} was already downloaded and verified, and will be used the next \
              time the application starts"
         );

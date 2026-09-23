@@ -77,11 +77,11 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     if on_probation {
         let phase = installer.begin_attempt()?;
         if phase.attempts_exhausted() {
-            eprintln!("this version has already failed to start; rolling back");
+            xpack_core::errln!("this version has already failed to start; rolling back");
             if let Some(restored) = installer.record_failure("exhausted its startup attempts")? {
-                eprintln!("rolled back to {restored}; run again to start it");
+                xpack_core::errln!("rolled back to {restored}; run again to start it");
             } else {
-                eprintln!("error: no healthy version to roll back to");
+                xpack_core::errln!("error: no healthy version to roll back to");
             }
             return Ok(ExitCode::FAILURE);
         }
@@ -109,12 +109,12 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
 
     if status.success() {
         installer.commit_health()?;
-        eprintln!("version {version} confirmed healthy");
+        xpack_core::errln!("version {version} confirmed healthy");
     } else {
         let reason = format!("exited with status {}", status.code().unwrap_or(-1));
         match installer.record_failure(&reason)? {
-            Some(restored) => eprintln!("rolled back to {restored}"),
-            None => eprintln!("error: no healthy version to roll back to"),
+            Some(restored) => xpack_core::errln!("rolled back to {restored}"),
+            None => xpack_core::errln!("error: no healthy version to roll back to"),
         }
     }
     Ok(exit_code(status.code()))

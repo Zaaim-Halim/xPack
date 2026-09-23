@@ -10,11 +10,11 @@ use xpack_core::{Error, Result};
 /// Prints a value as pretty JSON.
 pub(crate) fn json<T: Serialize>(value: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(|e| Error::json("command output", e))?;
-    println!("{text}");
+    xpack_core::outln!("{text}");
     Ok(())
 }
 
 /// Prints a labelled field, aligned for reading in a terminal.
 pub(crate) fn field(label: &str, value: impl std::fmt::Display) {
-    println!("{label:<14} {value}");
+    xpack_core::outln!("{label:<14} {value}");
 }

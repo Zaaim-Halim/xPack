@@ -100,19 +100,19 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     }
 
     if entries.is_empty() {
-        println!("no versions installed");
+        xpack_core::outln!("no versions installed");
         return super::success();
     }
 
     for entry in &entries {
         let marker = if entry.active { "*" } else { " " };
         let missing = if entry.present { "" } else { "   (files missing)" };
-        println!("{marker} {:<16} {}{missing}", entry.version, entry.status);
+        xpack_core::outln!("{marker} {:<16} {}{missing}", entry.version, entry.status);
     }
 
     if !state.update.is_idle() {
-        eprintln!();
-        eprintln!("note: {}", state.update.describe());
+        xpack_core::errln!();
+        xpack_core::errln!("note: {}", state.update.describe());
     }
     super::success()
 }

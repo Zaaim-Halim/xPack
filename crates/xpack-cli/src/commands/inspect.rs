@@ -30,7 +30,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
 
     if args.json {
         crate::output::json(&manifest)?;
-        eprintln!("warning: this manifest has NOT been verified; use `xpack verify` to check it");
+        xpack_core::errln!(
+            "warning: this manifest has NOT been verified; use `xpack verify` to check it"
+        );
         return super::success();
     }
 
@@ -49,8 +51,8 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         crate::output::field("declares key", declared);
     }
 
-    eprintln!();
-    eprintln!(
+    xpack_core::errln!();
+    xpack_core::errln!(
         "warning: nothing here has been verified. A package can claim anything until its \
          signature is checked against a key you already trust."
     );

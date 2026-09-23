@@ -47,18 +47,18 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     }
 
     if !removal.is_complete() {
-        eprintln!();
-        eprintln!(
+        xpack_core::errln!();
+        xpack_core::errln!(
             "note: {} was not empty, so it was left in place. Everything xPack installed \
              there is gone; these are not ours to delete:",
             removal.root.display()
         );
         for path in &removal.remaining {
-            eprintln!("  {}", path.display());
+            xpack_core::errln!("  {}", path.display());
         }
     }
 
-    eprintln!(
+    xpack_core::errln!(
         "note: application data was not touched. xPack does not know where an application \
          stores its data, so it does not guess."
     );

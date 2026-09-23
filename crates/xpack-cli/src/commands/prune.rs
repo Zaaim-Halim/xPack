@@ -24,10 +24,10 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
 
     let removed = installer.prune()?;
     if removed.is_empty() {
-        println!("nothing to remove");
+        xpack_core::outln!("nothing to remove");
     } else {
         for version in &removed {
-            println!("removed {version}");
+            xpack_core::outln!("removed {version}");
         }
     }
     super::success()

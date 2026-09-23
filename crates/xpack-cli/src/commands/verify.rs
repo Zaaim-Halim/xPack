@@ -38,14 +38,14 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("platform", manifest.platform);
     crate::output::field("signed by", key.fingerprint());
     crate::output::field("files", files);
-    println!();
-    println!("signature verified, and every file matches the signed manifest");
+    xpack_core::outln!();
+    xpack_core::outln!("signature verified, and every file matches the signed manifest");
 
     // Verification proves who signed it, not that it suits this machine.
     if let Ok(host) = xpack_core::Platform::host()
         && !manifest.platform.accepts(host)
     {
-        eprintln!(
+        xpack_core::errln!(
             "note: this package targets {} and cannot be installed on {host}",
             manifest.platform
         );

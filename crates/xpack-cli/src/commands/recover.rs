@@ -25,23 +25,23 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let report = Installer::new(&lock).recover()?;
 
     if report.is_empty() {
-        println!("nothing to recover");
+        xpack_core::outln!("nothing to recover");
         return super::success();
     }
     if report.cleared_downloads {
-        println!("discarded partial downloads");
+        xpack_core::outln!("discarded partial downloads");
     }
     for version in &report.removed_staging {
-        println!("discarded staging for {version}");
+        xpack_core::outln!("discarded staging for {version}");
     }
     for version in &report.removed_debris {
-        println!("removed incomplete version {version}");
+        xpack_core::outln!("removed incomplete version {version}");
     }
     if let Some(version) = &report.completed_rollback {
-        println!("completed rollback to {version}");
+        xpack_core::outln!("completed rollback to {version}");
     }
     if report.left_in_place {
-        println!("left an in-progress operation untouched");
+        xpack_core::outln!("left an in-progress operation untouched");
     }
     super::success()
 }

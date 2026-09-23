@@ -28,7 +28,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     }
     // Not an error in the sense of something going wrong, but nothing
     // succeeded either, so the exit code must not report success.
-    eprintln!("error: no healthy version to roll back to");
-    eprintln!("install a working version to recover this installation");
+    xpack_core::errln!("error: no healthy version to roll back to");
+    xpack_core::errln!("install a working version to recover this installation");
     Ok(ExitCode::FAILURE)
 }

@@ -49,15 +49,15 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("private key", args.out.display());
     crate::output::field("public key", public_path.display());
     crate::output::field("fingerprint", pair.public().fingerprint());
-    println!();
-    println!("{}", pair.public().to_hex());
-    println!();
-    eprintln!(
+    xpack_core::outln!();
+    xpack_core::outln!("{}", pair.public().to_hex());
+    xpack_core::outln!();
+    xpack_core::errln!(
         "Keep the private key secret and out of version control. Distribute the public key \
          so installations can pin it."
     );
     #[cfg(not(unix))]
-    eprintln!(
+    xpack_core::errln!(
         "note: file permissions were not restricted on this platform; store the private key \
          somewhere only you can read."
     );

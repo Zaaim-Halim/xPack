@@ -14,15 +14,15 @@ const VERSION_ENV: &str = "XPACK_TEST_PAYLOAD_VERSION";
 fn main() -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let version = std::env::var(VERSION_ENV).unwrap_or_default();
-    println!("running {version} args={}", arguments.join(" "));
+    xpack_core::outln!("running {version} args={}", arguments.join(" "));
 
     // Reported so a test can prove the launcher passed them through.
     for key in ["XPACK_HEALTH_FILE", "XPACK_APPLICATION_DIR"] {
-        println!("{key}={}", std::env::var(key).unwrap_or_default());
+        xpack_core::outln!("{key}={}", std::env::var(key).unwrap_or_default());
     }
     // And where it was started, which the manifest decides.
     let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
-    println!("cwd={cwd}");
+    xpack_core::outln!("cwd={cwd}");
 
     // Writing the health file is what an application does to say it started,
     // and some tests require the report rather than inferring one.

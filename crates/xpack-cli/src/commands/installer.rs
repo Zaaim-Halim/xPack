@@ -219,14 +219,14 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("binaries", binaries.len());
 
     if target == Os::Macos {
-        eprintln!();
-        eprintln!(
+        xpack_core::errln!();
+        xpack_core::errln!(
             "note: sign and notarise this bundle before distributing it; macOS blocks an \
              unsigned downloaded installer."
         );
     } else {
-        eprintln!();
-        eprintln!(
+        xpack_core::errln!();
+        xpack_core::errln!(
             "note: sign this installer if you distribute it, and sign it *after* this step — \
              appending the payload invalidates a signature applied to the stub."
         );
@@ -290,7 +290,7 @@ fn resolve_icon(
     workshop: &Path,
 ) -> Result<Option<ResolvedIcon>> {
     if let Some(explicit) = &args.icon {
-        eprintln!(
+        xpack_core::errln!(
             "note: --icon is deprecated; the installer's icon now comes from the package's \
              desktop.icon. It is still used because it was given."
         );
@@ -307,7 +307,7 @@ fn resolve_icon(
         Ok(bytes) => bytes,
         Err(error) if error.is_integrity_failure() => return Err(error),
         Err(error) => {
-            eprintln!("warning: the package's icon is not used: {error}");
+            xpack_core::errln!("warning: the package's icon is not used: {error}");
             return Ok(None);
         }
     };
@@ -318,7 +318,7 @@ fn resolve_icon(
 
     let for_windows = crate::branding::is_usable_icon(&bytes);
     if manifest.platform.os == Os::Windows && !for_windows {
-        eprintln!(
+        xpack_core::errln!(
             "warning: {name} is not an .ico or an image this build can read, so the Windows \
              executables carry no icon"
         );

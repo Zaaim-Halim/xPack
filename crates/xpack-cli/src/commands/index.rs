@@ -156,12 +156,12 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         if let Some(url) = &entry.url {
             crate::output::field("url", url);
         }
-        println!();
+        xpack_core::outln!();
     }
     crate::output::field("indexes", written.len());
 
     if key.is_none() {
-        eprintln!(
+        xpack_core::errln!(
             "warning: packages were not verified; pass --key to check them before publishing"
         );
     }
@@ -307,7 +307,7 @@ fn ensure_one_application(packages: &[Described]) -> Result<()> {
 /// other way is entitled to.
 fn check_for_url_collisions(packages: &[Described]) {
     for collision in colliding_urls(packages) {
-        eprintln!(
+        xpack_core::errln!(
             "warning: {} all declare update.url {:?} on channel {:?}, so they would publish to \
              the same {}.json and overwrite each other",
             collision.platforms.join(", "),
@@ -315,7 +315,7 @@ fn check_for_url_collisions(packages: &[Described]) {
             collision.channel,
             collision.channel
         );
-        eprintln!(
+        xpack_core::errln!(
             "         give each platform its own url, conventionally by adding a platform \
              segment: {}/<os>-<arch>",
             collision.url
