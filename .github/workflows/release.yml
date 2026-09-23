@@ -115,9 +115,12 @@ jobs:
           for bin in xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
             path="target/${{ matrix.target }}/release/$bin"
             file "$path"
-            if ldd "$path" 2>&1 | grep -qv "not a dynamic executable"; then
+            # A binary depends on the system's libc exactly when it names a
+            # program interpreter (the dynamic loader). `ldd` is no test: its
+            # wording differs between plain static and static-PIE binaries.
+            if readelf --program-headers "$path" | grep -q INTERP; then
               echo "$bin is dynamically linked; it would not run on a different libc" >&2
-              ldd "$path" || true
+              readelf --program-headers "$path" | grep -A1 INTERP >&2
               exit 1
             fi
           done
