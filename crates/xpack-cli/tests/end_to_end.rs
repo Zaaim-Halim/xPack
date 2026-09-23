@@ -395,8 +395,10 @@ fn a_command_line_tool_runs_where_the_user_invoked_it() {
     assert_eq!(reported_cwd(&run), std::fs::canonicalize(&elsewhere).unwrap());
 
     // Started somewhere else, it still finds its own files: the argument
-    // naming one arrives as the version directory's absolute path.
-    let version_dir = fixture.root().join("com.example.demo/versions/1.0.0");
+    // naming one arrives as the version directory's absolute path. Joined a
+    // component at a time, so the separators are the platform's own, as the
+    // launcher's are: one `join` of "a/b/c" keeps the `/` on Windows.
+    let version_dir = fixture.root().join("com.example.demo").join("versions").join("1.0.0");
     let expected = format!("args={}/data", version_dir.display());
     assert!(stdout(&run).contains(&expected), "{}", stdout(&run));
 }
