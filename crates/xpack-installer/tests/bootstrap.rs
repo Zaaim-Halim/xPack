@@ -69,6 +69,7 @@ fn build_package_with(
         payload: xpack_core::PayloadSpec::default(),
         signing_key: None,
         created_at: None,
+        command: None,
     };
 
     let out = dir.join("app.xpkg");

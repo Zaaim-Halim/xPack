@@ -143,6 +143,7 @@ fn build_all(
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let out = dir.join(format!("app-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();
@@ -374,6 +375,7 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let package = world.dir.path().join("probation.xpkg");
     PackageBuilder::new(&world.dir.path().join("src-1.1.0"), manifest)
@@ -460,6 +462,7 @@ fn each_probationary_start_is_counted_before_the_application_runs() {
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let package = world.dir.path().join("counted.xpkg");
     PackageBuilder::new(&world.dir.path().join("src-1.1.0"), manifest)
@@ -532,6 +535,7 @@ fn arguments_reach_the_application_unchanged() {
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let package = dir.join("args.xpkg");
     PackageBuilder::new(&dir.join("src-args"), manifest).build(&package, &world.key).unwrap();
@@ -813,6 +817,7 @@ fn build_mandatory(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviou
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let out = dir.join(format!("mandatory-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

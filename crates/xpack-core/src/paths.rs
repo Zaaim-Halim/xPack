@@ -202,6 +202,9 @@ impl InstallPaths {
     /// embedding it at build time means one prebuilt binary serves every
     /// application.
     ///
+    /// The one exception is the command directory: see
+    /// [`application_dir_of`](Self::application_dir_of).
+    ///
     /// `XPACK_APPLICATION_DIR` overrides this, which is what the tests use and
     /// what an unusual deployment can fall back on.
     pub fn discover() -> Result<Self> {
@@ -211,8 +214,39 @@ impl InstallPaths {
         let executable = std::env::current_exe().map_err(|e| {
             Error::invalid("installation", format!("cannot locate this binary: {e}"))
         })?;
-        let dir = crate::atomic::parent_dir(&executable)?;
-        Ok(Self::from_application_dir(dir))
+        Ok(Self::from_application_dir(Self::application_dir_of(&executable)?))
+    }
+
+    /// The installation an executable at `executable` belongs to.
+    ///
+    /// Its own directory, except for a launcher in the installation's
+    /// [command directory](Self::command_dir), which belongs to the directory
+    /// above. That copy exists so a terminal can start the application by name
+    /// on Windows, where the command is an executable in a directory on the
+    /// `PATH` rather than a script.
+    ///
+    /// The exception applies only when the directory above really is an
+    /// installation, holding its `state` directory. A launcher that happens
+    /// to sit in some unrelated `bin` keeps the ordinary rule, and fails the
+    /// ordinary way if that is not an installation either.
+    pub fn application_dir_of(executable: &Path) -> Result<PathBuf> {
+        let dir = crate::atomic::parent_dir(executable)?;
+        if dir.file_name().is_some_and(|name| name == COMMAND_DIR)
+            && let Some(parent) = dir.parent()
+            && Self::from_application_dir(parent).state_dir().is_dir()
+        {
+            return Ok(parent.to_path_buf());
+        }
+        Ok(dir.to_path_buf())
+    }
+
+    /// Where the command that starts this application from a terminal lives
+    /// on Windows: a directory of its own, added to the user's `PATH`.
+    ///
+    /// Not the installation root, because that also holds the uninstaller
+    /// and the updater, which have no business being on the `PATH`.
+    pub fn command_dir(&self) -> PathBuf {
+        self.root.join(COMMAND_DIR)
     }
 
     /// The launcher binary that starts this application.
@@ -434,6 +468,9 @@ fn check_one(path: &Path, limit: usize, what: &str) -> Result<()> {
 
 /// The default per-user root that holds every xPack application directory.
 ///
+/// The name of an installation's [command directory](InstallPaths::command_dir).
+pub const COMMAND_DIR: &str = "bin";
+
 /// Honours `XPACK_INSTALL_ROOT`, which the test suite and system integrators
 /// use to relocate installations without touching the user's real data.
 pub fn default_install_root() -> Result<PathBuf> {
@@ -557,6 +594,37 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_launcher_belongs_to_the_directory_it_is_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("com.example.app");
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        let found = InstallPaths::application_dir_of(&root.join("MyApp")).unwrap();
+        assert_eq!(found, root);
+    }
+
+    #[test]
+    fn the_command_copy_of_a_launcher_belongs_to_the_installation_above_it() {
+        // The Windows command: `<root>/bin/mytool.exe`, on the PATH.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = InstallPaths::from_application_dir(dir.path().join("com.example.app"));
+        std::fs::create_dir_all(paths.state_dir()).unwrap();
+        std::fs::create_dir_all(paths.command_dir()).unwrap();
+
+        let copy = paths.command_dir().join("mytool.exe");
+        assert_eq!(InstallPaths::application_dir_of(&copy).unwrap(), paths.root());
+    }
+
+    #[test]
+    fn a_launcher_in_an_unrelated_bin_keeps_the_ordinary_rule() {
+        // No installation above it: `bin` is just where it was put, and it is
+        // not promoted to something it is not.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("tools/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        assert_eq!(InstallPaths::application_dir_of(&bin.join("mytool")).unwrap(), bin);
+    }
 
     fn paths() -> InstallPaths {
         InstallPaths::new(Path::new("/opt/xpack"), "com.example.app").unwrap()

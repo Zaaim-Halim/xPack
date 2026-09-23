@@ -53,6 +53,7 @@ fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
         payload: xpack_core::PayloadSpec::default(),
         signing_key: None,
         created_at: None,
+        command: None,
     };
     let out = dir.join("app.xpkg");
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

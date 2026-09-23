@@ -447,6 +447,7 @@ mod tests {
             payload: xpack_core::PayloadSpec::default(),
             signing_key: None,
             created_at: None,
+            command: None,
         }
     }
 

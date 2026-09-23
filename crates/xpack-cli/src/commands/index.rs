@@ -502,6 +502,7 @@ mod tests {
             payload: xpack_core::PayloadSpec::default(),
             signing_key: None,
             created_at: None,
+            command: None,
         };
         Described {
             file_name: "pkg.xpkg".into(),

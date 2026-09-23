@@ -949,6 +949,7 @@ mod tests {
             desktop: xpack_core::DesktopSpec::default(),
             payload: PayloadSpec::default(),
             created_at: None,
+            command: None,
         }
     }
 }

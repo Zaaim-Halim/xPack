@@ -53,6 +53,7 @@ fn install(root: &Path) -> InstallPaths {
         payload: xpack_core::PayloadSpec::default(),
         signing_key: None,
         created_at: None,
+        command: None,
     };
     let key = KeyPair::generate().unwrap();
     let package = root.join("app.xpkg");

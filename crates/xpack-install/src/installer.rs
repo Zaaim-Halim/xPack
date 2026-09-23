@@ -1241,6 +1241,7 @@ mod tests {
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,
+            command: None,
         }
     }
 

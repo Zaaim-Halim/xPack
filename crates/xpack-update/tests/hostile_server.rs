@@ -115,6 +115,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let out = dir.join(format!("demo-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

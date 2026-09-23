@@ -60,6 +60,7 @@ impl ProjectConfig {
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,
+            command: None,
         };
         manifest.format_version = manifest.required_format_version();
         manifest

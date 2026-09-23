@@ -39,7 +39,7 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | Format | Adds |
 /// | --- | --- |
 /// | 1 | Everything else. |
-/// | 2 | `launch.keepWorkingDirectory`, and [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values |
+/// | 2 | `launch.keepWorkingDirectory`, [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values, and `command` |
 pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
 
 /// Stands for the installed version directory in launch arguments and
@@ -243,6 +243,23 @@ fn expand_version_dir(value: &str, version_dir: &Path) -> OsString {
         expanded.push(piece);
     }
     expanded
+}
+
+/// A command that starts the application from a terminal: `mytool build src`
+/// rather than the launcher's full path.
+///
+/// For applications used from a command line. The installer offers to put the
+/// command where a terminal looks, per user: a script in `~/.local/bin` on
+/// macOS and Linux, a directory added to the user's own `PATH` on Windows. The
+/// user can decline, and uninstalling removes it.
+///
+/// Pairs with [`LaunchSpec::keep_working_directory`]: a tool typed by name is
+/// expected to work on the directory it was typed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandSpec {
+    /// What the user types. See [`validate_command_name`] for what is allowed.
+    pub name: String,
 }
 
 /// How a newly activated version proves it works.
@@ -611,6 +628,11 @@ pub struct Manifest {
     /// How the application appears in the user's desktop environment.
     #[serde(default)]
     pub desktop: DesktopSpec,
+    /// The command a terminal starts the application by, if it has one.
+    ///
+    /// Requires [`FormatVersion`] 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandSpec>,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -671,7 +693,10 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if self.launch.keep_working_directory || self.launch.uses_version_dir_placeholder() {
+        if self.launch.keep_working_directory
+            || self.launch.uses_version_dir_placeholder()
+            || self.command.is_some()
+        {
             FormatVersion(2)
         } else {
             FormatVersion(1)
@@ -734,6 +759,10 @@ impl Manifest {
 
         if let Some(icon) = &self.desktop.icon {
             validate_relative_path("desktop.icon", icon)?;
+        }
+
+        if let Some(command) = &self.command {
+            validate_command_name(&command.name)?;
         }
 
         self.validate_payload()
@@ -815,6 +844,58 @@ impl Manifest {
             self.platform
         )
     }
+}
+
+/// Checks a command name: what a user types, and a file name on every
+/// platform.
+///
+/// Lowercase ASCII letters, digits, `.`, `_` and `-`, starting with a letter
+/// or digit, at most 64 bytes. Narrow on purpose, because the name becomes a
+/// file in a directory shared with every other program the user has:
+///
+/// * **Lowercase only.** macOS and Windows compare file names without regard
+///   to case, Linux does not. `MyTool` and `mytool` would be one command on
+///   two platforms and two on the third.
+/// * **No separators, no `..`.** The name is joined onto a directory; nothing
+///   in it may point anywhere else.
+/// * **No Windows device names** (`con`, `nul`, `com1`, ...) and no trailing
+///   `.`: Windows would open a device or silently drop the dot.
+/// * **No executable suffix.** `.exe` is added on Windows; a name that already
+///   has one would become `tool.exe.exe` there and `tool.exe` everywhere else.
+pub fn validate_command_name(name: &str) -> Result<()> {
+    const MAX_LEN: usize = 64;
+    const DEVICES: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    const SUFFIXES: [&str; 4] = [".exe", ".cmd", ".bat", ".com"];
+
+    let refuse = |why: &str| Err(Error::invalid("command.name", format!("{name:?} {why}")));
+
+    if name.is_empty() || name.len() > MAX_LEN {
+        return refuse(&format!("must be 1..={MAX_LEN} characters"));
+    }
+    if !name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return refuse("must start with a lowercase letter or a digit");
+    }
+    if let Some(bad) = name.chars().find(|c| !matches!(c, 'a'..='z' | '0'..='9' | '.' | '-' | '_'))
+    {
+        return refuse(&format!(
+            "contains {bad:?}; allowed are lowercase letters, digits, '.', '_' and '-'"
+        ));
+    }
+    if name.contains("..") || name.ends_with('.') {
+        return refuse("must not contain '..' or end with '.'");
+    }
+    // Windows reserves these with any extension too: `nul.txt` is `nul`.
+    let stem = name.split('.').next().unwrap_or(name);
+    if DEVICES.contains(&stem) {
+        return refuse("is a device name on Windows");
+    }
+    if SUFFIXES.iter().any(|suffix| name.ends_with(suffix)) {
+        return refuse("must not end in an executable suffix; `.exe` is added on Windows");
+    }
+    Ok(())
 }
 
 /// Validates an application id used as a directory and IPC endpoint name.
@@ -1027,6 +1108,7 @@ mod tests {
                 ],
             },
             created_at: None,
+            command: None,
         }
     }
 
@@ -1377,6 +1459,73 @@ mod tests {
         // Understating it is refused, as for keeping the working directory.
         in_arguments.format_version = FormatVersion(1);
         assert!(in_arguments.validate().unwrap_err().to_string().contains("need at least 2"));
+    }
+
+    #[test]
+    fn a_command_survives_the_signed_bytes_and_needs_format_2() {
+        let mut manifest = sample();
+        manifest.command = Some(CommandSpec { name: "mytool".into() });
+        assert_eq!(manifest.required_format_version(), FormatVersion(2));
+
+        manifest.format_version = FormatVersion(2);
+        let bytes = manifest.to_signed_bytes().unwrap();
+        assert!(String::from_utf8(bytes.clone()).unwrap().contains("\"command\""));
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+
+        // Understated, it is refused: format 1 has no command to honour.
+        manifest.format_version = FormatVersion(1);
+        assert!(manifest.validate().unwrap_err().to_string().contains("need at least 2"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_command_says_nothing_about_one() {
+        let json = String::from_utf8(sample().to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("command"), "{json}");
+        assert_eq!(sample().required_format_version(), FormatVersion(1));
+    }
+
+    #[test]
+    fn ordinary_command_names_are_accepted() {
+        for name in ["mytool", "my-tool", "my_tool", "tool2", "2fa", "x.y", "a"] {
+            validate_command_name(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        validate_command_name(&"a".repeat(64)).unwrap();
+    }
+
+    #[test]
+    fn a_command_name_that_could_escape_its_directory_or_misbehave_is_refused() {
+        let refused = [
+            ("", "empty"),
+            ("MyTool", "case differs by platform"),
+            ("a/b", "a path"),
+            ("a\\b", "a Windows path"),
+            ("../evil", "a traversal"),
+            ("a..b", "a traversal in the middle"),
+            ("-rf", "read as an option"),
+            (".hidden", "hidden, and starts with a dot"),
+            ("tool.", "Windows drops the dot"),
+            ("con", "a Windows device"),
+            ("nul.txt", "a Windows device with an extension"),
+            ("com1", "a Windows device"),
+            ("tool.exe", "tool.exe.exe on Windows"),
+            ("tool.cmd", "an executable suffix"),
+            ("my tool", "a space"),
+            ("tööl", "not ASCII"),
+        ];
+        for (name, why) in refused {
+            assert!(validate_command_name(name).is_err(), "{name:?} was accepted: {why}");
+        }
+        assert!(validate_command_name(&"a".repeat(65)).is_err(), "65 bytes was accepted");
+    }
+
+    #[test]
+    fn a_manifest_with_a_bad_command_name_does_not_load() {
+        let mut manifest = sample();
+        manifest.format_version = FormatVersion(2);
+        manifest.command = Some(CommandSpec { name: "../evil".into() });
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let err = Manifest::from_slice(&bytes).unwrap_err();
+        assert!(err.to_string().contains("command.name"), "{err}");
     }
 
     #[test]

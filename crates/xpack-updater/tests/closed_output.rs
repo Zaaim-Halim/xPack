@@ -55,6 +55,7 @@ fn install(dir: &Path, url: &str) -> InstallPaths {
         desktop: xpack_core::DesktopSpec::default(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
     let key = KeyPair::generate().unwrap();
     let package = dir.join("demo.xpkg");

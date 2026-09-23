@@ -22,13 +22,13 @@ pub mod version;
 pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
-    Application, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY, Manifest,
-    PayloadFile, PayloadSpec, PromptSpec, SIGNATURE_ENTRY, UpdateSeverity, UpdateSpec,
+    Application, CommandSpec, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, MANIFEST_ENTRY,
+    Manifest, PayloadFile, PayloadSpec, PromptSpec, SIGNATURE_ENTRY, UpdateSeverity, UpdateSpec,
     VERSION_DIR_PLACEHOLDER,
 };
 pub use naming::{BinaryNames, safe_file_name};
 pub use paths::{
-    HAS_WINDOWED_LAUNCHER, InstallPaths, WINDOWS_MAX_PATH, ensure_launch_paths_fit,
+    COMMAND_DIR, HAS_WINDOWED_LAUNCHER, InstallPaths, WINDOWS_MAX_PATH, ensure_launch_paths_fit,
     host_launch_path_limit,
 };
 pub use platform::{Arch, Os, Platform};

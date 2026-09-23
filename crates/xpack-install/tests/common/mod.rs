@@ -69,6 +69,7 @@ pub(crate) fn build_package_named(
         desktop: desktop.clone(),
         payload: PayloadSpec::default(),
         created_at: None,
+        command: None,
     };
 
     let out = dir.join(format!("app-{version}.xpkg"));
