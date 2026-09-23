@@ -309,13 +309,17 @@ fn what_is_shown_comes_from_the_signed_package_not_the_plan() {
 fn a_package_for_another_platform_is_refused_before_anything_is_shown() {
     let dir = tempfile::tempdir().unwrap();
     let key = KeyPair::generate().unwrap();
+    // The same system with the other architecture: never this machine, and
+    // always one this machine can build for. Another operating system is not:
+    // a Windows host cannot record the Unix executable bit, so it refuses to
+    // build a Linux or macOS package at all, and the test would fail on that
+    // refusal without reaching the check it is here for.
     let host = Platform::host().unwrap();
-    let other = if host.os == xpack_core::Os::Linux {
-        xpack_core::Os::Windows
-    } else {
-        xpack_core::Os::Linux
+    let other = match host.arch {
+        xpack_core::Arch::X64 => xpack_core::Arch::Arm64,
+        xpack_core::Arch::Arm64 => xpack_core::Arch::X64,
     };
-    let package = build_package_for(dir.path(), &key, Platform { os: other, arch: host.arch });
+    let package = build_package_for(dir.path(), &key, Platform { os: host.os, arch: other });
     let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
     let payload = bundle::build(&plan(&key), &package, &binaries).unwrap();
 
