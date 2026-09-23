@@ -17,6 +17,8 @@
 //! Filenames and update-index entries are hints. They are never trusted.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -37,8 +39,24 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | Format | Adds |
 /// | --- | --- |
 /// | 1 | Everything else. |
-/// | 2 | `launch.keepWorkingDirectory` |
+/// | 2 | `launch.keepWorkingDirectory`, and [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values |
 pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
+
+/// Stands for the installed version directory in launch arguments and
+/// environment values.
+///
+/// The executable is always resolved inside the version directory, but
+/// arguments are passed through as written, and a relative path in one is
+/// resolved by the application against its working directory. That is the
+/// version directory by default, so `-cp application/*` works. With
+/// [`LaunchSpec::keep_working_directory`] it is the user's directory instead,
+/// and the same argument must be written `-cp {versionDir}/application/*`.
+///
+/// The launcher replaces every occurrence with the absolute path of the
+/// version it starts. Arguments the user types are never touched. Using it
+/// requires [`FormatVersion`] 2, so no reader that would pass it through
+/// literally ever accepts a package that relies on it.
+pub const VERSION_DIR_PLACEHOLDER: &str = "{versionDir}";
 
 /// Upper bound on a manifest document, to bound work before parsing.
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
@@ -130,6 +148,10 @@ pub struct LaunchSpec {
     /// runtime, e.g. `java`). Both bundled and system runtimes are supported.
     pub executable: String,
     /// Arguments passed before any user-supplied arguments.
+    ///
+    /// Passed as written, except that [`VERSION_DIR_PLACEHOLDER`] becomes the
+    /// installed version directory. A path into the package must use it when
+    /// [`keep_working_directory`](Self::keep_working_directory) is set.
     #[serde(default)]
     pub arguments: Vec<String>,
     /// Working directory, relative to the version directory.
@@ -138,12 +160,30 @@ pub struct LaunchSpec {
     /// is set, the application starts in the version directory itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
-    /// Starts the application in the directory it was invoked from.
+    /// Starts the application in the directory it was invoked from, rather
+    /// than in its installed version directory.
     ///
-    /// For command-line tools, which resolve the paths a user types against
-    /// the directory the user is in. A windowed application wants the
-    /// default: started from a desktop entry, the invoking directory is
-    /// wherever the desktop happened to be, usually `/`.
+    /// # When to set it
+    ///
+    /// **Set it when the application is used from a command line**: a
+    /// command-line tool, or an application that also accepts file paths
+    /// from a terminal (`myeditor notes.txt`, `mytool build src`). Those paths
+    /// are typed relative to where the user is, and they only mean what the
+    /// user meant if the application starts there too.
+    ///
+    /// **Leave it off for an application only ever opened from a desktop
+    /// entry.** Started from a menu, Finder or Explorer, the invoking
+    /// directory is wherever the desktop happened to be, usually `/`, and the
+    /// version directory is the more useful place to be.
+    ///
+    /// # What changes with it
+    ///
+    /// Any relative path in [`arguments`](Self::arguments) or
+    /// [`environment`](Self::environment) that points into the package now
+    /// resolves against the user's directory, and finds nothing. Write those
+    /// with [`VERSION_DIR_PLACEHOLDER`]: `{versionDir}/application/*`. The
+    /// [`executable`](Self::executable) needs nothing: it is always resolved
+    /// inside the version directory.
     ///
     /// Requires [`FormatVersion`] 2. Left out of the document when `false`,
     /// so a manifest that does not use it stays readable by every release
@@ -151,6 +191,9 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "is_false")]
     pub keep_working_directory: bool,
     /// Extra environment variables set for the child process.
+    ///
+    /// Values get the same [`VERSION_DIR_PLACEHOLDER`] treatment as
+    /// [`arguments`](Self::arguments).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
 }
@@ -160,6 +203,46 @@ impl LaunchSpec {
     pub fn is_bundled(&self) -> bool {
         self.executable.contains('/') || self.executable.contains('\\')
     }
+
+    /// Whether any argument or environment value names the version directory.
+    pub fn uses_version_dir_placeholder(&self) -> bool {
+        self.arguments
+            .iter()
+            .chain(self.environment.values())
+            .any(|value| value.contains(VERSION_DIR_PLACEHOLDER))
+    }
+
+    /// The arguments to start the application with, for a version installed
+    /// in `version_dir`.
+    pub fn arguments_in(&self, version_dir: &Path) -> Vec<OsString> {
+        self.arguments.iter().map(|value| expand_version_dir(value, version_dir)).collect()
+    }
+
+    /// The environment to start the application with, for a version
+    /// installed in `version_dir`.
+    pub fn environment_in(&self, version_dir: &Path) -> BTreeMap<String, OsString> {
+        self.environment
+            .iter()
+            .map(|(key, value)| (key.clone(), expand_version_dir(value, version_dir)))
+            .collect()
+    }
+}
+
+/// Replaces every [`VERSION_DIR_PLACEHOLDER`] in `value` with `version_dir`.
+///
+/// Built as an `OsString` so that an installation path that is not valid
+/// Unicode reaches the application exactly as it is on disk.
+fn expand_version_dir(value: &str, version_dir: &Path) -> OsString {
+    let mut expanded = OsString::new();
+    let mut pieces = value.split(VERSION_DIR_PLACEHOLDER);
+    if let Some(first) = pieces.next() {
+        expanded.push(first);
+    }
+    for piece in pieces {
+        expanded.push(version_dir.as_os_str());
+        expanded.push(piece);
+    }
+    expanded
 }
 
 /// How a newly activated version proves it works.
@@ -588,7 +671,11 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if self.launch.keep_working_directory { FormatVersion(2) } else { FormatVersion(1) }
+        if self.launch.keep_working_directory || self.launch.uses_version_dir_placeholder() {
+            FormatVersion(2)
+        } else {
+            FormatVersion(1)
+        }
     }
 
     /// Serialises the manifest to the exact bytes that will be signed.
@@ -1233,6 +1320,63 @@ mod tests {
         assert!(err.to_string().contains("need at least 2"), "{err}");
         let bytes = manifest.to_signed_bytes().unwrap();
         assert!(Manifest::from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn the_version_directory_placeholder_becomes_the_version_directory() {
+        let mut launch = sample().launch;
+        launch.arguments = vec!["-cp".into(), "{versionDir}/application/*".into(), "plain".into()];
+        launch.environment.insert("CONF".into(), "{versionDir}/a:{versionDir}/b".into());
+        let dir = Path::new("/opt/apps/demo/versions/1.0.0");
+
+        assert_eq!(
+            launch.arguments_in(dir),
+            vec![
+                OsString::from("-cp"),
+                OsString::from("/opt/apps/demo/versions/1.0.0/application/*"),
+                OsString::from("plain"),
+            ]
+        );
+        // Every occurrence, not only the first.
+        assert_eq!(
+            launch.environment_in(dir)["CONF"],
+            OsString::from("/opt/apps/demo/versions/1.0.0/a:/opt/apps/demo/versions/1.0.0/b")
+        );
+    }
+
+    #[test]
+    fn a_launch_without_the_placeholder_is_passed_through_exactly() {
+        let launch = sample().launch;
+        let dir = Path::new("/opt/apps/demo/versions/1.0.0");
+        let expected: Vec<OsString> = launch.arguments.iter().map(OsString::from).collect();
+        assert_eq!(launch.arguments_in(dir), expected);
+        assert!(!launch.uses_version_dir_placeholder());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_directory_that_is_not_unicode_arrives_unchanged() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = Path::new(std::ffi::OsStr::from_bytes(b"/opt/caf\xe9/1.0.0"));
+        let mut launch = sample().launch;
+        launch.arguments = vec!["{versionDir}/app".into()];
+        assert_eq!(launch.arguments_in(dir)[0].as_bytes(), b"/opt/caf\xe9/1.0.0/app");
+    }
+
+    #[test]
+    fn the_placeholder_needs_format_2_in_arguments_and_in_the_environment() {
+        // A format 1 reader would pass it to the application literally.
+        let mut in_arguments = sample();
+        in_arguments.launch.arguments.push("{versionDir}/lib".into());
+        assert_eq!(in_arguments.required_format_version(), FormatVersion(2));
+
+        let mut in_environment = sample();
+        in_environment.launch.environment.insert("LIB".into(), "{versionDir}/lib".into());
+        assert_eq!(in_environment.required_format_version(), FormatVersion(2));
+
+        // Understating it is refused, as for keeping the working directory.
+        in_arguments.format_version = FormatVersion(1);
+        assert!(in_arguments.validate().unwrap_err().to_string().contains("need at least 2"));
     }
 
     #[test]
