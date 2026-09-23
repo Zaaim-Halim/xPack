@@ -137,8 +137,12 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
     command.args(&request.spec.arguments);
     command.args(&request.user_arguments);
 
+    // `None` leaves the child in this process's directory, which is the one
+    // the user invoked the application from.
     let working_directory = working_directory(request)?;
-    command.current_dir(&working_directory);
+    if let Some(directory) = &working_directory {
+        command.current_dir(directory);
+    }
 
     for (key, value) in &request.spec.environment {
         command.env(key, value);
@@ -158,7 +162,9 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
     tracing::info!(
         executable = %executable.display(),
         arguments = request.spec.arguments.len() + request.user_arguments.len(),
-        working_directory = %working_directory.display(),
+        working_directory = %working_directory
+            .as_deref()
+            .map_or_else(|| "(where it was invoked)".into(), |d| d.display().to_string()),
         "launching application"
     );
 
@@ -168,9 +174,24 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
 }
 
 /// Resolves the working directory, defaulting to the version directory.
-fn working_directory(request: &LaunchRequest) -> Result<PathBuf> {
+///
+/// `None` means the one this process was started in, when the manifest asks
+/// to keep it.
+fn working_directory(request: &LaunchRequest) -> Result<Option<PathBuf>> {
+    if request.spec.keep_working_directory {
+        // A validated manifest cannot say both; a spec built by hand can, and
+        // silently picking one would start the application somewhere its
+        // author did not expect.
+        if request.spec.working_directory.is_some() {
+            return Err(Error::Launch(
+                "launch.workingDirectory and launch.keepWorkingDirectory contradict each other"
+                    .into(),
+            ));
+        }
+        return Ok(None);
+    }
     let Some(relative) = &request.spec.working_directory else {
-        return Ok(request.version_dir.clone());
+        return Ok(Some(request.version_dir.clone()));
     };
 
     let mut resolved = request.version_dir.clone();
@@ -183,7 +204,7 @@ fn working_directory(request: &LaunchRequest) -> Result<PathBuf> {
             resolved.display()
         )));
     }
-    Ok(resolved)
+    Ok(Some(resolved))
 }
 
 /// Builds a launch spec from its parts, for callers without a manifest.
