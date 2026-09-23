@@ -1,5 +1,7 @@
 package io.xpack;
 
+import io.xpack.config.InstallerUiSpec;
+import io.xpack.internal.InstallerSettings;
 import io.xpack.internal.Json;
 import io.xpack.internal.Target;
 import java.io.IOException;
@@ -38,18 +40,34 @@ public class InstallerMojo extends AbstractXPackMojo {
     private Map<String, String> targetBinaries = new LinkedHashMap<>();
 
     /**
-     * Icon for the Windows executables, as a `.png` or an `.ico`.
+     * Deprecated: the icon now comes from {@code <desktop><icon>}.
      *
-     * <p>Windows only, and not because of a gap elsewhere: an executable
-     * carries an icon on that platform and on no other, so on macOS and
-     * Linux the `.app` bundle and the `.desktop` entry supply one instead,
-     * from the icon the manifest already names.
-     *
-     * <p>A `.png` serves both, so this can be the same file as
-     * {@code <desktop><icon>} rather than a second one to keep in step.
+     * <p>The command line takes the installer's icon from the package's own
+     * desktop icon, the one source every other surface uses. This is still
+     * passed on, and still wins, so existing builds are unchanged; it logs a
+     * warning saying so.
      */
     @Parameter(property = "xpack.icon")
     private File icon;
+
+    /**
+     * How the installation wizard looks. Every setting has a default, and so
+     * does the block.
+     */
+    @Parameter
+    private InstallerUiSpec installerUi;
+
+    /**
+     * Builds a Windows installer on the console build instead of the windowed
+     * one.
+     *
+     * <p>The windowed build is the default: it is what a person double-clicks,
+     * and it opens the wizard. A shell does not wait for a windowed program,
+     * though, so an installer only scripts run is better built on the console
+     * one. Other targets have one build and ignore this.
+     */
+    @Parameter(property = "xpack.installer.console", defaultValue = "false")
+    private boolean console;
 
     /** Leaves the installed version inactive, for an installer that only stages. */
     @Parameter(property = "xpack.installer.noActivate", defaultValue = "false")
@@ -83,8 +101,18 @@ public class InstallerMojo extends AbstractXPackMojo {
                 if (!icon.isFile()) {
                     throw new MojoExecutionException("no icon at " + icon);
                 }
+                getLog().warn("xpack: <icon> is deprecated; the installer's icon now comes from "
+                        + "<desktop><icon>. It is still used because it was given.");
                 arguments.add("--icon");
                 arguments.add(icon.toString());
+            }
+            if (console) {
+                arguments.add("--console");
+            }
+            Path settings = writeInstallerSettings();
+            if (settings != null) {
+                arguments.add("--ui");
+                arguments.add(settings.toString());
             }
             addCrossBuildBinaries(arguments, target);
 
@@ -93,6 +121,26 @@ public class InstallerMojo extends AbstractXPackMojo {
                     + "  " + Json.string(result, "layout") + " layout, "
                     + human(Json.number(result, "size")));
         }
+    }
+
+    /**
+     * Writes the wizard settings for the command line, when there are any.
+     *
+     * <p>None when {@code <installerUi>} is absent or empty, so an installer
+     * built without it is exactly what it was before the block existed.
+     */
+    private Path writeInstallerSettings() throws MojoExecutionException {
+        if (installerUi == null || installerUi.isEmpty()) {
+            return null;
+        }
+        Path file = Path.of(project.getBuild().getDirectory(), "xpack", "installer-ui.json");
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, InstallerSettings.toJson(installerUi));
+        } catch (IOException e) {
+            throw new MojoExecutionException("cannot write " + file + ": " + e.getMessage(), e);
+        }
+        return file;
     }
 
     /**
@@ -118,7 +166,7 @@ public class InstallerMojo extends AbstractXPackMojo {
 
         Path home = Path.of(configured);
         arguments.add("--stub");
-        arguments.add(binary(home, "xpack-installer").toString());
+        arguments.add(binary(home, InstallerSettings.stubName(target, console)).toString());
         for (String name : List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller")) {
             arguments.add("--binary");
             arguments.add(binary(home, name).toString());

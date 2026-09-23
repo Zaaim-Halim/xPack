@@ -110,22 +110,66 @@ to supply earlier packages yourself through `<deltaFromFiles>`.
 ## Windows icons and names
 
 On Windows the icon Explorer draws and the name Task Manager shows live
-inside the executable. Everywhere else they do not exist there at all — the
-`.app` bundle and the `.desktop` entry carry them, from the icon the manifest
-already names — so this is one platform's problem and not a gap on the
-others.
+inside the executable. `xpack:installer` rewrites the installer, launcher,
+updater, uninstaller and update dialog it ships: each gets the application's
+name, version and publisher, a description saying which one it is, and the
+icon.
+
+The icon is the one `<desktop><icon>` names: the same file the Start Menu
+entry, the `~/Applications` bundle and the `.desktop` entry use, and the one
+the macOS installer bundle now shows in Finder. There is nothing else to set.
 
 ```xml
-<icon>${project.basedir}/src/main/resources/icon.png</icon>
+<desktop>
+  <icon>icon.png</icon>
+</desktop>
 ```
 
-`xpack:installer` then rewrites the installer, launcher, updater, uninstaller
-and update dialog it ships: each gets the application's name, the version, the
-publisher, and a description saying which of them it is. A `.png` is expanded
-into the sizes Windows chooses between, so the same file can serve
-`<desktop><icon>` rather than being a second one to keep in step.
+`<icon>` on `xpack:installer` is **deprecated**. It is still passed on and
+still wins, so existing builds are unchanged, and it logs a warning.
 
-Nothing is rewritten on macOS or Linux, and the flag is ignored there.
+## The installation wizard
+
+Installers open a wizard for a person who double-clicks them: the macOS
+bundle, and on Windows the windowed build `xpack:installer` now produces by
+default. Scripts pass `--silent`, and a Windows installer only scripts run can
+be built on the console build instead:
+
+```xml
+<configuration>
+  <console>true</console>   <!-- or -Dxpack.installer.console=true -->
+</configuration>
+```
+
+What the wizard shows is set in `<installerUi>`. Every setting has a default,
+and so does the block: leave it out for the recommended wizard.
+
+```xml
+<installerUi>
+  <license>${project.basedir}/LICENSE.txt</license>
+  <pages>
+    <page>welcome</page><page>license</page><page>location</page>
+    <page>ready</page><page>install</page><page>finish</page>
+  </pages>
+  <text>
+    <welcome>This will install {name} for your user account.</welcome>
+  </text>
+  <shortcutDefault>true</shortcutDefault>
+  <launchOnFinish>true</launchOnFinish>
+</installerUi>
+```
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `license` | none | UTF-8 text, at most 256 KiB. Without one there is no licence page |
+| `pages` | every page with something to show | Chooses which pages appear, never their order |
+| `text` | English defaults | Only `welcome` and `finish`, using `{name}` and `{version}` |
+| `shortcutDefault` | `true` | Whether the Start Menu / Applications box starts ticked |
+| `launchOnFinish` | `false` | Whether the last page offers to open the application |
+
+The name, publisher and icon are not settings: they come from the signed
+package. The plugin checks none of this itself; the xPack command line does,
+and a misspelt or unknown setting fails the build with its message.
 
 ## Applications that do not bundle a runtime
 
