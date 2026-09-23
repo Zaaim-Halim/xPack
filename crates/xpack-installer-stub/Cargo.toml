@@ -13,12 +13,16 @@ authors.workspace = true
 [[bin]]
 name = "xpack-installer"
 path = "src/main.rs"
+# Executables, not an API: documenting them would also collide with the
+# `xpack-installer` library's documentation, which has the same name.
+doc = false
 
 # The windowed build, for Windows: what a person double-clicks. The same code;
 # only the subsystem differs, so no console opens behind the wizard.
 [[bin]]
 name = "xpack-installerw"
 path = "src/bin/installerw.rs"
+doc = false
 
 # The one crate that turns the wizard's window on. Kept apart from
 # `xpack-installer` because the developer CLI depends on that one to build

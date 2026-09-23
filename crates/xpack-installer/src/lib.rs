@@ -527,9 +527,12 @@ mod tests {
         let found = || Some(PathBuf::from("/found"));
         let nothing = || None;
         let default = || Ok(PathBuf::from("/default"));
+        // Absolute on every platform: `/given` has no drive on Windows, so it
+        // would rightly be resolved against the current one.
+        let given_root = std::env::current_dir().unwrap().join("given");
 
-        let given = choose_root(Some(Path::new("/given")), found, default).unwrap();
-        assert_eq!(given, ResolvedRoot { root: "/given".into(), source: RootSource::Given });
+        let given = choose_root(Some(&given_root), found, default).unwrap();
+        assert_eq!(given, ResolvedRoot { root: given_root.clone(), source: RootSource::Given });
 
         let existing = choose_root(None, found, default).unwrap();
         assert_eq!(existing, ResolvedRoot { root: "/found".into(), source: RootSource::Found });

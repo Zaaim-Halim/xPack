@@ -917,7 +917,7 @@ impl<'lock> Installer<'lock> {
     /// Returns `true` when a version's files are present on disk.
     ///
     /// See [`InstallPaths::has_version_files`], which this defers to so that
-    /// [`crate::inspect`] applies exactly the same test.
+    /// [`crate::inspect()`] applies exactly the same test.
     ///
     /// [`InstallPaths::has_version_files`]: xpack_core::InstallPaths::has_version_files
     pub fn is_usable(&self, version: &Version) -> bool {
