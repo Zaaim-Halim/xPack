@@ -325,6 +325,33 @@ mod tests {
     }
 
     #[test]
+    fn back_returns_to_the_previous_page_and_not_past_the_first() {
+        let (mut session, _) = session(Existing::Nothing, false);
+        assert_eq!(session.back(), Update::Nothing, "the first page has nothing before it");
+        session.primary(&host(false));
+        let moved_to = session.wizard().page();
+        assert_eq!(session.back(), Update::Page);
+        assert!(session.wizard().page() < moved_to);
+    }
+
+    #[test]
+    fn a_change_to_the_model_redraws_the_page() {
+        let (mut session, _) = session(Existing::Nothing, true);
+        assert_eq!(session.change(|wizard| wizard.set_launch(false)), Update::Page);
+        assert!(!session.wizard().launch());
+    }
+
+    #[test]
+    fn retry_asks_about_the_root_again_at_once() {
+        let (mut session, _) = session(Existing::Busy, false);
+        while session.wizard().page() != Page::Location {
+            session.primary(&host(false));
+        }
+        assert_eq!(session.retry(), Update::Page);
+        assert!(session.wizard().pending_inspection().is_none(), "answered, not left pending");
+    }
+
+    #[test]
     fn an_unchanged_root_is_not_inspected_again() {
         let (mut session, _) = session(Existing::Nothing, false);
         assert_eq!(session.set_root(PathBuf::from("/r")), Update::Nothing);

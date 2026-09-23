@@ -23,7 +23,9 @@
 pub mod engine;
 pub mod installation;
 pub mod model;
-#[cfg(any(test, feature = "window"))]
+// Only where a front-end uses it: on other platforms the window reports that
+// it cannot be shown, and nothing would drive a session.
+#[cfg(any(test, all(feature = "window", any(target_os = "macos", windows))))]
 mod session;
 #[cfg(feature = "window")]
 pub mod window;
