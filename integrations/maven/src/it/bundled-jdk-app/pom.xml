@@ -59,6 +59,14 @@
           <environment>
             <DEMO_GREETING>hello from the manifest</DEMO_GREETING>
           </environment>
+          <!-- Set to true when the application is also used from a command
+               line: a tool, or an application that takes file paths in a
+               terminal. It then starts where the user ran it, so the paths
+               they type mean what they meant, and the plugin names its jars
+               as {versionDir}/application/* so they are still found. Off for
+               this demo, a window opened from the desktop. A package with it
+               on needs a newer xPack than 0.1.0 on the user's machine. -->
+          <keepWorkingDirectory>false</keepWorkingDirectory>
 
           <!-- Files copied into the payload as they are: here, the icon
                `<desktop><icon>` names. Per platform; see the profiles. -->

@@ -219,6 +219,30 @@ alone — 5 KiB rather than 36 MB — and the application is at the mercy of
 whichever version it finds, and of whether it is there at all. That is the
 trade; bundling exists to avoid it.
 
+## Command-line tools
+
+An application starts in its installed version directory, which is what a
+program opened from a menu, Finder or Explorer wants.
+
+**Set `<keepWorkingDirectory>true</keepWorkingDirectory>` when the application
+is also used from a command line**: a command-line tool, or an application that
+takes file paths in a terminal (`mytool build src`, `myeditor notes.txt`). It
+then starts in the directory the user ran it from, so the paths they type mean
+what they meant.
+
+```xml
+<keepWorkingDirectory>true</keepWorkingDirectory>   <!-- or -Dxpack.keepWorkingDirectory=true -->
+```
+
+The plugin then names the application's jars as `{versionDir}/application/*`;
+the launcher replaces `{versionDir}` with the installed version directory, so
+they are still found. A `<jvmArg>` or `<appArg>` of your own that names a file
+in the package needs the same, by hand:
+`-Djava.library.path={versionDir}/native`.
+
+A package that sets it is format 2, which installations made with xPack 0.1.0
+cannot install or update to. Leave it off for a windowed application.
+
 ## Quickstart
 
 Needs a JDK with `jlink`, the `xpack` binary on `PATH` (or `-Dxpack.home=`),

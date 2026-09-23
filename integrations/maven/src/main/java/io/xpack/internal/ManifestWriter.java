@@ -42,6 +42,7 @@ public final class ManifestWriter {
     private String executable;
     private List<String> arguments = new ArrayList<>();
     private Map<String, String> environment = new LinkedHashMap<>();
+    private boolean keepWorkingDirectory;
     private String updateUrl;
     private UpdateSpec update = new UpdateSpec();
     private HealthSpec health;
@@ -84,6 +85,12 @@ public final class ManifestWriter {
 
     public ManifestWriter arguments(List<String> value) {
         this.arguments = value == null ? new ArrayList<>() : value;
+        return this;
+    }
+
+    /** Whether the application starts where it was run from; {@code null} is off. */
+    public ManifestWriter keepWorkingDirectory(Boolean value) {
+        this.keepWorkingDirectory = Boolean.TRUE.equals(value);
         return this;
     }
 
@@ -199,9 +206,12 @@ public final class ManifestWriter {
         // workingDirectory is deliberately never written. The version
         // directory is the default and "." is refused, so emitting the value
         // that looks like the default produces a manifest that will not load.
+        // Written only when on: a file without it is the one every earlier
+        // build produced, which `xpack pack` still packs as the oldest format.
         Json.Obj launch = new Json.Obj()
                 .put("executable", executable)
                 .putIfAny("arguments", arguments)
+                .put("keepWorkingDirectory", keepWorkingDirectory ? Boolean.TRUE : null)
                 .putIfAny("environment", environment);
 
         Json.Obj updateObject = new Json.Obj()

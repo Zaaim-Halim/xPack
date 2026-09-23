@@ -57,6 +57,30 @@ class ManifestWriterTest {
     }
 
     @Test
+    void keeps_the_working_directory_when_asked_to() {
+        Map<String, Object> manifest =
+                Json.parseObject(minimal().keepWorkingDirectory(true).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> launch = (Map<String, Object>) manifest.get("launch");
+        assertEquals(Boolean.TRUE, launch.get("keepWorkingDirectory"));
+    }
+
+    /**
+     * Off, or never set, writes nothing: the file every earlier build wrote,
+     * which the command line still packs as the oldest format, so installations
+     * of the first release can take it as an update.
+     */
+    @Test
+    void writes_nothing_about_the_working_directory_unless_it_is_kept() {
+        for (Boolean off : new Boolean[] {null, Boolean.FALSE}) {
+            String json = minimal().keepWorkingDirectory(off).toJson();
+            assertFalse(json.contains("keepWorkingDirectory"), json);
+            assertEquals(minimal().toJson(), json);
+        }
+    }
+
+    @Test
     void omits_sections_that_were_never_configured() {
         String json = minimal().toJson();
         assertFalse(json.contains("\"update\""), json);

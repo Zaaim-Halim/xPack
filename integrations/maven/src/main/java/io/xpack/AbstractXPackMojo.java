@@ -94,6 +94,29 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     @Parameter
     protected Map<String, String> environment = new LinkedHashMap<>();
 
+    /**
+     * Start the application in the directory it was run from, rather than in
+     * its installed version directory.
+     *
+     * <p><b>Set it to {@code true} when the application is also used from a
+     * command line</b>: a command-line tool, or an application that takes file
+     * paths in a terminal ({@code mytool build src}). Those paths are typed
+     * relative to where the user is, and only mean what the user meant if the
+     * application starts there too. <b>Leave it off</b> for an application
+     * only ever opened from a menu, Finder or Explorer.
+     *
+     * <p>The plugin then names the application's jars with {@code {versionDir}},
+     * which the launcher replaces with the installed version directory, so
+     * they are still found. A {@code <jvmArg>} or {@code <appArg>} that names a
+     * file in the package needs the same, written by hand:
+     * {@code -Djava.library.path={versionDir}/native}.
+     *
+     * <p>Packages that set it are format 2: installations made with xPack
+     * 0.1.0 cannot install or update to them.
+     */
+    @Parameter(property = "xpack.keepWorkingDirectory")
+    protected Boolean keepWorkingDirectory;
+
     // --------------------------------------------------------------- targets
 
     /** Platforms to build, as {@code <os>-<arch>}. Defaults to the host. */

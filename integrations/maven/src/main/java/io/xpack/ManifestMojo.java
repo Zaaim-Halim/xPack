@@ -1,5 +1,6 @@
 package io.xpack;
 
+import io.xpack.internal.LaunchArguments;
 import io.xpack.internal.LaunchExecutable;
 import io.xpack.internal.Layout;
 import io.xpack.internal.ManifestWriter;
@@ -8,7 +9,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
@@ -56,6 +56,7 @@ public class ManifestMojo extends AbstractXPackMojo {
                         .executable(executable)
                         .arguments(launchArguments())
                         .environment(environment)
+                        .keepWorkingDirectory(keepWorkingDirectory)
                         .update(updateUrlFor(target), update)
                         .health(health)
                         .desktop(desktop)
@@ -82,20 +83,16 @@ public class ManifestMojo extends AbstractXPackMojo {
      * <p>With a main class, the whole of the application directory goes on the
      * class path through the wildcard the JVM expands itself, so adding a
      * dependency changes nothing here. Without one, the jar's own
-     * {@code Main-Class} is used.
+     * {@code Main-Class} is used. See {@link LaunchArguments} for the one
+     * thing keeping the working directory changes.
      */
     private List<String> launchArguments() throws MojoExecutionException {
-        List<String> arguments = new ArrayList<>(jvmArgs);
-        if (mainClass != null && !mainClass.isBlank()) {
-            arguments.add("-cp");
-            arguments.add("application/*");
-            arguments.add(mainClass);
-        } else {
-            arguments.add("-jar");
-            arguments.add("application/" + projectArtifact().getFileName());
-        }
-        arguments.addAll(appArgs);
-        return arguments;
+        return LaunchArguments.of(
+                jvmArgs,
+                mainClass,
+                projectArtifact().getFileName().toString(),
+                appArgs,
+                Boolean.TRUE.equals(keepWorkingDirectory));
     }
 
     /**
