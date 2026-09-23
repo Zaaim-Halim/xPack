@@ -25,12 +25,10 @@
 //! the process. A launcher that aborts because it tried to report an error is
 //! a launcher that loses the user's application.
 //!
-//! So every message goes through the `report!` macro below, which writes
-//! through `io::Write` and discards the error. On a console build it prints;
-//! on a windowed build it silently does nothing and the log file carries the
-//! record instead.
+//! So every message goes through [`xpack_core::errln!`], which discards the
+//! error. On a console build it prints; on a windowed build it silently does
+//! nothing and the log file carries the record instead.
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use crate::Launcher;
@@ -71,16 +69,6 @@ fn launch_with_one_restart(
         .launch(arguments, true)
 }
 
-/// Writes one line to standard error, and never fails if there is none.
-///
-/// The discarded error is the whole point. See the module documentation.
-macro_rules! report {
-    ($($arg:tt)*) => {{
-        let mut stderr = std::io::stderr();
-        let _ = writeln!(stderr, $($arg)*);
-    }};
-}
-
 /// Runs a launcher binary from start to finish.
 ///
 /// Returns the exit code the process should end with, rather than exiting
@@ -97,7 +85,7 @@ pub fn run() -> ExitCode {
             // installation. On a windowed build this line goes nowhere, which
             // is the accepted cost of having no console — the alternative is a
             // message box, which needs Win32 calls this workspace forbids.
-            report!("xpack: {error}");
+            xpack_core::errln!("xpack: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -125,8 +113,8 @@ pub fn run() -> ExitCode {
                 // nowhere to print and this is the one message a user most
                 // needs to be able to find afterwards.
                 tracing::warn!(%target, "this version failed to start; rolled back");
-                report!("xpack: this version failed to start; rolled back to {target}");
-                report!("xpack: start the application again to run it");
+                xpack_core::errln!("xpack: this version failed to start; rolled back to {target}");
+                xpack_core::errln!("xpack: start the application again to run it");
                 return ExitCode::FAILURE;
             }
             match outcome.exit_code {
@@ -136,7 +124,7 @@ pub fn run() -> ExitCode {
         }
         Err(error) => {
             tracing::error!(%error, "the application could not be started");
-            report!("xpack: {error}");
+            xpack_core::errln!("xpack: {error}");
             ExitCode::FAILURE
         }
     }
