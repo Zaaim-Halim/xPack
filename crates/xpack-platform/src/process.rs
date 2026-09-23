@@ -121,20 +121,32 @@ pub fn resolve_executable(version_dir: &Path, spec: &LaunchSpec) -> Result<PathB
 
 /// Starts the payload and returns the child process.
 ///
-/// Arguments are passed through unchanged, with the user's appended after the
-/// manifest's. The launcher never rewrites, reorders or filters them — an
+/// The user's arguments are appended after the manifest's and passed through
+/// unchanged. The launcher never rewrites, reorders or filters them — an
 /// application that receives different arguments than the user typed is an
 /// application whose behaviour cannot be reasoned about.
+///
+/// The manifest's own arguments, and its environment values, are the
+/// publisher's: in those, and only those, [`VERSION_DIR_PLACEHOLDER`] becomes
+/// the absolute path of the version being started.
 ///
 /// The child **inherits this process's environment**, with the manifest's
 /// entries added on top. The environment is not cleared, because a payload
 /// generally needs the user's `PATH`, locale and display settings to work at
 /// all. A manifest entry overrides an inherited one of the same name.
+///
+/// [`VERSION_DIR_PLACEHOLDER`]: xpack_core::VERSION_DIR_PLACEHOLDER
 pub fn launch(request: &LaunchRequest) -> Result<Child> {
     let executable = resolve_executable(&request.version_dir, &request.spec)?;
 
+    // Absolute, because the application may start somewhere else entirely: a
+    // relative installation root would otherwise name a path that means
+    // nothing from the application's own directory.
+    let version_dir = std::path::absolute(&request.version_dir)
+        .map_err(|e| Error::Launch(format!("{}: {e}", request.version_dir.display())))?;
+
     let mut command = Command::new(&executable);
-    command.args(&request.spec.arguments);
+    command.args(request.spec.arguments_in(&version_dir));
     command.args(&request.user_arguments);
 
     // `None` leaves the child in this process's directory, which is the one
@@ -144,7 +156,7 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
         command.current_dir(directory);
     }
 
-    for (key, value) in &request.spec.environment {
+    for (key, value) in request.spec.environment_in(&version_dir) {
         command.env(key, value);
     }
     // Applied last, so a manifest cannot shadow the variables xPack uses to
