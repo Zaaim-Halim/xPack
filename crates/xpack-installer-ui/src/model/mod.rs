@@ -5,6 +5,7 @@
 //! It makes no decisions of its own, so every rule is tested here once rather
 //! than trusted to two platforms' worth of drawing code.
 
+pub mod licence;
 pub mod page;
 pub mod plan;
 pub mod progress;

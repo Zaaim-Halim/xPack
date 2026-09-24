@@ -46,9 +46,8 @@ fn wizard(licence: bool, launch: bool, taken: bool) -> Wizard {
             description: Some("A small application used to try the installer wizard.".into()),
         },
         plan: UiPlan { launch_on_finish: launch, ..UiPlan::default() },
-        licence: licence.then(|| {
-            "Demo licence.\n\nYou may use this demo for trying the installer.\n".repeat(12)
-        }),
+        // A real, hard-wrapped licence, as publishers ship them.
+        licence: licence.then(|| include_str!("../../../LICENSE").to_owned()),
         shortcut_requested: true,
         command: Some(CommandOffer {
             names: vec!["demo".into(), "demo-helper".into()],

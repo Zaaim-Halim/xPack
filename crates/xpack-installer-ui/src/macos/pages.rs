@@ -139,6 +139,9 @@ impl App {
             ));
             text.setEditable(false);
             text.setSelectable(true);
+            // The text view's own default is Helvetica; the rest of the
+            // window is in the system font.
+            text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
         }
         inner.addSubview(&scroll);
 

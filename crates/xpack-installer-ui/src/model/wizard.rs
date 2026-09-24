@@ -228,7 +228,7 @@ impl Wizard {
             page: pages.first(),
             pages,
             phase: Phase::Choosing,
-            licence: spec.licence,
+            licence: spec.licence.as_deref().map(super::licence::for_display),
             shortcut_requested: spec.shortcut_requested,
             command_offer: spec.command,
             launch_on_finish: spec.plan.launch_on_finish,
