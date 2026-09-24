@@ -135,11 +135,24 @@ mod unix {
         // Run as a terminal would: arguments with spaces and quotes arrive
         // exactly as typed, one per argument.
         let out = world.dir.path().join("args");
-        let status = std::process::Command::new(&path)
-            .args(["a b", "it's", "--flag"])
-            .env("XPACK_TEST_OUT", &out)
-            .status()
-            .unwrap();
+        let mut command = std::process::Command::new(&path);
+        command.args(["a b", "it's", "--flag"]).env("XPACK_TEST_OUT", &out);
+        // Linux refuses to execute a file some process still holds open for
+        // writing, and a child forked by another test thread while the script
+        // was being written keeps a copy of that handle until it execs. That
+        // lasts milliseconds, so it is retried rather than reported.
+        let mut attempts = 0;
+        let status = loop {
+            match command.status() {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        };
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "a b\nit's\n--flag\n");
     }

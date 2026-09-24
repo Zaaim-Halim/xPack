@@ -103,6 +103,28 @@ fn build_installer(dir: &Path) -> PathBuf {
     installer
 }
 
+/// Runs a program this test has just written, as `Command::output` does.
+///
+/// Linux refuses to execute a file that some process still holds open for
+/// writing. The test's own handle is closed, but another test thread may have
+/// forked in the moment it was open, and that child keeps a copy until it
+/// execs its own program. The refusal ends within milliseconds, so it is
+/// retried rather than reported.
+fn output_of(command: &mut Command) -> Output {
+    let mut attempts = 0;
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result.unwrap(),
+        }
+    }
+}
+
 /// A stream whose reader has gone away: every write to it fails.
 fn closed_pipe() -> Stdio {
     let (reader, writer) = std::io::pipe().unwrap();
@@ -130,13 +152,13 @@ fn an_installer_with_nobody_reading_its_output_still_installs() {
     let installer = build_installer(dir.path());
     let root = dir.path().join("root");
 
-    let output = Command::new(&installer)
-        .args(["--silent", "--root"])
-        .arg(&root)
-        .stdout(closed_pipe())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+    let output = output_of(
+        Command::new(&installer)
+            .args(["--silent", "--root"])
+            .arg(&root)
+            .stdout(closed_pipe())
+            .stderr(Stdio::piped()),
+    );
 
     assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
     assert_installed(&root);
@@ -149,13 +171,13 @@ fn an_installer_with_nobody_reading_its_diagnostics_still_installs() {
     let installer = build_installer(dir.path());
     let root = dir.path().join("root");
 
-    let output = Command::new(&installer)
-        .args(["--silent", "--verbose", "--root"])
-        .arg(&root)
-        .stdout(Stdio::piped())
-        .stderr(closed_pipe())
-        .output()
-        .unwrap();
+    let output = output_of(
+        Command::new(&installer)
+            .args(["--silent", "--verbose", "--root"])
+            .arg(&root)
+            .stdout(Stdio::piped())
+            .stderr(closed_pipe()),
+    );
 
     assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
     assert_installed(&root);

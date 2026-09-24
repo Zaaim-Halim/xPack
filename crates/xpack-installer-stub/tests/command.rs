@@ -90,14 +90,36 @@ fn build_installer(dir: &Path) -> PathBuf {
 /// Runs the installer silently, with `HOME` in `dir` and `path` as the `PATH`.
 fn install(dir: &Path, path: &str, extra: &[&str]) -> Output {
     let installer = build_installer(dir);
-    Command::new(installer)
-        .args(["--silent", "--root"])
-        .arg(dir.join("apps"))
-        .args(extra)
-        .env("HOME", dir.join("home"))
-        .env("PATH", path)
-        .output()
-        .unwrap()
+    output_of(
+        Command::new(installer)
+            .args(["--silent", "--root"])
+            .arg(dir.join("apps"))
+            .args(extra)
+            .env("HOME", dir.join("home"))
+            .env("PATH", path),
+    )
+}
+
+/// Runs a program this test has just written, as `Command::output` does.
+///
+/// Linux refuses to execute a file that some process still holds open for
+/// writing. The test's own handle is closed, but another test thread may have
+/// forked in the moment it was open, and that child keeps a copy until it
+/// execs its own program. The refusal ends within milliseconds, so it is
+/// retried rather than reported.
+fn output_of(command: &mut Command) -> Output {
+    let mut attempts = 0;
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result.unwrap(),
+        }
+    }
 }
 
 fn stdout(output: &Output) -> String {
