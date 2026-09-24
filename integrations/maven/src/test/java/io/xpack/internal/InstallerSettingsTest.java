@@ -19,6 +19,7 @@ class InstallerSettingsTest {
         spec.setLicense(new File("LICENSE.txt"));
         spec.setText(Map.of("welcome", "Hello {name}."));
         spec.setShortcutDefault(false);
+        spec.setPathDefault(false);
         spec.setLaunchOnFinish(true);
 
         Map<String, Object> settings = Json.parseObject(InstallerSettings.toJson(spec));
@@ -26,6 +27,7 @@ class InstallerSettingsTest {
         assertEquals(List.of("welcome", "license", "install", "finish"), settings.get("pages"));
         assertEquals(Map.of("welcome", "Hello {name}."), settings.get("text"));
         assertEquals(false, settings.get("shortcutDefault"));
+        assertEquals(false, settings.get("pathDefault"));
         assertEquals(true, settings.get("launchOnFinish"));
     }
 

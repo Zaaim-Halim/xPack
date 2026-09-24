@@ -29,6 +29,9 @@ public class InstallerUiSpec {
     /** Whether the desktop-entry box starts ticked, where it is offered. */
     private Boolean shortcutDefault;
 
+    /** Whether the command-line box starts ticked, where it is offered. */
+    private Boolean pathDefault;
+
     /** Whether the last page offers to open the application. */
     private Boolean launchOnFinish;
 
@@ -64,6 +67,14 @@ public class InstallerUiSpec {
         this.shortcutDefault = shortcutDefault;
     }
 
+    public Boolean getPathDefault() {
+        return pathDefault;
+    }
+
+    public void setPathDefault(Boolean pathDefault) {
+        this.pathDefault = pathDefault;
+    }
+
     public Boolean getLaunchOnFinish() {
         return launchOnFinish;
     }
@@ -77,6 +88,7 @@ public class InstallerUiSpec {
                 && license == null
                 && (text == null || text.isEmpty())
                 && shortcutDefault == null
+                && pathDefault == null
                 && launchOnFinish == null;
     }
 }

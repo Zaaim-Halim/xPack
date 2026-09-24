@@ -196,6 +196,7 @@ and so does the block: leave it out for the recommended wizard.
 | `pages` | every page with something to show | Chooses which pages appear, never their order |
 | `text` | English defaults | Only `welcome` and `finish`, using `{name}` and `{version}` |
 | `shortcutDefault` | `true` | Whether the Start Menu / Applications box starts ticked |
+| `pathDefault` | `true` | Whether the command-line box starts ticked, when `<command>` is set |
 | `launchOnFinish` | `false` | Whether the last page offers to open the application |
 
 The name, publisher and icon are not settings: they come from the signed
@@ -240,8 +241,20 @@ they are still found. A `<jvmArg>` or `<appArg>` of your own that names a file
 in the package needs the same, by hand:
 `-Djava.library.path={versionDir}/native`.
 
-A package that sets it is format 2, which installations made with xPack 0.1.0
-cannot install or update to. Leave it off for a windowed application.
+To let users type it by name, give it a command:
+
+```xml
+<command>mytool</command>   <!-- or -Dxpack.command=mytool -->
+```
+
+The installer offers "Add “mytool” to the command line", ticked unless
+`<installerUi><pathDefault>false</pathDefault></installerUi>`; a silent
+install declines it with `--no-path`. It becomes a script in `~/.local/bin`
+on macOS and Linux and a `PATH` entry on Windows, never replaces another
+program's `mytool`, and is removed on uninstall.
+
+Each of these makes the package format 2, which installations made with xPack
+0.1.0 cannot install or update to. Leave them off for a windowed application.
 
 ## Quickstart
 

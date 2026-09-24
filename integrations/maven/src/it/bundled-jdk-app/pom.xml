@@ -67,6 +67,12 @@
                this demo, a window opened from the desktop. A package with it
                on needs a newer xPack than 0.1.0 on the user's machine. -->
           <keepWorkingDirectory>false</keepWorkingDirectory>
+          <!-- The command a terminal starts it by, for an application used
+               from a command line: the installer offers to add it and
+               uninstalling removes it. Left out of this windowed demo:
+
+          <command>demo</command>
+          -->
 
           <!-- Files copied into the payload as they are: here, the icon
                `<desktop><icon>` names. Per platform; see the profiles. -->
@@ -168,6 +174,9 @@
               <finish>{name} is ready. Open it from your applications at any time.</finish>
             </text>
             <shortcutDefault>true</shortcutDefault>
+            <!-- Whether the command-line box starts ticked, when a
+                 <command> is set. -->
+            <pathDefault>true</pathDefault>
             <launchOnFinish>true</launchOnFinish>
           </installerUi>
 

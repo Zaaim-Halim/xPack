@@ -81,6 +81,25 @@ class ManifestWriterTest {
     }
 
     @Test
+    void writes_the_command_when_one_is_named() {
+        Map<String, Object> manifest = Json.parseObject(minimal().command("mytool").toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> command = (Map<String, Object>) manifest.get("command");
+        assertEquals(Map.of("name", "mytool"), command);
+    }
+
+    /** None, or a blank one, is no command: the file every earlier build wrote. */
+    @Test
+    void writes_no_command_unless_one_is_named() {
+        for (String none : new String[] {null, "", "  "}) {
+            String json = minimal().command(none).toJson();
+            assertFalse(json.contains("\"command\""), json);
+            assertEquals(minimal().toJson(), json);
+        }
+    }
+
+    @Test
     void omits_sections_that_were_never_configured() {
         String json = minimal().toJson();
         assertFalse(json.contains("\"update\""), json);

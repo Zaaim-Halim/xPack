@@ -47,6 +47,7 @@ public final class ManifestWriter {
     private UpdateSpec update = new UpdateSpec();
     private HealthSpec health;
     private DesktopSpec desktop;
+    private String command;
 
     public ManifestWriter id(String value) {
         this.id = value;
@@ -126,6 +127,12 @@ public final class ManifestWriter {
 
     public ManifestWriter desktop(DesktopSpec value) {
         this.desktop = value;
+        return this;
+    }
+
+    /** The command a terminal starts the application by; blank is none. */
+    public ManifestWriter command(String value) {
+        this.command = blankToNull(value);
         return this;
     }
 
@@ -255,6 +262,7 @@ public final class ManifestWriter {
                 .putIfAny("update", updateObject)
                 .putIfAny("health", healthObject)
                 .putIfAny("desktop", desktopObject)
+                .putIfAny("command", new Json.Obj().put("name", command))
                 .toString();
     }
 

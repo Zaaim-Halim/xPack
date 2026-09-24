@@ -117,6 +117,20 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     @Parameter(property = "xpack.keepWorkingDirectory")
     protected Boolean keepWorkingDirectory;
 
+    /**
+     * The command a terminal starts the application by: {@code mytool build src}
+     * rather than the launcher's full path.
+     *
+     * <p>For applications used from a command line, beside
+     * {@code <keepWorkingDirectory>}. The installer offers to add it, and
+     * uninstalling removes it. Lowercase letters, digits, {@code .}, {@code _}
+     * and {@code -}; the xPack command line checks the name. Packages that set
+     * it are format 2, which installations made with xPack 0.1.0 cannot install
+     * or update to.
+     */
+    @Parameter(property = "xpack.command")
+    protected String command;
+
     // --------------------------------------------------------------- targets
 
     /** Platforms to build, as {@code <os>-<arch>}. Defaults to the host. */

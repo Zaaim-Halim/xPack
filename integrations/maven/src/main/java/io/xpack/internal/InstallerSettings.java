@@ -29,6 +29,7 @@ public final class InstallerSettings {
                         : spec.getLicense().getAbsolutePath())
                 .putIfAny("text", spec.getText())
                 .put("shortcutDefault", spec.getShortcutDefault())
+                .put("pathDefault", spec.getPathDefault())
                 .put("launchOnFinish", spec.getLaunchOnFinish());
         return document.toString();
     }
