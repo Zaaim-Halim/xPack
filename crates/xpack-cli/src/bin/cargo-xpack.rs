@@ -25,8 +25,15 @@
 //! binaries = ["mytool"]          # default: the package's own binaries
 //! launch = "mytool"              # default: the only, or first, of those
 //! resources = ["assets"]         # copied into the payload, package-relative
-//! icon = "assets/mytool.png"     # optional, a path inside the payload
+//! icon = "assets/mytool.png"     # optional, package-relative, copied in
 //! installer-ui = "installer-ui.json"
+//! ```
+//!
+//! Each platform wants its own icon format, so `icon` may also name one per
+//! platform; the one for the platform being built is used:
+//!
+//! ```toml
+//! icon = { macos = "assets/mytool.icns", windows = "assets/mytool.ico", linux = "assets/mytool.png" }
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -157,8 +164,39 @@ struct Settings {
     launch: Option<String>,
     #[serde(default)]
     resources: Vec<PathBuf>,
-    icon: Option<String>,
+    /// One path, or a table of them by platform: read by [`icon_for`], so a
+    /// mistake is reported in words rather than as a failed match.
+    icon: Option<serde_json::Value>,
     installer_ui: Option<PathBuf>,
+}
+
+/// The platforms `icon` may name, as `std::env::consts::OS` spells them.
+const ICON_PLATFORMS: [&str; 3] = ["macos", "windows", "linux"];
+
+/// The icon `setting` names for `os`: the one path, or `os`'s entry.
+fn icon_for(setting: &serde_json::Value, os: &str) -> Result<Option<PathBuf>> {
+    match setting {
+        serde_json::Value::String(path) => Ok(Some(PathBuf::from(path))),
+        serde_json::Value::Object(each) => {
+            let mut chosen = None;
+            for (platform, path) in each {
+                if !ICON_PLATFORMS.contains(&platform.as_str()) {
+                    return Err(format!(
+                        "icon: {platform:?} is not a platform; use {}",
+                        ICON_PLATFORMS.join(", ")
+                    ));
+                }
+                let serde_json::Value::String(path) = path else {
+                    return Err(format!("icon: {platform} must be a path"));
+                };
+                if platform == os {
+                    chosen = Some(PathBuf::from(path));
+                }
+            }
+            Ok(chosen)
+        }
+        _ => Err("icon must be a path, or a table of paths by platform".into()),
+    }
 }
 
 /// Runs a command, failing with its own words when it fails.
@@ -223,6 +261,8 @@ struct Plan {
     id: String,
     binaries: Vec<String>,
     launch: String,
+    /// The icon for the platform being built, package-relative.
+    icon: Option<PathBuf>,
     package_dir: PathBuf,
     staging: PathBuf,
     out_dir: PathBuf,
@@ -260,7 +300,21 @@ fn plan(metadata: &Metadata, package: &Package, common: &Common) -> Result<Plan>
     let staging = metadata.target_directory.join("xpack").join(&package.name);
     let out_dir = common.out_dir.clone().unwrap_or_else(|| metadata.target_directory.join("xpack"));
     let package_dir = package.manifest_path.parent().map(Path::to_path_buf).unwrap_or_default();
-    Ok(Plan { settings, id, binaries, launch, package_dir, staging, out_dir })
+    // Packages are built for this machine, so its icon is this machine's.
+    let icon = match &settings.icon {
+        Some(setting) => icon_for(setting, std::env::consts::OS)?,
+        None => None,
+    };
+    let icon = icon.map(|path| inside_the_package(&path, "icon")).transpose()?;
+    Ok(Plan { settings, id, binaries, launch, icon, package_dir, staging, out_dir })
+}
+
+/// `path`, when it names something inside the package directory.
+fn inside_the_package(path: &Path, what: &str) -> Result<PathBuf> {
+    if path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
+        return Err(format!("{what} {} must be a path inside the package", path.display()));
+    }
+    Ok(path.to_path_buf())
 }
 
 /// `cargo build --release` for exactly the binaries packaged.
@@ -297,13 +351,13 @@ fn assemble(plan: &Plan, built: &Path) -> Result<PathBuf> {
             .map_err(|e| format!("{}: {e}", from.display()))?;
     }
     for resource in &plan.settings.resources {
-        if resource.is_absolute() || resource.components().any(|c| c.as_os_str() == "..") {
-            return Err(format!(
-                "resource {} must be a path inside the package",
-                resource.display()
-            ));
-        }
-        copy_tree(&plan.package_dir.join(resource), &payload.join(resource))?;
+        let resource = inside_the_package(resource, "resource")?;
+        copy_tree(&plan.package_dir.join(&resource), &payload.join(&resource))?;
+    }
+    // Only this platform's icon: the others would be dead weight in every
+    // installation.
+    if let Some(icon) = &plan.icon {
+        copy_tree(&plan.package_dir.join(icon), &payload.join(icon))?;
     }
     Ok(payload)
 }
@@ -362,8 +416,11 @@ fn project_file(plan: &Plan, package: &Package) -> serde_json::Value {
             .map(|name| serde_json::json!({ "name": name, "executable": format!("bin/{}", executable(name)) }))
             .collect();
     }
-    if let Some(icon) = &settings.icon {
-        project["desktop"] = serde_json::json!({ "icon": icon });
+    if let Some(icon) = &plan.icon {
+        // The manifest names payload files with forward slashes everywhere.
+        let icon: Vec<String> =
+            icon.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        project["desktop"] = serde_json::json!({ "icon": icon.join("/") });
     }
     project
 }

@@ -332,7 +332,14 @@ cargo xpack installer --key ~/keys/signing.json    # and the installer a user ru
 The name, version, description and publisher come from `[package]`. Optional
 settings: `name`, `publisher`, `commands` (further binaries typed by name),
 `keep-working-directory` (on by default with a `command`), `binaries`,
-`launch`, `resources`, `icon` and `installer-ui`.
+`launch`, `resources`, `icon` and `installer-ui`. Each platform wants its own
+icon format, so `icon` may name one per platform, and only the one for the
+platform being built is packed:
+
+```toml
+icon = { macos = "assets/mytool.icns", windows = "assets/mytool.ico", linux = "assets/mytool.png" }
+```
+
 Everything lands in `target/xpack`.
 
 ## Maven

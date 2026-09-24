@@ -32,6 +32,8 @@ binaries = [
     "xpack-notify",
 ]
 installer-ui = "installer-ui.json"
+# Each platform's own format; only the one being built is packed.
+icon = { macos = "assets/xpack.icns", windows = "assets/xpack.ico", linux = "assets/xpack.png" }
 
 [[bin]]
 name = "xpack"

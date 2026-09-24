@@ -116,6 +116,56 @@ resources = ["assets"]"#,
 }
 
 #[test]
+fn only_the_icon_for_the_platform_built_is_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(
+        dir.path(),
+        r#"id = "com.example.mytool"
+icon = { macos = "art/mytool.icns", windows = "art/mytool.ico", linux = "art/mytool.png" }"#,
+    );
+    // xPack's own icons: real files in each platform's format.
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    std::fs::create_dir_all(project.join("art")).unwrap();
+    for extension in ["icns", "ico", "png"] {
+        std::fs::copy(
+            assets.join(format!("xpack.{extension}")),
+            project.join(format!("art/mytool.{extension}")),
+        )
+        .unwrap();
+    }
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let package = PathBuf::from(stdout(&out).trim());
+
+    let inspect = Command::new(xpack()).args(["inspect", "--json"]).arg(&package).output().unwrap();
+    assert!(inspect.status.success(), "{}", stderr(&inspect));
+    let text = stdout(&inspect);
+    let wanted = match std::env::consts::OS {
+        "macos" => "art/mytool.icns",
+        "windows" => "art/mytool.ico",
+        _ => "art/mytool.png",
+    };
+    for icon in ["art/mytool.icns", "art/mytool.ico", "art/mytool.png"] {
+        assert_eq!(text.contains(icon), icon == wanted, "{icon} in {text}");
+    }
+}
+
+#[test]
+fn an_icon_for_a_platform_that_does_not_exist_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(
+        dir.path(),
+        r#"id = "com.example.mytool"
+icon = { macOS = "art/mytool.icns" }"#,
+    );
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains(r#"icon: "macOS" is not a platform"#), "{}", stderr(&out));
+}
+
+#[test]
 fn a_packed_rust_tool_installs_and_is_typed_by_name() {
     // Unix only: installing puts the command in a `HOME` redirected here; on
     // Windows it would edit the real user's PATH.

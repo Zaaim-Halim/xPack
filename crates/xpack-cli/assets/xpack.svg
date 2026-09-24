@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EEF0FF"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#DCDFFB"/>
+      <stop offset="1" stop-color="#C7CBF7"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B9BEF5"/>
+      <stop offset="1" stop-color="#A5ABF0"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#6D28D9"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="shadow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#1E1B4B" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#1E1B4B" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- The tile, on the grid macOS uses: 824 of 1024, corners of 185. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+
+  <!-- A soft shadow under the box. -->
+  <ellipse cx="512" cy="786" rx="270" ry="52" fill="url(#shadow)"/>
+
+  <!-- An isometric box: top, left and right faces. -->
+  <polygon points="512,250 747,386 512,522 277,386" fill="url(#top)"/>
+  <polygon points="277,386 512,522 512,794 277,658" fill="url(#left)"/>
+  <polygon points="512,522 747,386 747,658 512,794" fill="url(#right)"/>
+
+  <!-- Packing tape across the middle of the lid and down the right face. -->
+  <polygon points="415.5,306 650.5,442 608.5,466 373.5,330" fill="#6366F1" opacity="0.2"/>
+  <polygon points="608.5,466 650.5,442 650.5,714 608.5,738" fill="#4F46E5" opacity="0.18"/>
+
+  <!-- The x, drawn on the left face in its own perspective. -->
+  <g transform="matrix(235,136,0,272,277,386)">
+    <polygon points="0.18,0.22 0.37,0.22 0.82,0.78 0.63,0.78" fill="url(#mark)"/>
+    <polygon points="0.63,0.22 0.82,0.22 0.37,0.78 0.18,0.78" fill="url(#mark)"/>
+  </g>
+
+  <!-- A crisp edge where the faces meet. -->
+  <polyline points="277,386 512,522 747,386" fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linejoin="round" opacity="0.9"/>
+  <line x1="512" y1="522" x2="512" y2="794" stroke="#FFFFFF" stroke-width="4" opacity="0.5"/>
+</svg>
