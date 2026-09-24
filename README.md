@@ -313,6 +313,28 @@ On Windows, `xpack installer` produces a windowed installer by default. A shell
 does not wait for a windowed program, so build installers that only scripts
 run with `--console`.
 
+## Rust
+
+`cargo xpack` ships beside `xpack`, so a Rust project is packaged with the
+tools it already has. Describe the application in `Cargo.toml`:
+
+```toml
+[package.metadata.xpack]
+id = "com.example.mytool"   # required: the identity installations trust
+command = "mytool"          # optional: typed by name once installed
+```
+
+```sh
+cargo xpack pack --key ~/keys/signing.json         # build --release, then a signed package
+cargo xpack installer --key ~/keys/signing.json    # and the installer a user runs
+```
+
+The name, version, description and publisher come from `[package]`. Optional
+settings: `name`, `publisher`, `commands` (further binaries typed by name),
+`keep-working-directory` (on by default with a `command`), `binaries`,
+`launch`, `resources`, `icon` and `installer-ui`.
+Everything lands in `target/xpack`.
+
 ## Maven
 
 A Maven plugin packages a Java project with a runtime linked by `jlink`,

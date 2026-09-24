@@ -12,6 +12,12 @@ authors.workspace = true
 name = "xpack"
 path = "src/main.rs"
 
+# `cargo xpack`: Cargo runs any `cargo-<name>` on the PATH as a subcommand,
+# so shipping this beside `xpack` is the whole Rust integration.
+[[bin]]
+name = "cargo-xpack"
+path = "src/bin/cargo-xpack.rs"
+
 # A stand-in for "the application" in the end-to-end tests.
 #
 # It lives here rather than in a crate of its own because that is the only

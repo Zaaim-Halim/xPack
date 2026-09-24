@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for bin in xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
             path="target/${{ matrix.target }}/release/$bin"
             file "$path"
             # A binary depends on the system's libc exactly when it names a
@@ -144,7 +144,7 @@ jobs:
           fi
 
           mkdir -p "staging/$name"
-          for bin in xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
             cp "$out/$bin$suffix" "staging/$name/"
           done
           # Only Windows distinguishes a windowed build, and only Windows
@@ -175,6 +175,7 @@ jobs:
           # here. A release that ships a binary nobody executed is a release
           # that finds out on a user's machine.
           "staging/${{ steps.stage.outputs.name }}/xpack" --version
+          "staging/${{ steps.stage.outputs.name }}/cargo-xpack" xpack --version
 
       - name: Archive
         shell: bash
