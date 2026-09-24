@@ -7,9 +7,11 @@
 //! exposes the primitives and lets each caller choose.
 //!
 //! This command chooses the simplest defensible policy: **run the application
-//! to completion and treat a zero exit status as healthy**. That is honest for
-//! a foreground command a person typed, and it is exactly right for a
-//! short-lived tool.
+//! to completion and treat a zero exit status as healthy**, unless the
+//! application said it started, which is healthy whatever it exits with. The
+//! same report the launcher accepts, read the same way: a command-line tool's
+//! exit status is its answer, and one that reported its start and then
+//! answered "no" is not a failed update.
 //!
 //! It is *not* right for a long-running desktop application, where the version
 //! would only be committed when the user eventually quits — and a crash three
@@ -87,8 +89,16 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         }
     }
 
+    // Removed first, so a report left by an earlier run is not read as this
+    // one's.
+    let report = paths.health_file(&version);
+    let _ = std::fs::remove_file(&report);
     let request = LaunchRequest::new(paths.version_dir(&version), manifest.launch.clone())
-        .with_user_arguments(args.arguments.clone());
+        .with_user_arguments(args.arguments.clone())
+        .with_launcher_environment(
+            xpack_core::paths::HEALTH_FILE_ENV,
+            report.display().to_string(),
+        );
 
     // The lock is released before the application runs. Holding it for the
     // lifetime of a user's program would block every other xpack command for
@@ -107,7 +117,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let lock = context.lock(&args.application)?;
     let installer = Installer::new(&lock);
 
-    if status.success() {
+    if status.success() || report.exists() {
         installer.commit_health()?;
         xpack_core::errln!("version {version} confirmed healthy");
     } else {

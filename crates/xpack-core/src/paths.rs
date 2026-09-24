@@ -486,6 +486,15 @@ pub const INSTALL_ROOT_ENV: &str = "XPACK_INSTALL_ROOT";
 /// does any deployment that cannot put the binaries in the root.
 pub const APPLICATION_DIR_ENV: &str = "XPACK_APPLICATION_DIR";
 
+/// Names the file an application creates to say it started successfully.
+///
+/// Set by the launcher in every application's environment. A file rather than
+/// a socket or a pipe because xPack is runtime-independent: creating one is a
+/// line of code in any language, needs no xPack library, and works identically
+/// on every platform — where a named pipe on Windows would need Win32 calls
+/// this workspace does not permit.
+pub const HEALTH_FILE_ENV: &str = "XPACK_HEALTH_FILE";
+
 /// Resolves the install root from an explicit override, or the user default.
 ///
 /// The environment read is kept out of this function on purpose. Since Rust

@@ -10,14 +10,10 @@ use xpack_core::{Error, InstallPaths, Manifest, Result, UpdateSpec, Version};
 use xpack_install::Installer;
 use xpack_platform::{InstallLock, LaunchRequest, launch, request_close};
 
-/// Names the file an application creates to say it started successfully.
-///
-/// Set by the launcher in every application's environment. A file rather than
-/// a socket or a pipe because xPack is runtime-independent: creating one is a
-/// line of code in any language, needs no xPack library, and works identically
-/// on every platform — where a named pipe on Windows would need Win32 calls
-/// this workspace does not permit.
-pub const HEALTH_FILE_ENV: &str = "XPACK_HEALTH_FILE";
+/// Where an application reports that it started. See
+/// [`xpack_core::paths::HEALTH_FILE_ENV`], where the name is defined so that an
+/// application built on xPack's own crates can use it too.
+pub const HEALTH_FILE_ENV: &str = xpack_core::paths::HEALTH_FILE_ENV;
 
 /// Where the application's installation is, told to the application itself.
 ///

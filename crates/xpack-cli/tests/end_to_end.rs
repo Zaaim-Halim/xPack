@@ -1141,3 +1141,61 @@ fn a_command_name_that_could_escape_its_directory_is_refused_at_pack_time() {
     assert!(!pack.status.success(), "a bad command name was packed");
     assert!(stderr(&pack).contains("command.name"), "{}", stderr(&pack));
 }
+
+/// Packs this build's own `xpack` as the application, at `version`.
+fn pack_xpack_itself(fixture: &Fixture, version: &str) -> String {
+    let dir = fixture.path().join(format!("xpack-payload-{version}/bin"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let name = format!("xpack{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(xpack(), dir.join(&name)).unwrap();
+    let config = format!(
+        r#"{{"application":{{"id":"com.example.xpack","name":"xPack","version":"{version}"}},
+            "launch":{{"executable":"bin/{name}"}}}}"#
+    );
+    std::fs::write(fixture.path().join(format!("xpack-self-{version}.json")), config).unwrap();
+    let out = fixture.run(&[
+        "pack",
+        &format!("xpack-payload-{version}"),
+        "--config",
+        &format!("xpack-self-{version}.json"),
+        "--key",
+        "signing.json",
+        "--out",
+        &format!("xpack-self-{version}.xpkg"),
+    ]);
+    assert!(out.status.success(), "pack failed: {}", stderr(&out));
+    format!("xpack-self-{version}.xpkg")
+}
+
+#[test]
+fn an_installed_xpack_whose_first_command_fails_is_not_rolled_back() {
+    // The first run after an update decides whether the update stays. For a
+    // command line, a failure is an answer: `xpack verify` of a package that
+    // is not there exits non-zero, and that must not undo a good update.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let first = pack_xpack_itself(&fixture, "1.0.0");
+    let install = fixture.run_in_root(&["install", &first, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    let run = fixture.run_in_root(&["run", "com.example.xpack", "--", "--version"]);
+    assert!(run.status.success(), "{}", stderr(&run));
+
+    let update = pack_xpack_itself(&fixture, "1.1.0");
+    let install = fixture.run_in_root(&["install", &update]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    // On probation, and the command it is asked to run fails.
+    let run = fixture.run_in_root(&["run", "com.example.xpack", "--", "verify", "missing.xpkg"]);
+    assert!(!run.status.success(), "verifying a missing package succeeded");
+    assert!(!stderr(&run).contains("rolled back"), "{}", stderr(&run));
+
+    let list = fixture.run_in_root(&["list", "com.example.xpack", "--json"]);
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&list)).unwrap();
+    let active = listed["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["active"] == true)
+        .map(|v| v["version"].as_str().unwrap().to_string());
+    assert_eq!(active.as_deref(), Some("1.1.0"), "{}", stdout(&list));
+}

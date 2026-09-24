@@ -48,6 +48,9 @@ enum Behaviour {
     StaysRunning,
     /// Reports that it started, then keeps running.
     ReportsThenRuns,
+    /// Reports that it started, then exits with a failure: a command-line
+    /// tool whose answer this time was "no".
+    ReportsThenFails,
     /// Keeps running but never reports — the case the report exists to catch.
     RunsWithoutReporting,
     /// Writes the installation directory it was told about, then exits.
@@ -64,6 +67,9 @@ fn script(behaviour: Behaviour, version: &str) -> String {
         Behaviour::StaysRunning => format!("#!/bin/sh\necho {version} running\nsleep 30\n"),
         Behaviour::ReportsThenRuns => {
             format!("#!/bin/sh\necho {version} running\n: > \"$XPACK_HEALTH_FILE\"\nsleep 30\n")
+        }
+        Behaviour::ReportsThenFails => {
+            format!("#!/bin/sh\necho {version} refused\n: > \"$XPACK_HEALTH_FILE\"\nexit 3\n")
         }
         Behaviour::RunsWithoutReporting => {
             format!("#!/bin/sh\necho {version} running but silent\nsleep 30\n")
@@ -678,6 +684,24 @@ fn a_download_in_flight_does_not_put_the_active_version_on_trial() {
         xpack_core::state::VersionStatus::Good,
         "a working version was quarantined because a download was in flight"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_version_that_reported_its_start_is_kept_whatever_it_exits_with() {
+    // A command-line tool's exit status is its answer. Having said it started,
+    // a version whose first run answered "no" is not a failed update, and
+    // rolling it back would undo a good release over a refused input.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::ExitsCleanly, 5);
+    world.stage("1.1.0", Behaviour::ReportsThenFails, 5);
+
+    let outcome = world.launcher().launch(&[], true).unwrap();
+
+    assert_eq!(outcome.startup, Some(StartupResult::ReportedHealthy));
+    assert!(outcome.rolled_back_to.is_none(), "rolled back to {:?}", outcome.rolled_back_to);
+    assert_eq!(outcome.exit_code, Some(3), "the tool's own answer is passed on");
+    assert_eq!(world.active(), Some(v("1.1.0")));
 }
 
 #[test]

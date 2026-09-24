@@ -113,7 +113,27 @@ impl Command {
     }
 }
 
+/// Tells the launcher that started this `xpack`, if one did, that it started.
+///
+/// An installed `xpack` runs through a launcher, which judges a newly updated
+/// version by its first run and rolls it back if that run exits with a
+/// failure. For a command line the exit status is the answer, not a verdict on
+/// the version: `xpack verify` refusing a tampered package exits 3, and must
+/// not undo the update that brought it. The launcher reads this report before
+/// the exit status, so writing it first, before any work and before the
+/// arguments are even parsed, keeps every answer the command gives from being
+/// read as a failed start.
+///
+/// Best effort: without a launcher nothing names a file, and a report that
+/// cannot be written only leaves the ordinary rule in place.
+fn report_started() {
+    if let Some(file) = std::env::var_os(xpack_core::paths::HEALTH_FILE_ENV) {
+        let _ = std::fs::write(file, b"ok\n");
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    report_started();
     let cli = Cli::parse();
 
     let context = commands::Context { root: cli.root.clone() };
