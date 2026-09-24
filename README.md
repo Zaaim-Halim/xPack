@@ -340,6 +340,14 @@ platform being built is packed:
 icon = { macos = "assets/mytool.icns", windows = "assets/mytool.ico", linux = "assets/mytool.png" }
 ```
 
+To ship updates, name where each platform's index lives; `{platform}` becomes
+the platform being built, the directory `xpack index` writes its index into:
+
+```toml
+update-url = "https://updates.example.com/mytool/{platform}"
+update-channel = "stable"   # the default
+```
+
 Everything lands in `target/xpack`.
 
 ## Maven

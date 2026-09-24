@@ -175,6 +175,81 @@ icon = { macOS = "art/mytool.icns" }"#,
     assert!(stderr(&out).contains(r#"icon: "macOS" is not a platform"#), "{}", stderr(&out));
 }
 
+/// The manifest of a packed package, as `xpack inspect --json` reports it.
+fn inspect(package: &Path) -> serde_json::Value {
+    let out = Command::new(xpack()).args(["inspect", "--json"]).arg(package).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn the_update_url_names_the_platform_built_and_keeps_the_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(
+        dir.path(),
+        r#"id = "com.example.mytool"
+update-url = "https://updates.example.com/mytool/{platform}"
+update-channel = "beta""#,
+    );
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("update-url has no"), "{}", stderr(&out));
+    let report = inspect(Path::new(stdout(&out).trim()));
+
+    let platform = xpack_core::Platform::host().unwrap();
+    let update = &report["update"];
+    assert_eq!(
+        update["url"],
+        format!("https://updates.example.com/mytool/{platform}").as_str(),
+        "{report:#}"
+    );
+    assert_eq!(update["channel"], "beta", "{report:#}");
+}
+
+#[test]
+fn without_an_update_url_the_package_checks_nowhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), r#"id = "com.example.mytool""#);
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report = inspect(Path::new(stdout(&out).trim()));
+    // The report is the manifest itself; its id proves it was read.
+    assert_eq!(report["application"]["id"], "com.example.mytool", "{report:#}");
+    assert!(report["update"].get("url").is_none(), "{report:#}");
+}
+
+#[test]
+fn an_update_channel_without_an_update_url_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(
+        dir.path(),
+        r#"id = "com.example.mytool"
+update-channel = "beta""#,
+    );
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("update-url is not"), "{}", stderr(&out));
+}
+
+#[test]
+fn an_update_url_that_is_not_https_is_refused() {
+    // Updates are code the installation will run; a plain-HTTP index could be
+    // swapped in transit to hold every installation back on an old version.
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(
+        dir.path(),
+        r#"id = "com.example.mytool"
+update-url = "http://updates.example.com/mytool/{platform}""#,
+    );
+    let key = keygen(dir.path());
+    let out = cargo_xpack_pack(&project, &key);
+    assert!(!out.status.success(), "an http update URL was packed");
+    assert!(stderr(&out).contains("https"), "{}", stderr(&out));
+}
+
 #[test]
 fn a_packed_rust_tool_installs_and_is_typed_by_name() {
     // Unix only: installing puts the command in a `HOME` redirected here; on

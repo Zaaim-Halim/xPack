@@ -27,6 +27,8 @@
 //! resources = ["assets"]         # copied into the payload, package-relative
 //! icon = "assets/mytool.png"     # optional, package-relative, copied in
 //! installer-ui = "installer-ui.json"
+//! update-url = "https://updates.example.com/mytool/{platform}"
+//! update-channel = "stable"      # default: stable
 //! ```
 //!
 //! Each platform wants its own icon format, so `icon` may also name one per
@@ -35,6 +37,10 @@
 //! ```toml
 //! icon = { macos = "assets/mytool.icns", windows = "assets/mytool.ico", linux = "assets/mytool.png" }
 //! ```
+//!
+//! Every platform reads an update index of its own, so `{platform}` in
+//! `update-url` becomes the platform being built, such as `macos-arm64`: the
+//! directory `xpack index` writes that platform's index into.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -168,6 +174,8 @@ struct Settings {
     /// mistake is reported in words rather than as a failed match.
     icon: Option<serde_json::Value>,
     installer_ui: Option<PathBuf>,
+    update_url: Option<String>,
+    update_channel: Option<String>,
 }
 
 /// The platforms `icon` may name, as `std::env::consts::OS` spells them.
@@ -263,6 +271,8 @@ struct Plan {
     launch: String,
     /// The icon for the platform being built, package-relative.
     icon: Option<PathBuf>,
+    /// The `update` section of the manifest, when updates are published.
+    update: Option<serde_json::Value>,
     package_dir: PathBuf,
     staging: PathBuf,
     out_dir: PathBuf,
@@ -306,8 +316,41 @@ fn plan(metadata: &Metadata, package: &Package, common: &Common) -> Result<Plan>
         None => None,
     };
     let icon = icon.map(|path| inside_the_package(&path, "icon")).transpose()?;
-    Ok(Plan { settings, id, binaries, launch, icon, package_dir, staging, out_dir })
+    let update = update_spec(&settings)?;
+    Ok(Plan { settings, id, binaries, launch, icon, update, package_dir, staging, out_dir })
 }
+
+/// The manifest's `update` section: `update-url` for this platform, and the
+/// channel.
+///
+/// `xpack pack` checks the URL itself, as it does for any package; this only
+/// fills in the platform, which `xpack` could not know was meant.
+fn update_spec(settings: &Settings) -> Result<Option<serde_json::Value>> {
+    let Some(url) = &settings.update_url else {
+        if settings.update_channel.is_some() {
+            return Err("update-channel is set but update-url is not: there is nothing \
+                        for the channel to be read from"
+                .into());
+        }
+        return Ok(None);
+    };
+    if !url.contains(PLATFORM_PLACEHOLDER) {
+        xpack_core::errln!(
+            "note: update-url has no {PLATFORM_PLACEHOLDER}, so the package for every \
+             platform reads the same index, and an index serves one platform"
+        );
+    }
+    let platform = xpack_core::Platform::host().map_err(|e| e.to_string())?;
+    let mut update =
+        serde_json::json!({ "url": url.replace(PLATFORM_PLACEHOLDER, &platform.to_string()) });
+    if let Some(channel) = &settings.update_channel {
+        update["channel"] = channel.clone().into();
+    }
+    Ok(Some(update))
+}
+
+/// What `update-url` names the platform being built with.
+const PLATFORM_PLACEHOLDER: &str = "{platform}";
 
 /// `path`, when it names something inside the package directory.
 fn inside_the_package(path: &Path, what: &str) -> Result<PathBuf> {
@@ -415,6 +458,9 @@ fn project_file(plan: &Plan, package: &Package) -> serde_json::Value {
             .iter()
             .map(|name| serde_json::json!({ "name": name, "executable": format!("bin/{}", executable(name)) }))
             .collect();
+    }
+    if let Some(update) = &plan.update {
+        project["update"] = update.clone();
     }
     if let Some(icon) = &plan.icon {
         // The manifest names payload files with forward slashes everywhere.
