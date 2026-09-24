@@ -1068,3 +1068,76 @@ fn a_failure_nobody_can_read_keeps_its_exit_code() {
     let status = run_unread(&fixture, &["install", &package]);
     assert_eq!(status.code(), Some(3), "{status:?}");
 }
+
+/// Writes a payload whose manifest names `command`, and packs it.
+fn pack_with_command(fixture: &Fixture, command: &str) -> Output {
+    fixture.write_payload("1.0.0", 0);
+    let config = fixture.path().join("xpack-1.0.0.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let text = text.replace(r#""launch":{"#, r#""launch":{"keepWorkingDirectory":true,"#).replacen(
+        '{',
+        &format!(r#"{{"command":{{"name":"{command}"}},"#),
+        1,
+    );
+    std::fs::write(&config, text).unwrap();
+    fixture.run(&[
+        "pack",
+        "payload-1.0.0",
+        "--config",
+        "xpack-1.0.0.json",
+        "--key",
+        "signing.json",
+        "--out",
+        "demo-1.0.0.xpkg",
+    ])
+}
+
+#[test]
+fn a_command_line_tool_can_be_typed_by_name_once_installed() {
+    // The whole path a publisher and a user take: name the command, pack,
+    // install, type it from anywhere, uninstall. Unix only: on Windows this
+    // would edit the real user's PATH.
+    if cfg!(not(unix)) {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let pack = pack_with_command(&fixture, "demo-tool");
+    assert!(pack.status.success(), "{}", stderr(&pack));
+
+    let home = fixture.path().join("home");
+    let with_home = |args: &[&str]| {
+        Command::new(xpack())
+            .current_dir(fixture.path())
+            .arg("--root")
+            .arg(fixture.root())
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let install = with_home(&["install", "demo-1.0.0.xpkg", "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    let command = home.join(".local/bin/demo-tool");
+    assert!(command.is_file(), "no command at {}", command.display());
+
+    let elsewhere = fixture.path().join("where-the-user-is");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let run = Command::new(&command).current_dir(&elsewhere).arg("build").output().unwrap();
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(stdout(&run).contains("running 1.0.0 args=build"), "{}", stdout(&run));
+    assert_eq!(reported_cwd(&run), std::fs::canonicalize(&elsewhere).unwrap());
+
+    let uninstall = with_home(&["uninstall", "com.example.demo", "--yes"]);
+    assert!(uninstall.status.success(), "{}", stderr(&uninstall));
+    assert!(!command.exists(), "the command outlived its application");
+}
+
+#[test]
+fn a_command_name_that_could_escape_its_directory_is_refused_at_pack_time() {
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let pack = pack_with_command(&fixture, "../evil");
+    assert!(!pack.status.success(), "a bad command name was packed");
+    assert!(stderr(&pack).contains("command.name"), "{}", stderr(&pack));
+}

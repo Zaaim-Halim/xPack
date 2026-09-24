@@ -203,9 +203,26 @@ replaces with the installed version directory:
 }
 ```
 
-The executable needs nothing: it is always found inside the package. Either
-setting makes the package format 2, which installations made with xPack 0.1.0
-cannot install or update to.
+The executable needs nothing: it is always found inside the package.
+
+**To let users type it by name**, give it a command:
+
+```json
+"command": { "name": "mytool" }
+```
+
+The installer then offers "Add “mytool” to the command line", ticked unless
+`"pathDefault": false` is set in the installer settings, and `--no-path`
+declines it in a silent install. On macOS and Linux it becomes a small script
+in `~/.local/bin`; the installer says so when that directory is not on the
+user's `PATH`. On Windows the installation's own `bin` directory is added to
+the user's `PATH`. A `mytool` that belongs to another program is never
+replaced, and uninstalling removes the command. Names are lowercase letters,
+digits, `.`, `_` and `-`.
+
+`keepWorkingDirectory`, `{versionDir}` and `command` each make the package
+format 2, which installations made with xPack 0.1.0 cannot install or update
+to.
 
 The platform defaults to the machine you build on; `xpack pack --platform
 windows-x64` builds for another.

@@ -4,7 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use xpack_core::manifest::{
-    Application, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec, UpdateSpec,
+    Application, CommandSpec, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec,
+    UpdateSpec,
 };
 use xpack_core::{Manifest, Platform, Result, atomic};
 
@@ -33,6 +34,9 @@ pub(crate) struct ProjectConfig {
     /// How the application appears in the user's desktop environment.
     #[serde(default)]
     pub(crate) desktop: DesktopSpec,
+    /// The command a terminal starts the application by, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command: Option<CommandSpec>,
 }
 
 impl ProjectConfig {
@@ -60,7 +64,7 @@ impl ProjectConfig {
             signing_key: None,
             payload: PayloadSpec::default(),
             created_at: None,
-            command: None,
+            command: self.command.clone(),
         };
         manifest.format_version = manifest.required_format_version();
         manifest
