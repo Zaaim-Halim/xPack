@@ -116,6 +116,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let out = dir.join(format!("demo-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

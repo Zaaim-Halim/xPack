@@ -50,7 +50,10 @@ fn wizard(licence: bool, launch: bool, taken: bool) -> Wizard {
             "Demo licence.\n\nYou may use this demo for trying the installer.\n".repeat(12)
         }),
         shortcut_requested: true,
-        command: Some(CommandOffer { name: "demo".into(), taken }),
+        command: Some(CommandOffer {
+            names: vec!["demo".into(), "demo-helper".into()],
+            taken: if taken { vec!["demo-helper".into()] } else { Vec::new() },
+        }),
         root: PathBuf::from("/Users/demo/Applications/xPack"),
         root_fixed: false,
         log: Some(PathBuf::from("/tmp/xpack-installer.log")),

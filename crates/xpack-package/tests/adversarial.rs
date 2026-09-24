@@ -60,6 +60,7 @@ fn template(platform: Platform) -> Manifest {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     }
 }
 

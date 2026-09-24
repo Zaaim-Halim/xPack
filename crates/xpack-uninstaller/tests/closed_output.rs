@@ -54,6 +54,7 @@ fn install(root: &Path) -> InstallPaths {
         signing_key: None,
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let key = KeyPair::generate().unwrap();
     let package = root.join("app.xpkg");

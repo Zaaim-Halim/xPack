@@ -159,9 +159,9 @@ pub struct Outcome {
     pub desktop: xpack_install::DesktopOutcome,
     /// What happened to the command, if the package asked for one.
     pub command: xpack_install::DesktopOutcome,
-    /// What the user types to start the application, when a command was put
-    /// in place.
-    pub command_name: Option<String>,
+    /// What the user types to start the application and its companions: the
+    /// commands put in place, main one first.
+    pub command_names: Vec<String>,
     /// Where the command was put, when a terminal started the way this
     /// installer was would not look there.
     ///
@@ -372,20 +372,28 @@ impl VerifiedPayload {
         self.icon.as_ref()
     }
 
-    /// Whether another program already owns the name of the command this
-    /// package names, for the current user. `None` when it names none.
+    /// The commands this package names, main one first, each with whether
+    /// another program already owns its name for the current user. Empty when
+    /// it names none.
     ///
-    /// Asked before installing, so a wizard can show the box unusable with
-    /// the reason rather than tick it and quietly not deliver.
-    pub fn command_taken(&self, root: &Path) -> Option<bool> {
+    /// Asked before installing, so a wizard can say which will be left out
+    /// rather than tick a box and quietly not deliver.
+    pub fn command_availability(&self, root: &Path) -> Vec<(String, bool)> {
         use xpack_install::integration::command::{self, Availability, CommandRoots};
-        let paths = self.paths(root).ok()?;
-        // The names only decide which launcher the command runs, not where it
+        let (Ok(paths), Some(roots)) = (self.paths(root), CommandRoots::host()) else {
+            return Vec::new();
+        };
+        // The names only decide which launcher a command runs, not where it
         // goes, so the ones a new installation would get are good enough.
         let names = xpack_core::BinaryNames::from_display_name(&self.manifest().application.name);
-        let wanted = command::Command::from_manifest(self.manifest(), &paths, &names)?;
-        let roots = CommandRoots::host()?;
-        Some(matches!(command::availability(&wanted, &roots), Availability::Foreign(_)))
+        command::Command::all_from_manifest(self.manifest(), &paths, &names)
+            .into_iter()
+            .map(|wanted| {
+                let taken =
+                    matches!(command::availability(&wanted, &roots), Availability::Foreign(_));
+                (wanted.name, taken)
+            })
+            .collect()
     }
 
     /// The application's own directory under `root`.
@@ -465,15 +473,27 @@ impl VerifiedPayload {
             activated: installed.activated,
             launcher: launcher_to_report(&paths, &names),
             desktop: installed.desktop,
-            command_name: installed
-                .command
-                .is_done()
-                .then(|| self.manifest.command.as_ref().map(|c| c.name.clone()))
-                .flatten(),
+            command_names: added_commands(&installed.command),
             command_off_path: command_off_path(&installed.command),
             command: installed.command,
         })
     }
+}
+
+/// The names of the commands an outcome put in place: each is a file named
+/// after its command, with `.exe` on Windows.
+fn added_commands(outcome: &xpack_install::DesktopOutcome) -> Vec<String> {
+    let xpack_install::DesktopOutcome::Done(paths) = outcome else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| {
+            let name = name.to_string_lossy();
+            name.strip_suffix(".exe").unwrap_or(&name).to_string()
+        })
+        .collect()
 }
 
 /// The directory a new command went into, if a terminal would not look there.

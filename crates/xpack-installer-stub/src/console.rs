@@ -133,8 +133,11 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
 /// Says how to start the application from a terminal, or why that was not set
 /// up, when the package asked for a command.
 fn report_command(outcome: &xpack_installer::Outcome, manifest: &xpack_core::Manifest) {
-    if let Some(name) = &outcome.command_name {
+    if let Some((name, others)) = outcome.command_names.split_first() {
         xpack_core::outln!("Or type:       {name}   (in a new terminal window)");
+        if !others.is_empty() {
+            xpack_core::outln!("Also:          {}", others.join(", "));
+        }
         if let Some(dir) = &outcome.command_off_path {
             xpack_core::outln!();
             xpack_core::outln!(

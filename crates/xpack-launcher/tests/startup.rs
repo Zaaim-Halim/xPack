@@ -150,6 +150,7 @@ fn build_all(
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let out = dir.join(format!("app-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();
@@ -382,6 +383,7 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let package = world.dir.path().join("probation.xpkg");
     PackageBuilder::new(&world.dir.path().join("src-1.1.0"), manifest)
@@ -469,6 +471,7 @@ fn each_probationary_start_is_counted_before_the_application_runs() {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let package = world.dir.path().join("counted.xpkg");
     PackageBuilder::new(&world.dir.path().join("src-1.1.0"), manifest)
@@ -542,6 +545,7 @@ fn arguments_reach_the_application_unchanged() {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let package = dir.join("args.xpkg");
     PackageBuilder::new(&dir.join("src-args"), manifest).build(&package, &world.key).unwrap();
@@ -617,6 +621,27 @@ fn a_commands_copy_of_the_launcher_serves_the_installation_above_it() {
     std::fs::write(&copy, b"").unwrap();
 
     assert_eq!(xpack_launcher::launcher::application_dir_for(&copy).unwrap(), app_dir);
+}
+
+#[test]
+fn a_launcher_knows_which_command_it_was_started_as() {
+    use xpack_launcher::launcher::requested_command;
+    let root = std::path::Path::new("/apps/com.example.app");
+
+    // Windows: the copy's own name, whatever the environment says.
+    let copy = root.join("bin").join("cargo-xpack.exe");
+    assert_eq!(requested_command(&copy, Some("xpack".into())).as_deref(), Some("cargo-xpack"));
+
+    // Unix: the script names itself.
+    let launcher = root.join("xPack");
+    assert_eq!(
+        requested_command(&launcher, Some("cargo-xpack".into())).as_deref(),
+        Some("cargo-xpack")
+    );
+
+    // Neither: an ordinary start.
+    assert_eq!(requested_command(&launcher, None), None);
+    assert_eq!(requested_command(&launcher, Some("".into())), None);
 }
 
 #[cfg(unix)]
@@ -857,6 +882,7 @@ fn build_mandatory(dir: &Path, key: &KeyPair, version: &str, behaviour: Behaviou
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let out = dir.join(format!("mandatory-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

@@ -17,7 +17,7 @@ fn main() -> std::process::ExitCode {
     xpack_core::outln!("running {version} args={}", arguments.join(" "));
 
     // Reported so a test can prove the launcher passed them through.
-    for key in ["XPACK_HEALTH_FILE", "XPACK_APPLICATION_DIR"] {
+    for key in ["XPACK_HEALTH_FILE", "XPACK_APPLICATION_DIR", "XPACK_COMMAND"] {
         xpack_core::outln!("{key}={}", std::env::var(key).unwrap_or_default());
     }
     // And where it was started, which the manifest decides.

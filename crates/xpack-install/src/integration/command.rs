@@ -102,6 +102,67 @@ impl Command {
     }
 }
 
+impl Command {
+    /// Every command a manifest asks for: the main one first, then the extra
+    /// ones. All run the same launcher, which starts the program each names.
+    pub fn all_from_manifest(
+        manifest: &Manifest,
+        paths: &InstallPaths,
+        names: &BinaryNames,
+    ) -> Vec<Self> {
+        let launcher = absolute(&paths.launcher_file_named(names));
+        let command_dir = absolute(&paths.command_dir());
+        manifest
+            .command
+            .iter()
+            .map(|command| command.name.clone())
+            .chain(manifest.commands.iter().map(|extra| extra.name.clone()))
+            .map(|name| Self {
+                application_id: manifest.application.id.clone(),
+                name,
+                launcher: launcher.clone(),
+                command_dir: command_dir.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Puts every one of `commands` in place.
+///
+/// One that cannot be, because another program owns its name, does not stop
+/// the others. Done when any was, with the rest logged; failed only when none
+/// could be.
+pub fn install_all(commands: &[Command], roots: &CommandRoots) -> Outcome {
+    combine(commands.iter().map(|command| install(command, roots)))
+}
+
+/// Removes every one of `commands` that is ours.
+pub fn remove_all(commands: &[Command], roots: &CommandRoots) -> Outcome {
+    combine(commands.iter().map(|command| remove(command, roots)))
+}
+
+fn combine(outcomes: impl Iterator<Item = Outcome>) -> Outcome {
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Done(paths) => done.extend(paths),
+            Outcome::Failed(reason) => failed.push(reason),
+            _ => {}
+        }
+    }
+    if !done.is_empty() {
+        for reason in &failed {
+            tracing::warn!(reason, "a command was left out; the others are in place");
+        }
+        Outcome::Done(done)
+    } else if !failed.is_empty() {
+        Outcome::Failed(failed.join("; "))
+    } else {
+        Outcome::NothingToDo
+    }
+}
+
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -156,11 +217,14 @@ pub fn ownership_mark(application_id: &str) -> String {
 ///
 /// `exec`, so the launcher replaces the shell rather than running under it:
 /// its exit status, its signals and its process are the ones the user's
-/// terminal sees.
+/// terminal sees. Each script names the command it is, so the launcher starts
+/// that command's program; see [`xpack_core::paths::COMMAND_ENV`].
 pub fn script(command: &Command) -> String {
     format!(
-        "#!/bin/sh\n{}\nexec {} \"$@\"\n",
+        "#!/bin/sh\n{}\n{}={} exec {} \"$@\"\n",
         ownership_mark(&command.application_id),
+        xpack_core::paths::COMMAND_ENV,
+        shell_quote(&command.name),
         shell_quote(&command.launcher.to_string_lossy())
     )
 }
@@ -311,7 +375,20 @@ mod imp {
         }
     }
 
+    /// Removes this command's copy, and the directory and its `PATH` entry
+    /// once no other command of the application is left in it.
     pub(super) fn remove(command: &Command, roots: &CommandRoots) -> Outcome {
+        let copy = command.command_dir.join(format!("{}.exe", command.name));
+        let removed = copy.exists();
+        if let Err(error) = xpack_core::atomic::remove_file_if_exists(&copy) {
+            return Outcome::Failed(error.to_string());
+        }
+        let others_left = std::fs::read_dir(&command.command_dir)
+            .is_ok_and(|mut entries| entries.next().is_some());
+        if others_left {
+            return if removed { Outcome::Done(vec![copy]) } else { Outcome::NothingToDo };
+        }
+
         let dir = command.command_dir.to_string_lossy();
         let changed = match edit_path(&roots.environment_key, |value| path_without(value, &dir)) {
             Ok(changed) => changed,
@@ -323,11 +400,7 @@ mod imp {
         if let Err(error) = xpack_core::atomic::remove_dir_all_if_exists(&command.command_dir) {
             return Outcome::Failed(error.to_string());
         }
-        if changed {
-            Outcome::Done(vec![command.command_dir.clone()])
-        } else {
-            Outcome::NothingToDo
-        }
+        if removed || changed { Outcome::Done(vec![copy]) } else { Outcome::NothingToDo }
     }
 
     /// Rewrites the `Path` value under `key` with `edit`, keeping its type.
@@ -386,7 +459,8 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "#!/bin/sh");
         assert_eq!(lines[1], ownership_mark("com.example.tool"));
-        assert_eq!(lines[2], r#"exec '/apps/com.example.tool/MyTool' "$@""#);
+        // Names itself, so the launcher starts this command's program.
+        assert_eq!(lines[2], r#"XPACK_COMMAND='mytool' exec '/apps/com.example.tool/MyTool' "$@""#);
     }
 
     #[test]
@@ -394,7 +468,7 @@ mod tests {
         // Spaces, `$`, backticks and a single quote: every one of them would
         // change what runs if the path were not quoted.
         let text = script(&command("/Users/o'neil/My $HOME/`x`/Tool"));
-        assert!(text.contains(r#"exec '/Users/o'\''neil/My $HOME/`x`/Tool' "$@""#), "{text}");
+        assert!(text.contains(r#" exec '/Users/o'\''neil/My $HOME/`x`/Tool' "$@""#), "{text}");
     }
 
     #[test]

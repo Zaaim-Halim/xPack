@@ -566,6 +566,7 @@ mod build_rule_tests {
             signing_key: None,
             created_at: None,
             command: None,
+            commands: Vec::new(),
         };
         (dir, manifest)
     }

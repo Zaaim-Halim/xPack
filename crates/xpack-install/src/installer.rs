@@ -318,7 +318,7 @@ impl<'lock> Installer<'lock> {
 
         // The command the version being replaced put in place, so one this
         // package renames or drops is taken away rather than left behind.
-        let previous_command = previous_command(paths, &state);
+        let previous_commands = previous_commands(paths, &state);
 
         // Named after the application from here on, but only for an
         // installation that has no executables yet.
@@ -433,7 +433,7 @@ impl<'lock> Installer<'lock> {
             self.update_desktop_entry(&manifest, &version, options.desktop_roots.as_ref());
         // After the binaries too: the command runs the launcher.
         let command =
-            self.update_command(&manifest, previous_command, options.command_roots.as_ref());
+            self.update_commands(&manifest, &previous_commands, options.command_roots.as_ref());
 
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
@@ -808,14 +808,14 @@ impl<'lock> Installer<'lock> {
         outcome
     }
 
-    /// Puts the command the manifest asks for in place, and takes away one
+    /// Puts the commands the manifest asks for in place, and takes away any
     /// an earlier version put there that this one renamed or dropped.
     ///
     /// Never fails the install, for the reason the desktop entry does not.
-    fn update_command(
+    fn update_commands(
         &self,
         manifest: &xpack_core::Manifest,
-        previous: Option<crate::integration::command::Command>,
+        previous: &[crate::integration::command::Command],
         roots: Option<&crate::integration::command::CommandRoots>,
     ) -> crate::integration::Outcome {
         use crate::integration::{Outcome, command};
@@ -824,30 +824,33 @@ impl<'lock> Installer<'lock> {
             return Outcome::Failed("no home directory for the current user".to_string());
         };
         let paths = self.lock.paths();
-        let wanted = command::Command::from_manifest(manifest, paths, &self.binary_names());
+        let wanted = command::Command::all_from_manifest(manifest, paths, &self.binary_names());
 
-        if let Some(previous) = previous
-            && wanted.as_ref().is_none_or(|wanted| wanted.name != previous.name)
-        {
-            command::remove(&previous, &roots).log("remove the previous command");
+        let dropped: Vec<command::Command> = previous
+            .iter()
+            .filter(|old| !wanted.iter().any(|new| new.name == old.name))
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            command::remove_all(&dropped, &roots).log("remove the previous commands");
         }
 
-        let Some(wanted) = wanted else {
+        if wanted.is_empty() {
             return Outcome::NotRequested;
-        };
+        }
         if crate::integration::is_declined_at(&command::preference_file(paths)) {
-            tracing::info!("the user declined the command; none is put in place");
+            tracing::info!("the user declined the commands; none is put in place");
             return Outcome::NotRequested;
         }
-        // The script and the Windows copy both run the console launcher; a
+        // The scripts and the Windows copies all run the console launcher; a
         // command that names a missing one would fail every time it is typed.
-        if !wanted.launcher.is_file() {
+        if !wanted[0].launcher.is_file() {
             return Outcome::Failed(format!(
-                "{} is not installed, so the command would run nothing",
-                wanted.launcher.display()
+                "{} is not installed, so the commands would run nothing",
+                wanted[0].launcher.display()
             ));
         }
-        let outcome = command::install(&wanted, &roots);
+        let outcome = command::install_all(&wanted, &roots);
         outcome.log("command");
         outcome
     }
@@ -1172,7 +1175,7 @@ pub fn uninstall_into(
     // there is nothing left to read it from, and the entry is orphaned in the
     // user's menu with no way to find it again.
     let desktop_entry = desktop_entry_for_removal(&lock);
-    let command = command_for_removal(&lock);
+    let commands = commands_for_removal(&lock);
 
     // Cleared and persisted before anything is deleted, so an interruption
     // cannot leave state describing versions that no longer exist.
@@ -1234,16 +1237,16 @@ pub fn uninstall_into(
         }
         None => crate::integration::Outcome::NothingToDo,
     };
-    let command = match (&command, command_roots.cloned().or_else(CommandRoots::host)) {
-        (Some(command), Some(roots)) => {
-            let outcome = crate::integration::command::remove(command, &roots);
+    let command = match (commands.is_empty(), command_roots.cloned().or_else(CommandRoots::host)) {
+        (true, _) => crate::integration::Outcome::NothingToDo,
+        (false, Some(roots)) => {
+            let outcome = crate::integration::command::remove_all(&commands, &roots);
             outcome.log("uninstall");
             outcome
         }
-        (Some(_), None) => crate::integration::Outcome::Failed(
+        (false, None) => crate::integration::Outcome::Failed(
             "no home directory for the current user".to_string(),
         ),
-        (None, _) => crate::integration::Outcome::NothingToDo,
     };
 
     // Releases the lock and closes the handle to the file inside `state/`.
@@ -1289,25 +1292,42 @@ fn resolve_entry_target(
 }
 
 /// The command the active version put in place, if it asked for one.
-fn previous_command(
+fn previous_commands(
     paths: &xpack_core::InstallPaths,
     state: &InstallState,
-) -> Option<crate::integration::command::Command> {
-    let version = state.current_version.as_ref()?;
-    let bytes = std::fs::read(paths.version_manifest_file(version)).ok()?;
-    let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
-    crate::integration::command::Command::from_manifest(&manifest, paths, &state.binary_names())
+) -> Vec<crate::integration::command::Command> {
+    let Some(version) = state.current_version.as_ref() else {
+        return Vec::new();
+    };
+    let Some(manifest) = std::fs::read(paths.version_manifest_file(version))
+        .ok()
+        .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    crate::integration::command::Command::all_from_manifest(&manifest, paths, &state.binary_names())
 }
 
-/// Rebuilds the command an installation would have put in place.
-fn command_for_removal(lock: &InstallLock) -> Option<crate::integration::command::Command> {
+/// Rebuilds the commands an installation would have put in place.
+fn commands_for_removal(lock: &InstallLock) -> Vec<crate::integration::command::Command> {
     let paths = lock.paths();
-    let id = paths.application_id()?;
-    let state = lock.load_or_new_state(id).ok()?;
-    let version = state.current_version.clone().or_else(|| state.previous_version.clone())?;
-    let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
-    let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
-    crate::integration::command::Command::from_manifest(&manifest, paths, &state.binary_names())
+    let Some(id) = paths.application_id() else {
+        return Vec::new();
+    };
+    let Ok(state) = lock.load_or_new_state(id) else {
+        return Vec::new();
+    };
+    let Some(version) = state.current_version.clone().or_else(|| state.previous_version.clone())
+    else {
+        return Vec::new();
+    };
+    let Some(manifest) = std::fs::read(paths.version_manifest_file(&version))
+        .ok()
+        .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    crate::integration::command::Command::all_from_manifest(&manifest, paths, &state.binary_names())
 }
 
 /// Rebuilds the desktop entry an installation would have created.
@@ -1379,6 +1399,7 @@ mod tests {
             payload: PayloadSpec::default(),
             created_at: None,
             command: None,
+            commands: Vec::new(),
         }
     }
 

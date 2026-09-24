@@ -56,6 +56,7 @@ fn install(dir: &Path, url: &str) -> InstallPaths {
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let key = KeyPair::generate().unwrap();
     let package = dir.join("demo.xpkg");

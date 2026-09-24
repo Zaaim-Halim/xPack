@@ -950,6 +950,7 @@ mod tests {
             payload: PayloadSpec::default(),
             created_at: None,
             command: None,
+            commands: Vec::new(),
         }
     }
 }

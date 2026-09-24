@@ -66,9 +66,14 @@ pub(crate) fn run(args: &Args, log: Option<std::path::PathBuf>) -> Option<ExitCo
     if args.no_path {
         plan.path_default = false;
     }
-    let command = manifest.command.as_ref().map(|command| CommandOffer {
-        name: command.name.clone(),
-        taken: payload.command_taken(&root).unwrap_or(false),
+    let availability = payload.command_availability(&root);
+    let command = (!availability.is_empty()).then(|| CommandOffer {
+        names: availability.iter().map(|(name, _)| name.clone()).collect(),
+        taken: availability
+            .iter()
+            .filter(|(_, taken)| *taken)
+            .map(|(name, _)| name.clone())
+            .collect(),
     });
     let spec = WizardSpec {
         flavour,

@@ -356,6 +356,42 @@ impl Launcher {
     ///
     /// Using the recorded manifest rather than re-reading a package means the
     /// launch matches exactly what was verified at install time.
+    /// Starts one of the application's extra commands, when `name` is one.
+    ///
+    /// The active version's program for that command, with the application's
+    /// environment and working-directory rules but not its launch arguments,
+    /// which belong to the main program. Waits for it and returns its exit
+    /// status.
+    ///
+    /// `None` when `name` is not an extra command of the active version: the
+    /// main command, or one an update has dropped. The caller then starts the
+    /// application as usual. An extra command never takes part in an update's
+    /// probation; the application's own start decides that.
+    pub fn run_command(&self, name: &str, arguments: &[String]) -> Result<Option<Option<i32>>> {
+        // Read without the lock, as the executables' names are: only the
+        // active version is needed, and the state is replaced atomically.
+        let state =
+            xpack_core::store::load::<xpack_core::InstallState>(&self.paths.state_file())?.value;
+        let version = state.active()?.clone();
+        let manifest = self.read_manifest(&version)?;
+        let Some(extra) = manifest.commands.iter().find(|extra| extra.name == name) else {
+            return Ok(None);
+        };
+        let spec = xpack_core::LaunchSpec {
+            executable: extra.executable.clone(),
+            arguments: Vec::new(),
+            ..manifest.launch.clone()
+        };
+        let request = LaunchRequest::new(self.paths.version_dir(&version), spec)
+            .with_user_arguments(arguments.to_vec())
+            .with_launcher_environment(
+                APPLICATION_DIR_ENV,
+                self.paths.root().display().to_string(),
+            );
+        let status = launch(&request)?.wait().map_err(|e| Error::Launch(e.to_string()))?;
+        Ok(Some(status.code()))
+    }
+
     fn read_manifest(&self, version: &Version) -> Result<Manifest> {
         let path = self.paths.version_manifest_file(version);
         let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
@@ -439,6 +475,28 @@ fn installed_binary_names(paths: &InstallPaths) -> xpack_core::BinaryNames {
 /// [`InstallPaths::application_dir_of`].
 pub fn application_dir_for(executable: &Path) -> Result<PathBuf> {
     InstallPaths::application_dir_of(executable)
+}
+
+/// The command this launcher was started as, if it was started as one.
+///
+/// A launcher in the installation's command directory is a Windows command,
+/// named after it; its own name is the answer, whatever the environment says.
+/// Anywhere else, a command's script says so in [`COMMAND_ENV`]. `None` means
+/// an ordinary start, from a shortcut or the launcher's own path.
+///
+/// [`COMMAND_ENV`]: xpack_core::paths::COMMAND_ENV
+pub fn requested_command(
+    executable: &Path,
+    environment: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let in_command_dir = executable
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == xpack_core::paths::COMMAND_DIR);
+    if in_command_dir {
+        return executable.file_stem().map(|stem| stem.to_string_lossy().into_owned());
+    }
+    environment.map(|value| value.to_string_lossy().into_owned()).filter(|value| !value.is_empty())
 }
 
 /// Starts the background updater, detached, and does not wait for it.

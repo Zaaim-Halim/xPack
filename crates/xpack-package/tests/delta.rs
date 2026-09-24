@@ -64,6 +64,7 @@ fn manifest(version: &str) -> Manifest {
         signing_key: None,
         created_at: None,
         command: None,
+        commands: Vec::new(),
     }
 }
 

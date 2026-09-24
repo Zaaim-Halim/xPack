@@ -4,8 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use xpack_core::manifest::{
-    Application, CommandSpec, DesktopSpec, FormatVersion, HealthSpec, LaunchSpec, PayloadSpec,
-    UpdateSpec,
+    Application, CommandSpec, DesktopSpec, ExtraCommand, FormatVersion, HealthSpec, LaunchSpec,
+    PayloadSpec, UpdateSpec,
 };
 use xpack_core::{Manifest, Platform, Result, atomic};
 
@@ -37,6 +37,9 @@ pub(crate) struct ProjectConfig {
     /// The command a terminal starts the application by, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) command: Option<CommandSpec>,
+    /// Further commands, each starting another program the package ships.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) commands: Vec<ExtraCommand>,
 }
 
 impl ProjectConfig {
@@ -65,6 +68,7 @@ impl ProjectConfig {
             payload: PayloadSpec::default(),
             created_at: None,
             command: self.command.clone(),
+            commands: self.commands.clone(),
         };
         manifest.format_version = manifest.required_format_version();
         manifest

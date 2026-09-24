@@ -49,6 +49,7 @@ fn build_installer(dir: &Path) -> PathBuf {
         signing_key: None,
         created_at: None,
         command: Some(xpack_core::CommandSpec { name: "mytool".into() }),
+        commands: Vec::new(),
     };
     let package = dir.join("tool.xpkg");
     PackageBuilder::new(&source, manifest).build(&package, &key).unwrap();

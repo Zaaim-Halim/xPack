@@ -70,6 +70,7 @@ fn build_package_with(
         signing_key: None,
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
 
     let out = dir.join("app.xpkg");

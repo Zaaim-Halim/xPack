@@ -101,6 +101,31 @@ pub fn run() -> ExitCode {
         format: xpack_log::Format::Text,
     });
 
+    // One of the application's extra commands runs its own program, and
+    // nothing else of an ordinary start applies to it.
+    let executable = std::env::current_exe().unwrap_or_default();
+    let requested = crate::launcher::requested_command(
+        &executable,
+        std::env::var_os(xpack_core::paths::COMMAND_ENV),
+    );
+    if let Some(name) = requested {
+        match launcher.run_command(&name, &arguments) {
+            Ok(Some(code)) => {
+                return match code {
+                    Some(0) => ExitCode::SUCCESS,
+                    Some(code) => u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from),
+                    None => ExitCode::FAILURE,
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, command = %name, "the command could not be started");
+                xpack_core::errln!("{name}: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     // Started before the application, so a slow network never delays opening
     // it, and deliberately not waited on. Whatever it finds takes effect the
     // next time the application starts.

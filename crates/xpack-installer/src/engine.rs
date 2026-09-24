@@ -34,7 +34,7 @@ impl Engine for VerifiedPayload {
             directory: outcome.root,
             version: outcome.version,
             shortcut_added: matches!(outcome.desktop, DesktopOutcome::Done(_)),
-            command: outcome.command_name,
+            command: outcome.command_names.first().cloned(),
             command_off_path: outcome.command_off_path,
         })
     }

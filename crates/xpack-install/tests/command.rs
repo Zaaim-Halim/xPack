@@ -62,10 +62,21 @@ impl World {
         command: Option<&str>,
         options: &InstallOptions,
     ) -> xpack_core::Result<Installed> {
+        self.install_with(version, command, &[], options)
+    }
+
+    fn install_with(
+        &self,
+        version: &str,
+        command: Option<&str>,
+        extras: &[&str],
+        options: &InstallOptions,
+    ) -> xpack_core::Result<Installed> {
         let lock = InstallLock::acquire(&self.paths).unwrap();
         let source = self.dir.path().join(format!("build-{version}"));
         std::fs::create_dir_all(&source).unwrap();
-        let package = common::build_package_commanding(&source, &self.key, version, command);
+        let package =
+            common::build_package_with_commands(&source, &self.key, version, command, extras);
         let mut verified = xpack_install::open_and_verify(
             &package,
             &lock,
@@ -266,6 +277,57 @@ mod unix {
     }
 
     #[test]
+    fn every_command_goes_in_place_and_names_itself() {
+        let world = World::new();
+        let installed = world
+            .install_with("1.0.0", Some("mytool"), &["mytool-helper"], &world.options(None))
+            .unwrap();
+        assert_eq!(created(&installed.command).len(), 2);
+        for name in ["mytool", "mytool-helper"] {
+            let text = std::fs::read_to_string(script(&world, name)).unwrap();
+            assert!(text.contains(&format!("XPACK_COMMAND='{name}' exec")), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_taken_name_leaves_out_that_command_and_no_other() {
+        let world = World::new();
+        std::fs::create_dir_all(&world.roots.bin).unwrap();
+        std::fs::write(script(&world, "mytool-helper"), "#!/bin/sh\necho theirs\n").unwrap();
+
+        let installed = world
+            .install_with("1.0.0", Some("mytool"), &["mytool-helper"], &world.options(None))
+            .unwrap();
+        assert_eq!(created(&installed.command), vec![script(&world, "mytool")]);
+        assert_eq!(
+            std::fs::read_to_string(script(&world, "mytool-helper")).unwrap(),
+            "#!/bin/sh\necho theirs\n"
+        );
+    }
+
+    #[test]
+    fn an_update_that_drops_an_extra_command_takes_only_it_away() {
+        let world = World::new();
+        world
+            .install_with("1.0.0", Some("mytool"), &["mytool-helper"], &world.options(None))
+            .unwrap();
+        world.install("1.1.0", Some("mytool"), &world.options(None)).unwrap();
+        assert!(script(&world, "mytool").is_file());
+        assert!(!script(&world, "mytool-helper").exists(), "the dropped command was left behind");
+    }
+
+    #[test]
+    fn uninstalling_takes_every_command_away() {
+        let world = World::new();
+        world
+            .install_with("1.0.0", Some("mytool"), &["mytool-helper"], &world.options(None))
+            .unwrap();
+        world.uninstall();
+        assert!(!script(&world, "mytool").exists());
+        assert!(!script(&world, "mytool-helper").exists());
+    }
+
+    #[test]
     fn uninstalling_takes_the_command_away() {
         let world = World::new();
         world.install("1.0.0", Some("mytool"), &world.options(None)).unwrap();
@@ -336,6 +398,28 @@ mod windows {
         // unexpanded.
         world.uninstall();
         assert_eq!(path_value(&world).unwrap(), (RegType::REG_EXPAND_SZ, before.to_string()));
+    }
+
+    #[test]
+    fn several_commands_share_one_path_entry_until_the_last_is_gone() {
+        let world = World::new();
+        let _cleanup = Cleanup(world.roots.environment_key.clone());
+        world
+            .install_with("1.0.0", Some("mytool"), &["mytool-helper"], &world.options(None))
+            .unwrap();
+        let dir = world.paths.command_dir();
+        assert!(dir.join("mytool.exe").is_file());
+        assert!(dir.join("mytool-helper.exe").is_file());
+        let with_both = path_value(&world).unwrap().1;
+
+        // Dropping one leaves the other, the directory and the PATH entry.
+        world.install("1.1.0", Some("mytool"), &world.options(None)).unwrap();
+        assert!(!dir.join("mytool-helper.exe").exists());
+        assert!(dir.join("mytool.exe").is_file());
+        assert_eq!(path_value(&world).unwrap().1, with_both);
+
+        world.uninstall();
+        assert_eq!(path_value(&world).unwrap().1, "");
     }
 
     #[test]

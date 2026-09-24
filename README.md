@@ -220,9 +220,21 @@ the user's `PATH`. A `mytool` that belongs to another program is never
 replaced, and uninstalling removes the command. Names are lowercase letters,
 digits, `.`, `_` and `-`.
 
+**A companion tool** that ships in the same package gets a command of its own,
+starting its own program:
+
+```json
+"commands": [{ "name": "mytool-helper", "executable": "bin/mytool-helper" }]
+```
+
+It is offered, declined and removed together with the main command, and runs
+with the same environment and working-directory rules. A name another program
+owns is left out; the others are still added.
+
 `keepWorkingDirectory`, `{versionDir}` and `command` each make the package
 format 2, which installations made with xPack 0.1.0 cannot install or update
-to.
+to; `commands` makes it format 3, which installations made with 0.2.0 or earlier
+cannot install or update to.
 
 The platform defaults to the machine you build on; `xpack pack --platform
 windows-x64` builds for another.

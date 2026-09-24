@@ -60,6 +60,7 @@ fn build(dir: &Path, key: &KeyPair, version: &str, update: UpdateSpec) -> PathBu
         payload: PayloadSpec::default(),
         created_at: None,
         command: None,
+        commands: Vec::new(),
     };
     let out = dir.join(format!("app-{version}.xpkg"));
     xpack_package::PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

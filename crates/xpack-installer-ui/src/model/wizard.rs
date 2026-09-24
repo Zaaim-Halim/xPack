@@ -45,15 +45,31 @@ pub struct WizardSpec {
     pub log: Option<PathBuf>,
 }
 
-/// The command a package names, as the wizard offers it.
+/// The commands a package names, as the wizard offers them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOffer {
-    /// What the person would type.
-    pub name: String,
-    /// Whether another program already owns that name where the command
-    /// would go. The box is then shown, unusable, with the reason: the
-    /// installer never replaces what is not its own.
-    pub taken: bool,
+    /// What the person would type: the main command first.
+    pub names: Vec<String>,
+    /// Those another program already owns where they would go. They are left
+    /// out, and said so: the installer never replaces what is not its own.
+    pub taken: Vec<String>,
+}
+
+impl CommandOffer {
+    /// The names that will be added, when the box is ticked.
+    fn free(&self) -> Vec<&str> {
+        self.names.iter().filter(|name| !self.taken.contains(name)).map(String::as_str).collect()
+    }
+}
+
+/// `“a”`, `“a” and “b”`, `“a”, “b” and “c”`.
+fn quoted_list(names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("\u{201c}{name}\u{201d}")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Whether a control is drawn, and whether it can be used.
@@ -318,27 +334,34 @@ impl Wizard {
     ///
     /// Hidden unless the package names a command, and on the same terms as
     /// the shortcut box: only on a first installation. Drawn but unusable
-    /// when another program owns the name, so the person sees why their
-    /// command will not be added rather than wondering where it went.
+    /// when another program owns every name, so the person sees why nothing
+    /// will be added rather than wondering where it went.
     pub fn command_visibility(&self) -> Visibility {
         match &self.command_offer {
-            Some(offer) if self.is_first_install() => Visibility::enabled_if(!offer.taken),
+            Some(offer) if self.is_first_install() => {
+                Visibility::enabled_if(!offer.free().is_empty())
+            }
             _ => Visibility::Hidden,
         }
     }
 
-    /// The command box's label, when it is drawn.
+    /// The command box's label, when it is drawn: every name it offers.
     pub fn command_label(&self) -> Option<String> {
         let offer = self.command_offer.as_ref()?;
-        (self.command_visibility() != Visibility::Hidden)
-            .then(|| self.texts.line_with(Key::LocationCommand, &[("command", &offer.name)]))
+        let names: Vec<&str> = offer.names.iter().map(String::as_str).collect();
+        (self.command_visibility() != Visibility::Hidden).then(|| {
+            self.texts.line_with(Key::LocationCommand, &[("command", &quoted_list(&names))])
+        })
     }
 
-    /// Why the command box cannot be ticked, when it cannot.
+    /// Which names are left out because another program owns them, when any
+    /// are.
     pub fn command_taken_note(&self) -> Option<String> {
         let offer = self.command_offer.as_ref()?;
-        (self.command_visibility() == Visibility::Disabled)
-            .then(|| self.texts.line_with(Key::LocationCommandTaken, &[("command", &offer.name)]))
+        let taken: Vec<&str> = offer.taken.iter().map(String::as_str).collect();
+        (self.command_visibility() != Visibility::Hidden && !taken.is_empty()).then(|| {
+            self.texts.line_with(Key::LocationCommandTaken, &[("command", &quoted_list(&taken))])
+        })
     }
 
     /// Whether the command box is ticked. Never, when it cannot be used.
@@ -656,7 +679,7 @@ impl Wizard {
             && self.command_visibility() != Visibility::Hidden
         {
             let value = if self.command() {
-                texts.line_with(Key::ReadyCommandYes, &[("command", &offer.name)])
+                texts.line_with(Key::ReadyCommandYes, &[("command", &quoted_list(&offer.free()))])
             } else {
                 texts.line(Key::ReadyCommandNo)
             };
@@ -977,7 +1000,9 @@ mod tests {
     // --- the command box -------------------------------------------------------
 
     fn commanding(taken: bool) -> WizardSpec {
-        WizardSpec { command: Some(CommandOffer { name: "mytool".into(), taken }), ..spec() }
+        let names = vec!["mytool".to_string()];
+        let taken = if taken { names.clone() } else { Vec::new() };
+        WizardSpec { command: Some(CommandOffer { names, taken }), ..spec() }
     }
 
     #[test]
@@ -992,6 +1017,56 @@ mod tests {
         assert!(wizard.command(), "ticked by default");
         wizard.set_command(false);
         assert_eq!(start_install(&mut wizard).command, Some(false));
+    }
+
+    fn offering(names: &[&str], taken: &[&str]) -> WizardSpec {
+        WizardSpec {
+            command: Some(CommandOffer {
+                names: names.iter().map(|name| (*name).to_string()).collect(),
+                taken: taken.iter().map(|name| (*name).to_string()).collect(),
+            }),
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn several_commands_share_one_box_that_names_them_all() {
+        let mut wizard =
+            wizard_with(offering(&["xpack", "cargo-xpack"], &[]), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(
+            wizard.command_label().as_deref(),
+            Some("Add \u{201c}xpack\u{201d} and \u{201c}cargo-xpack\u{201d} to the command line")
+        );
+        assert_eq!(wizard.command_taken_note(), None);
+    }
+
+    #[test]
+    fn a_taken_name_is_left_out_and_said_while_the_others_are_still_offered() {
+        let mut wizard = wizard_with(
+            offering(&["xpack", "cargo-xpack"], &["cargo-xpack"]),
+            Ok(Existing::Nothing),
+        );
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.command_visibility(), Visibility::Enabled);
+        assert!(wizard.command());
+        let note = wizard.command_taken_note().unwrap();
+        assert!(note.contains("cargo-xpack") && !note.contains("\u{201c}xpack"), "{note}");
+
+        advance_to(&mut wizard, Page::Ready);
+        let row = wizard.summary().into_iter().find(|(label, _)| label == "Command line");
+        assert_eq!(row.map(|r| r.1).as_deref(), Some("Adds \u{201c}xpack\u{201d}"));
+    }
+
+    #[test]
+    fn every_name_taken_leaves_the_box_unusable() {
+        let mut wizard = wizard_with(
+            offering(&["xpack", "cargo-xpack"], &["xpack", "cargo-xpack"]),
+            Ok(Existing::Nothing),
+        );
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.command_visibility(), Visibility::Disabled);
+        assert!(!wizard.command());
     }
 
     #[test]

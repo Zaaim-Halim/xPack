@@ -156,6 +156,10 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
         command.current_dir(directory);
     }
 
+    // xPack's own routing, meant for the launcher that read it and nobody
+    // after: an application that runs another of its commands would
+    // otherwise be taken for the command this one was started as.
+    command.env_remove(xpack_core::paths::COMMAND_ENV);
     for (key, value) in request.spec.environment_in(&version_dir) {
         command.env(key, value);
     }

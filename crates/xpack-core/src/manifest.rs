@@ -40,7 +40,8 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | --- | --- |
 /// | 1 | Everything else. |
 /// | 2 | `launch.keepWorkingDirectory`, [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values, and `command` |
-pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
+/// | 3 | `commands` |
+pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 3;
 
 /// Stands for the installed version directory in launch arguments and
 /// environment values.
@@ -260,6 +261,23 @@ fn expand_version_dir(value: &str, version_dir: &Path) -> OsString {
 pub struct CommandSpec {
     /// What the user types. See [`validate_command_name`] for what is allowed.
     pub name: String,
+}
+
+/// A further command a package offers, starting another of its programs.
+///
+/// [`CommandSpec`] starts the application, through its launch settings. An
+/// extra command starts a different executable from the same installed
+/// version: a companion tool that ships beside the main one, as `cargo-xpack`
+/// ships beside `xpack`. It runs with the application's environment and
+/// working directory rules, and is put in place, declined and removed together
+/// with the main command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtraCommand {
+    /// What the user types. The same rules as [`CommandSpec::name`].
+    pub name: String,
+    /// The program it starts, as a payload-relative path.
+    pub executable: String,
 }
 
 /// How a newly activated version proves it works.
@@ -633,6 +651,11 @@ pub struct Manifest {
     /// Requires [`FormatVersion`] 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandSpec>,
+    /// Further commands, each starting another program the package ships.
+    ///
+    /// Requires [`FormatVersion`] 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<ExtraCommand>,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -693,7 +716,9 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if self.launch.keep_working_directory
+        if !self.commands.is_empty() {
+            FormatVersion(3)
+        } else if self.launch.keep_working_directory
             || self.launch.uses_version_dir_placeholder()
             || self.command.is_some()
         {
@@ -764,6 +789,18 @@ impl Manifest {
         if let Some(command) = &self.command {
             validate_command_name(&command.name)?;
         }
+        let mut names: Vec<&str> = self.command.iter().map(|c| c.name.as_str()).collect();
+        for extra in &self.commands {
+            validate_command_name(&extra.name)?;
+            validate_relative_path("commands.executable", &extra.executable)?;
+            if names.contains(&extra.name.as_str()) {
+                return Err(Error::invalid(
+                    "commands",
+                    format!("the command name {:?} is given twice", extra.name),
+                ));
+            }
+            names.push(&extra.name);
+        }
 
         self.validate_payload()
     }
@@ -811,6 +848,21 @@ impl Manifest {
                 return Err(Error::invalid(
                     "manifest",
                     format!("desktop.icon {icon:?} is not present in the payload"),
+                ));
+            }
+        }
+
+        // Every extra command's program too, for the same reason: a command
+        // that names a missing file fails every time it is typed.
+        for extra in &self.commands {
+            let wanted = normalise_separators(&extra.executable);
+            if !self.payload.files.iter().any(|f| f.path == wanted) {
+                return Err(Error::invalid(
+                    "manifest",
+                    format!(
+                        "commands: {:?} runs {:?}, which is not present in the payload",
+                        extra.name, extra.executable
+                    ),
                 ));
             }
         }
@@ -1109,6 +1161,7 @@ mod tests {
             },
             created_at: None,
             command: None,
+            commands: Vec::new(),
         }
     }
 
@@ -1526,6 +1579,44 @@ mod tests {
         let bytes = manifest.to_signed_bytes().unwrap();
         let err = Manifest::from_slice(&bytes).unwrap_err();
         assert!(err.to_string().contains("command.name"), "{err}");
+    }
+
+    fn with_extra(name: &str, executable: &str) -> Manifest {
+        let mut manifest = sample();
+        manifest.command = Some(CommandSpec { name: "mytool".into() });
+        manifest.commands = vec![ExtraCommand { name: name.into(), executable: executable.into() }];
+        manifest.format_version = manifest.required_format_version();
+        manifest
+    }
+
+    #[test]
+    fn an_extra_command_survives_the_signed_bytes_and_needs_format_3() {
+        // `application/app.jar` is in the sample payload.
+        let manifest = with_extra("mytool-helper", "application/app.jar");
+        assert_eq!(manifest.required_format_version(), FormatVersion(3));
+        let bytes = manifest.to_signed_bytes().unwrap();
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+
+        // Declaring format 2 would tell a 0.2.0 reader it can install this.
+        let mut understated = manifest;
+        understated.format_version = FormatVersion(2);
+        assert!(understated.validate().unwrap_err().to_string().contains("need at least 3"));
+    }
+
+    #[test]
+    fn an_extra_command_must_run_a_program_the_package_ships() {
+        let missing = with_extra("mytool-helper", "bin/not-shipped");
+        assert!(missing.validate().unwrap_err().to_string().contains("not present in the payload"));
+        let outside = with_extra("mytool-helper", "../elsewhere");
+        assert!(outside.validate().is_err(), "a program outside the package was accepted");
+    }
+
+    #[test]
+    fn a_command_name_given_twice_is_refused() {
+        let twice = with_extra("mytool", "application/app.jar");
+        assert!(twice.validate().unwrap_err().to_string().contains("given twice"));
+        let bad = with_extra("../evil", "application/app.jar");
+        assert!(bad.validate().unwrap_err().to_string().contains("command.name"));
     }
 
     #[test]

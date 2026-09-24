@@ -361,11 +361,10 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
             Some("{name} is already installed for your account, so Setup uses the same folder.")
         }
         Key::LocationShortcut => either("Add to Start Menu", "Add to Applications"),
-        Key::LocationCommand => Some("Add \u{201c}{command}\u{201d} to the command line"),
-        Key::LocationCommandTaken => Some(
-            "Another program already uses the name \u{201c}{command}\u{201d}, so it is not \
-             added.",
-        ),
+        Key::LocationCommand => Some("Add {command} to the command line"),
+        Key::LocationCommandTaken => {
+            Some("Already used by another program, so not added: {command}.")
+        }
 
         Key::StatusChecking => Some("Checking this folder…"),
         Key::StatusNew => Some("{name} {new} will be installed here."),
@@ -396,7 +395,7 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::ReadyShortcutYes => either("Add a shortcut", "Adds {name} to ~/Applications"),
         Key::ReadyShortcutNo => Some("No shortcut"),
         Key::ReadyCommandLabel => Some("Command line"),
-        Key::ReadyCommandYes => Some("Adds \u{201c}{command}\u{201d}"),
+        Key::ReadyCommandYes => Some("Adds {command}"),
         Key::ReadyCommandNo => Some("Not added"),
         Key::ReadyAccountLabel => Some("Account"),
         Key::ReadyAccountValue => {

@@ -503,6 +503,7 @@ mod tests {
             signing_key: None,
             created_at: None,
             command: None,
+            commands: Vec::new(),
         };
         Described {
             file_name: "pkg.xpkg".into(),

@@ -495,6 +495,15 @@ pub const APPLICATION_DIR_ENV: &str = "XPACK_APPLICATION_DIR";
 /// this workspace does not permit.
 pub const HEALTH_FILE_ENV: &str = "XPACK_HEALTH_FILE";
 
+/// Tells a launcher which of an application's commands it was started as.
+///
+/// Set by the script a command is on macOS and Linux, each script naming
+/// itself. On Windows each command is a copy of the launcher, named after it,
+/// and the launcher reads its own name instead. Never passed on to anything a
+/// launcher starts: an application that runs another command of its own must
+/// not have it read as the one it was started as.
+pub const COMMAND_ENV: &str = "XPACK_COMMAND";
+
 /// Resolves the install root from an explicit override, or the user default.
 ///
 /// The environment read is kept out of this function on purpose. Since Rust

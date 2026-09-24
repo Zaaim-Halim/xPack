@@ -1201,6 +1201,67 @@ fn an_installed_xpack_whose_first_command_fails_is_not_rolled_back() {
 }
 
 #[test]
+fn every_command_starts_its_own_program_and_leaves_nothing_behind() {
+    // A main command and a companion: typed by name, each starts its own
+    // program. Unix only, for the reason the single-command test is.
+    if cfg!(not(unix)) {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    fixture.write_payload("1.0.0", 0);
+    let payload = fixture.path().join("payload-1.0.0/bin");
+    std::fs::copy(payload.join("app"), payload.join("helper")).unwrap();
+    let config = fixture.path().join("xpack-1.0.0.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let text = text
+        .replace(r#""launch":{"#, r#""launch":{"keepWorkingDirectory":true,"arguments":["--main"],"#)
+        .replacen(
+            '{',
+            r#"{"command":{"name":"demo-tool"},"commands":[{"name":"demo-helper","executable":"bin/helper"}],"#,
+            1,
+        );
+    std::fs::write(&config, text).unwrap();
+    let package = fixture.pack_existing("1.0.0");
+
+    let home = fixture.path().join("home");
+    let with_home = |args: &[&str]| {
+        Command::new(xpack())
+            .current_dir(fixture.path())
+            .arg("--root")
+            .arg(fixture.root())
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let install = with_home(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    let run =
+        |name: &str| Command::new(home.join(".local/bin").join(name)).arg("x").output().unwrap();
+    let main = run("demo-tool");
+    assert!(main.status.success(), "{}", stderr(&main));
+    assert!(stdout(&main).contains("args=--main x"), "{}", stdout(&main));
+
+    // The companion runs its own program, without the main one's arguments.
+    let helper = run("demo-helper");
+    assert!(helper.status.success(), "{}", stderr(&helper));
+    assert!(stdout(&helper).contains("args=x"), "{}", stdout(&helper));
+    assert!(!stdout(&helper).contains("--main"), "{}", stdout(&helper));
+
+    // The launcher's routing never reaches the program it starts.
+    for out in [&main, &helper] {
+        assert!(stdout(out).contains("XPACK_COMMAND=\n"), "{}", stdout(out));
+    }
+
+    let uninstall = with_home(&["uninstall", "com.example.demo", "--yes"]);
+    assert!(uninstall.status.success(), "{}", stderr(&uninstall));
+    assert!(!home.join(".local/bin/demo-tool").exists());
+    assert!(!home.join(".local/bin/demo-helper").exists());
+}
+
+#[test]
 fn a_commands_copy_of_the_launcher_starts_the_application() {
     // On Windows a command is a copy of the launcher in `<root>\bin`, and that
     // directory is on the user's PATH. The copy has to find the installation

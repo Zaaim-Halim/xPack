@@ -38,7 +38,7 @@ pub(crate) fn build_package_named(
     display_name: &str,
     desktop: &xpack_core::DesktopSpec,
 ) -> PathBuf {
-    build_package_full(dir, key, version, display_name, desktop, None)
+    build_package_full(dir, key, version, display_name, desktop, None, &[])
 }
 
 /// Builds a package that names the command a terminal starts it by.
@@ -49,7 +49,36 @@ pub(crate) fn build_package_commanding(
     version: &str,
     command: Option<&str>,
 ) -> PathBuf {
-    build_package_full(dir, key, version, "Example", &xpack_core::DesktopSpec::default(), command)
+    build_package_full(
+        dir,
+        key,
+        version,
+        "Example",
+        &xpack_core::DesktopSpec::default(),
+        command,
+        &[],
+    )
+}
+
+/// Builds a package naming a main command and extra ones, each extra running
+/// the payload's `bin/app`.
+#[allow(dead_code)]
+pub(crate) fn build_package_with_commands(
+    dir: &Path,
+    key: &KeyPair,
+    version: &str,
+    command: Option<&str>,
+    extras: &[&str],
+) -> PathBuf {
+    build_package_full(
+        dir,
+        key,
+        version,
+        "Example",
+        &xpack_core::DesktopSpec::default(),
+        command,
+        extras,
+    )
 }
 
 fn build_package_full(
@@ -59,6 +88,7 @@ fn build_package_full(
     display_name: &str,
     desktop: &xpack_core::DesktopSpec,
     command: Option<&str>,
+    extras: &[&str],
 ) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
@@ -94,6 +124,13 @@ fn build_package_full(
         payload: PayloadSpec::default(),
         created_at: None,
         command: command.map(|name| xpack_core::CommandSpec { name: name.into() }),
+        commands: extras
+            .iter()
+            .map(|name| xpack_core::ExtraCommand {
+                name: (*name).into(),
+                executable: "bin/app".into(),
+            })
+            .collect(),
     };
     // The format a command needs; what `xpack pack` would declare.
     let manifest = Manifest { format_version: manifest.required_format_version(), ..manifest };
