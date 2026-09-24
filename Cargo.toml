@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -27,18 +27,18 @@ repository = "https://github.com/Zaaim-Halim/xPack"
 authors = ["Halim Zaaim"]
 
 [workspace.dependencies]
-xpack-core = { path = "crates/xpack-core", version = "0.2.1" }
-xpack-security = { path = "crates/xpack-security", version = "0.2.1" }
-xpack-package = { path = "crates/xpack-package", version = "0.2.1" }
-xpack-platform = { path = "crates/xpack-platform", version = "0.2.1" }
-xpack-install = { path = "crates/xpack-install", version = "0.2.1" }
-xpack-update = { path = "crates/xpack-update", version = "0.2.1" }
-xpack-updater = { path = "crates/xpack-updater", version = "0.2.1" }
-xpack-notify = { path = "crates/xpack-notify", version = "0.2.1" }
-xpack-uninstaller = { path = "crates/xpack-uninstaller", version = "0.2.1" }
-xpack-installer = { path = "crates/xpack-installer", version = "0.2.1" }
-xpack-installer-ui = { path = "crates/xpack-installer-ui", version = "0.2.1" }
-xpack-log = { path = "crates/xpack-log", version = "0.2.1" }
+xpack-core = { path = "crates/xpack-core", version = "0.3.0" }
+xpack-security = { path = "crates/xpack-security", version = "0.3.0" }
+xpack-package = { path = "crates/xpack-package", version = "0.3.0" }
+xpack-platform = { path = "crates/xpack-platform", version = "0.3.0" }
+xpack-install = { path = "crates/xpack-install", version = "0.3.0" }
+xpack-update = { path = "crates/xpack-update", version = "0.3.0" }
+xpack-updater = { path = "crates/xpack-updater", version = "0.3.0" }
+xpack-notify = { path = "crates/xpack-notify", version = "0.3.0" }
+xpack-uninstaller = { path = "crates/xpack-uninstaller", version = "0.3.0" }
+xpack-installer = { path = "crates/xpack-installer", version = "0.3.0" }
+xpack-installer-ui = { path = "crates/xpack-installer-ui", version = "0.3.0" }
+xpack-log = { path = "crates/xpack-log", version = "0.3.0" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }

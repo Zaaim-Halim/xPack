@@ -52,7 +52,7 @@ enum Cargo {
 
 /// Package a Cargo project with xPack.
 #[derive(Args)]
-#[command(version, about)]
+#[command(version)]
 struct Xpack {
     #[command(subcommand)]
     action: Action,

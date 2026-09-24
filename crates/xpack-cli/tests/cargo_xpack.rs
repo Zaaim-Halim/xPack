@@ -82,6 +82,16 @@ fn cargo_xpack_pack(project: &Path, key: &Path) -> Output {
 }
 
 #[test]
+fn the_help_describes_cargo_xpack_rather_than_xpack() {
+    // Both binaries live in one crate, so a help text taken from the crate's
+    // description would describe `xpack` here too.
+    let out = Command::new(cargo_xpack()).args(["xpack", "--help"]).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let help = stdout(&out);
+    assert!(help.starts_with("Package a Cargo project with xPack"), "{help}");
+}
+
+#[test]
 fn a_cargo_project_without_an_id_is_refused_with_how_to_fix_it() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path(), r#"command = "mytool""#);
