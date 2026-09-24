@@ -8,6 +8,31 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# xPack, packaged by xPack: `cargo xpack installer -p xpack-cli` builds the
+# installer that puts `xpack` on a user's machine and its command on their PATH.
+[package.metadata.xpack]
+id = "io.xpack.xpack"
+name = "xPack"
+command = "xpack"
+commands = ["cargo-xpack"]
+launch = "xpack"
+# Everything an installation of xPack needs beside `xpack`: it finds the
+# launcher, updater, uninstaller and installer stubs next to itself, and ships
+# `cargo xpack` so the Rust integration comes with it. The windowed builds are
+# only used on Windows, and harmless elsewhere.
+binaries = [
+    "xpack",
+    "cargo-xpack",
+    "xpack-launcher",
+    "xpack-launcherw",
+    "xpack-updater",
+    "xpack-uninstaller",
+    "xpack-installer",
+    "xpack-installerw",
+    "xpack-notify",
+]
+installer-ui = "installer-ui.json"
+
 [[bin]]
 name = "xpack"
 path = "src/main.rs"

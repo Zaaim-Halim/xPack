@@ -1,0 +1,8 @@
+{
+  "license": "../../LICENSE",
+  "text": {
+    "welcome": "This will install {name} {version} for your user account: the xpack command, its launcher and updater, and cargo xpack for Rust projects.",
+    "finish": "{name} is ready. Open a new terminal window and type xpack."
+  },
+  "pathDefault": true
+}
