@@ -604,6 +604,21 @@ fn the_launcher_locates_its_installation_from_its_own_path() {
     assert_eq!(launcher.paths().application_id(), Some("com.example.app"));
 }
 
+#[test]
+fn a_commands_copy_of_the_launcher_serves_the_installation_above_it() {
+    // A Windows command is a copy of the launcher in `<root>/bin`, on the
+    // user's PATH. Taking `bin` for the installation, it would find no state
+    // and fail every time the command is typed.
+    let dir = tempfile::tempdir().unwrap();
+    let app_dir = dir.path().join("com.example.app");
+    std::fs::create_dir_all(app_dir.join("state")).unwrap();
+    std::fs::create_dir_all(app_dir.join("bin")).unwrap();
+    let copy = app_dir.join("bin").join("mytool.exe");
+    std::fs::write(&copy, b"").unwrap();
+
+    assert_eq!(xpack_launcher::launcher::application_dir_for(&copy).unwrap(), app_dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_launcher_does_not_hold_the_lock_while_the_application_runs() {

@@ -1199,3 +1199,29 @@ fn an_installed_xpack_whose_first_command_fails_is_not_rolled_back() {
         .map(|v| v["version"].as_str().unwrap().to_string());
     assert_eq!(active.as_deref(), Some("1.1.0"), "{}", stdout(&list));
 }
+
+#[test]
+fn a_commands_copy_of_the_launcher_starts_the_application() {
+    // On Windows a command is a copy of the launcher in `<root>\bin`, and that
+    // directory is on the user's PATH. The copy has to find the installation
+    // above it; one that took `bin` for the installation failed every time the
+    // command was typed, and shipped that way because nothing ever ran it.
+    // Placed by hand here, so the test needs no PATH and runs everywhere.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+    let install = fixture.run_in_root(&["install", &package, "--trust", "signing.pub.json"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+
+    let list = fixture.run_in_root(&["list", "com.example.demo", "--json"]);
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&list)).unwrap();
+    let launcher = PathBuf::from(listed["launcher"].as_str().unwrap());
+    let root = PathBuf::from(listed["root"].as_str().unwrap());
+    let copy = root.join("bin").join(format!("demo-tool{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(&launcher, &copy).unwrap();
+
+    let run = Command::new(&copy).arg("x").output().unwrap();
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert!(stdout(&run).contains("running 1.0.0 args=x"), "{}", stdout(&run));
+}

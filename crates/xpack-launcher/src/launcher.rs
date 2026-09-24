@@ -126,8 +126,7 @@ impl Launcher {
 
         let executable = std::env::current_exe()
             .map_err(|e| Error::Launch(format!("cannot locate the launcher itself: {e}")))?;
-        let dir = xpack_core::atomic::parent_dir(&executable)?;
-        Ok(Self::for_application_dir(dir))
+        Ok(Self::for_application_dir(application_dir_for(&executable)?))
     }
 
     /// The installation this launcher serves.
@@ -434,8 +433,12 @@ fn installed_binary_names(paths: &InstallPaths) -> xpack_core::BinaryNames {
 }
 
 /// Returns the directory a launcher at `executable` would serve.
-pub fn application_dir_for(executable: &Path) -> Result<&Path> {
-    xpack_core::atomic::parent_dir(executable)
+///
+/// Its own directory, or, for a command's copy of it in the installation's
+/// command directory, the installation above: see
+/// [`InstallPaths::application_dir_of`].
+pub fn application_dir_for(executable: &Path) -> Result<PathBuf> {
+    InstallPaths::application_dir_of(executable)
 }
 
 /// Starts the background updater, detached, and does not wait for it.
