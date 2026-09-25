@@ -9,7 +9,7 @@ background, and puts the previous version back if a new one fails to start.
 It ships as a handful of small native binaries written in Rust; nothing of
 xPack becomes part of your application.
 
-> **Status: pre-release (0.4.0).** The command line, installing, updating and
+> **Status: pre-release (0.4.1).** The command line, installing, updating and
 > rollback are implemented, and the test suite runs on Windows, macOS and Linux
 > in CI. The installation
 > wizard is tested on macOS; on Windows it builds but has not yet been run on a
