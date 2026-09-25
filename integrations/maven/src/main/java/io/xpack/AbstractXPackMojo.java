@@ -329,8 +329,7 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
         String wantedApplication = applicationId();
         List<Artefact> mine = new ArrayList<>();
         for (Path candidate : candidates) {
-            Map<String, Object> described =
-                    cli().json("inspect", List.of(candidate.toString()));
+            Map<String, Object> described = cli().inspect(candidate);
             Map<String, Object> application = Json.object(described, "application");
             if (!wantedApplication.equals(Json.string(application, "id"))) {
                 continue;

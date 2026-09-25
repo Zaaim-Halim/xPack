@@ -80,6 +80,43 @@ public final class XPackCli {
         }
     }
 
+    /**
+     * What {@code xpack inspect} says about every package it reads without a
+     * key.
+     */
+    static final String UNVERIFIED_NOTICE = "this manifest has NOT been verified";
+
+    /**
+     * Reads a package's manifest, for its platform and version.
+     *
+     * <p>The plugin asks only about packages it has just built, and trusts
+     * nothing it reads here: signatures are checked where they matter, by
+     * {@code xpack index} with the public key and by the installer. So the
+     * notice {@code xpack inspect} prints for every unverified read would only
+     * alarm whoever reads the build log, once per package. Every other line it
+     * prints is still passed on.
+     */
+    public Map<String, Object> inspect(Path pkg) throws MojoExecutionException {
+        List<String> command = command("inspect", List.of(pkg.toString()));
+        command.add("--json");
+        Processes.Result result = Processes.run(command, log, timeoutMinutes);
+        result.failOnError("xpack inspect");
+        worthShowing(result.stderr()).forEach(log::info);
+        try {
+            return Json.parseObject(result.stdout());
+        } catch (IllegalArgumentException e) {
+            throw unreadable("inspect", result.stdout(), e);
+        }
+    }
+
+    /** The diagnostic lines of an {@link #inspect} worth a reader's attention. */
+    static List<String> worthShowing(String stderr) {
+        return stderr.lines()
+                .filter(line -> !line.isBlank())
+                .filter(line -> !line.contains(UNVERIFIED_NOTICE))
+                .toList();
+    }
+
     /** Runs a subcommand that has no machine-readable output. */
     public void run(String subcommand, List<String> arguments) throws MojoExecutionException {
         Processes.Result result = Processes.run(command(subcommand, arguments), log, timeoutMinutes);

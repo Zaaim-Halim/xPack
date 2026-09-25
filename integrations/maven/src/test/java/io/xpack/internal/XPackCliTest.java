@@ -1,8 +1,10 @@
 package io.xpack.internal;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class XPackCliTest {
@@ -22,5 +24,18 @@ class XPackCliTest {
                 "rollback", "prune", "uninstall", "recover", "run", "keygen"}) {
             assertFalse(XPackCli.isMachineReadable(subcommand), subcommand);
         }
+    }
+
+    /**
+     * The plugin reads its own packages only for their platform and version,
+     * so the notice every unverified read prints is dropped. Nothing else is.
+     */
+    @Test
+    void inspecting_its_own_packages_does_not_warn_about_verification() {
+        String stderr = "warning: this manifest has NOT been verified; use `xpack verify` to check it\n"
+                + " WARN something the reader should see\n"
+                + "\n";
+        assertEquals(List.of(" WARN something the reader should see"),
+                XPackCli.worthShowing(stderr));
     }
 }
