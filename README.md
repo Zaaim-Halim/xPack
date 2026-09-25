@@ -91,6 +91,14 @@ The binaries are in `target/release`.
 Either way, keep the binaries together in one directory: the `xpack` command
 finds the launcher, updater and installer stubs beside itself.
 
+**With an installer**, from a release that has one: `Install-xPack-…` for your
+platform, next to the archives. It puts `xpack` and `cargo-xpack` on your
+`PATH`, and keeps xPack up to date the way it keeps any application up to
+date. xPack's packages and installers are signed with the key in
+[`keys/xpack-release.pub.json`](keys/xpack-release.pub.json), fingerprint
+**`ef16-89d5-607a-b505`**; an installation of xPack accepts updates signed by
+nothing else.
+
 ## Quick start
 
 Package a tiny application, install it, run it, and build an installer for it.
