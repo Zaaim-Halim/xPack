@@ -242,6 +242,21 @@ pub struct InstallState {
     /// would be a guess dressed as a value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_check: Option<u64>,
+    /// How much longer than the interval to wait before the next check, in
+    /// seconds.
+    ///
+    /// Drawn at random each time a check is recorded, up to
+    /// [`check_delay_limit`] of the interval. Machines imaged together and
+    /// started together would otherwise ask the server at the same moment on
+    /// every check, for ever; a fresh draw on each machine spreads them apart
+    /// after the first one. Drawn per check rather than once per installation
+    /// because a value stored once is copied along with the image.
+    ///
+    /// Only ever added, so no installation checks more often than the
+    /// publisher asked. Absent is no delay, which is what every installation
+    /// recorded before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_delay: Option<u64>,
     /// Base name this installation's executables were given.
     ///
     /// Absent means they carry xPack's own names, which is what every
@@ -289,6 +304,16 @@ pub struct InstallState {
     pub rollout_id: Option<String>,
 }
 
+/// The longest extra wait a check may be given: a quarter of the interval.
+///
+/// Enough that a fleet started together is spread across hours on a daily
+/// interval, and little enough that an update is never much later than the
+/// publisher expects.
+#[must_use]
+pub const fn check_delay_limit(interval_seconds: u64) -> u64 {
+    interval_seconds / 4
+}
+
 fn idle_phase() -> UpdatePhase {
     UpdatePhase::Idle
 }
@@ -305,6 +330,7 @@ impl InstallState {
             versions: BTreeMap::new(),
             required_version: None,
             last_update_check: None,
+            update_check_delay: None,
             binary_base_name: None,
             announced_update: None,
             rollout_id: None,
@@ -359,12 +385,25 @@ impl InstallState {
     /// machine resuming from a snapshot — makes the recorded instant look like
     /// the future. That is treated as due rather than as a reason to wait out
     /// a wait that may never end.
+    ///
+    /// The wait is the interval plus this installation's drawn delay, never
+    /// more than [`check_delay_limit`] of it however the value was recorded:
+    /// a state file edited, or written for a longer interval than the one in
+    /// force now, cannot postpone checks further than that.
     pub fn update_check_is_due(&self, now: u64, interval_seconds: u64) -> bool {
+        let delay = self.update_check_delay.unwrap_or(0).min(check_delay_limit(interval_seconds));
         match self.last_update_check {
             None => true,
             Some(last) if last > now => true,
-            Some(last) => now.saturating_sub(last) >= interval_seconds,
+            Some(last) => now.saturating_sub(last) >= interval_seconds.saturating_add(delay),
         }
+    }
+
+    /// Records that the update server is being asked now, and how much
+    /// longer than the interval the next check waits.
+    pub fn record_update_check(&mut self, now: u64, delay_seconds: u64) {
+        self.last_update_check = Some(now);
+        self.update_check_delay = (delay_seconds > 0).then_some(delay_seconds);
     }
 
     /// Whether `version` still needs announcing to the user.
@@ -881,6 +920,53 @@ mod update_check_tests {
         let mut s = state();
         s.last_update_check = Some(2_000_000);
         assert!(s.update_check_is_due(1_000_000, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_drawn_delay_postpones_the_next_check_by_exactly_that_much() {
+        let mut s = state();
+        s.record_update_check(1_000_000, 30 * 60);
+        assert!(!s.update_check_is_due(1_000_000 + 4 * HOUR, 4 * HOUR));
+        assert!(!s.update_check_is_due(1_000_000 + 4 * HOUR + 30 * 60 - 1, 4 * HOUR));
+        assert!(s.update_check_is_due(1_000_000 + 4 * HOUR + 30 * 60, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_delay_can_never_postpone_a_check_past_a_quarter_of_the_interval() {
+        // An edited state file, or one written under a much longer interval.
+        let mut s = state();
+        s.record_update_check(1_000_000, 1000 * HOUR);
+        assert!(s.update_check_is_due(1_000_000 + 4 * HOUR + HOUR, 4 * HOUR));
+        assert!(!s.update_check_is_due(1_000_000 + 4 * HOUR + HOUR - 1, 4 * HOUR));
+    }
+
+    #[test]
+    fn no_delay_is_recorded_as_none_and_behaves_as_before() {
+        let mut s = state();
+        s.record_update_check(1_000_000, 0);
+        assert_eq!(s.update_check_delay, None);
+        assert!(s.update_check_is_due(1_000_000 + 4 * HOUR, 4 * HOUR));
+    }
+
+    #[test]
+    fn a_delay_does_not_hold_back_a_clock_that_moved_backwards() {
+        let mut s = state();
+        s.record_update_check(2_000_000, HOUR);
+        assert!(s.update_check_is_due(1_000_000, 4 * HOUR));
+    }
+
+    #[test]
+    fn the_delay_survives_a_round_trip_and_older_state_has_none() {
+        let mut s = state();
+        s.record_update_check(1_234_567, 600);
+        let json = serde_json::to_vec(&s).unwrap();
+        let back: InstallState = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.update_check_delay, Some(600));
+
+        let older = br#"{"stateFormatVersion":1,"applicationId":"com.example.app","lastUpdateCheck":1000000}"#;
+        let s: InstallState = serde_json::from_slice(older).unwrap();
+        assert_eq!(s.update_check_delay, None);
+        assert!(s.update_check_is_due(1_000_000 + 4 * HOUR, 4 * HOUR));
     }
 
     #[test]

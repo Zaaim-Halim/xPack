@@ -177,7 +177,16 @@ impl<'a> BackgroundUpdater<'a> {
             // Recorded before the attempt, not after. A server that hangs until
             // the transport gives up would otherwise leave the check unrecorded
             // and be retried on the very next application start.
-            state.last_update_check = Some(now);
+            //
+            // With a random extra wait before the next one, so machines that
+            // checked together do not keep checking together. Without a source
+            // of randomness the check still happens, on the plain interval.
+            let delay = xpack_update::schedule::random_check_delay(interval.as_secs())
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the next update check is not spread out");
+                    0
+                });
+            state.record_update_check(now, delay);
             lock.save_state(&state)?;
             url
         };

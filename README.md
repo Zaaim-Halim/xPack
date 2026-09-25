@@ -263,7 +263,9 @@ xpack index MyApp-1.3.0-*.xpkg --out-dir updates --key ~/keys/signing.pub.json \
 ```
 
 Installed applications check in the background and apply the update on the
-next start. You can also trigger it by hand:
+next start. Each check waits a random extra while, up to a quarter of the
+interval, so machines set up together do not all ask your server at the same
+moment. You can also trigger it by hand:
 
 ```sh
 xpack update com.example.myapp

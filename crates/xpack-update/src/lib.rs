@@ -27,6 +27,7 @@
 pub mod index;
 pub mod reporting;
 pub mod rollout;
+pub mod schedule;
 pub mod transport;
 pub mod updater;
 

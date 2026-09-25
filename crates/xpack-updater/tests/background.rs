@@ -231,6 +231,34 @@ fn an_elapsed_interval_makes_a_check_due_again() {
 }
 
 #[test]
+fn a_check_waits_a_random_extra_while_before_the_next_one() {
+    // Machines that checked together must not check together again. A real
+    // check records its own random extra wait, never past a quarter of the
+    // interval, and the next check honours it.
+    let interval = 4 * 60 * 60;
+    let mut delays = std::collections::BTreeSet::new();
+    for _ in 0..20 {
+        let world = World::new();
+        // Serves nothing: the check fails, and is recorded all the same.
+        let fixture = Fixture::default();
+        let _ = BackgroundUpdater::new(&world.paths, &fixture)
+            .every(Duration::from_secs(interval))
+            .run();
+
+        let state = world.lock().load_state().unwrap().value;
+        let last = state.last_update_check.unwrap();
+        let delay = state.update_check_delay.unwrap_or(0);
+        assert!(delay <= interval / 4, "a delay of {delay}s on a {interval}s interval");
+        assert!(state.update_check_is_due(last + interval + delay, interval));
+        if delay > 0 {
+            assert!(!state.update_check_is_due(last + interval + delay - 1, interval));
+        }
+        delays.insert(delay);
+    }
+    assert!(delays.len() > 1, "twenty installations all drew {delays:?}");
+}
+
+#[test]
 fn forcing_overrides_the_interval() {
     let world = World::new();
     let fixture = serving_an_update(&world);
