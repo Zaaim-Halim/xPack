@@ -386,6 +386,12 @@ example project in
 The plugin is not yet published to Maven Central; install it locally with
 `mvn install` in `integrations/maven`.
 
+[Expense Tracker](https://github.com/Zaaim-Halim/expense-tracker) is a real
+JavaFX application built, released and updated this way: CI builds it with
+the plugin on each platform, publishes its releases and update index, and
+installed copies update themselves from there. It is the reference
+application xPack is validated against.
+
 ## Security
 
 - **Packages** are signed with Ed25519; every file is checked against the
