@@ -250,6 +250,100 @@ update-url = "http://updates.example.com/mytool/{platform}""#,
     assert!(stderr(&out).contains("https"), "{}", stderr(&out));
 }
 
+/// `cargo xpack pack` with extra arguments.
+fn cargo_xpack_pack_with(project: &Path, key: &Path, extra: &[&str]) -> Output {
+    Command::new(cargo_xpack())
+        .args(["xpack", "pack", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--key")
+        .arg(key)
+        .arg("--xpack")
+        .arg(xpack())
+        .args(extra)
+        .env("CARGO_TARGET_DIR", project.join("target"))
+        .output()
+        .unwrap()
+}
+
+/// The target triple Cargo builds for by default here.
+fn host_triple() -> String {
+    let out = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["-vV"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.lines().find_map(|l| l.strip_prefix("host: ")).unwrap().trim().to_string()
+}
+
+#[test]
+fn no_build_packs_exactly_the_binary_already_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), r#"id = "com.example.mytool""#);
+    let key = keygen(dir.path());
+
+    // Without a build, and nothing built yet: refused, and it says why.
+    let refused = cargo_xpack_pack_with(&project, &key, &["--no-build"]);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("--no-build, but"), "{}", stderr(&refused));
+
+    // A binary put where Cargo would have, but never built by it: exactly
+    // those bytes are packed.
+    let release = project.join("target/release");
+    std::fs::create_dir_all(&release).unwrap();
+    let name = format!("mytool{}", std::env::consts::EXE_SUFFIX);
+    std::fs::write(release.join(&name), b"prebuilt by an earlier step").unwrap();
+    let packed = cargo_xpack_pack_with(&project, &key, &["--no-build"]);
+    assert!(packed.status.success(), "{}", stderr(&packed));
+
+    let root = dir.path().join("apps");
+    let install = Command::new(xpack())
+        .arg("--root")
+        .arg(&root)
+        .arg("install")
+        .arg(stdout(&packed).trim())
+        .arg("--trust")
+        .arg(key.with_file_name("signing.pub.json"))
+        .env("HOME", dir.path().join("home"))
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "{}", stderr(&install));
+    let installed = root.join("com.example.mytool/versions/1.2.0/bin").join(&name);
+    assert_eq!(std::fs::read(&installed).unwrap(), b"prebuilt by an earlier step");
+}
+
+#[test]
+fn a_target_builds_into_its_own_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), r#"id = "com.example.mytool""#);
+    let key = keygen(dir.path());
+    let triple = host_triple();
+    let out = cargo_xpack_pack_with(&project, &key, &["--target", &triple]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let built = project
+        .join("target")
+        .join(&triple)
+        .join("release")
+        .join(format!("mytool{}", std::env::consts::EXE_SUFFIX));
+    assert!(built.is_file(), "nothing built at {}", built.display());
+}
+
+#[test]
+fn a_target_for_another_machine_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), r#"id = "com.example.mytool""#);
+    let key = keygen(dir.path());
+    // Another processor than this one, on this machine's operating system.
+    let other = if cfg!(target_arch = "aarch64") { "x86_64" } else { "aarch64" };
+    let triple = host_triple().replacen(std::env::consts::ARCH, other, 1);
+    let out = cargo_xpack_pack_with(&project, &key, &["--target", &triple]);
+    assert!(!out.status.success(), "{triple} was packed on this machine");
+    assert!(stderr(&out).contains("but this machine is"), "{}", stderr(&out));
+
+    let out = cargo_xpack_pack_with(&project, &key, &["--target", "wasm32-unknown-unknown"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not a platform xPack packages for"), "{}", stderr(&out));
+}
+
 #[test]
 fn a_packed_rust_tool_installs_and_is_typed_by_name() {
     // Unix only: installing puts the command in a `HOME` redirected here; on

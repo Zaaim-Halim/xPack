@@ -93,6 +93,22 @@ struct Common {
     /// The `xpack` to run. Default: the one on the `PATH`.
     #[arg(long, value_name = "FILE", env = "XPACK")]
     xpack: Option<PathBuf>,
+
+    /// Build for this target triple, as `cargo build --target` does.
+    ///
+    /// For a different C library or linkage on the same machine, such as
+    /// `x86_64-unknown-linux-musl` for binaries that run on any Linux. The
+    /// operating system and processor must be this machine's: a package is
+    /// built for the platform it runs on.
+    #[arg(long, value_name = "TRIPLE")]
+    target: Option<String>,
+
+    /// Package the binaries already built rather than building them.
+    ///
+    /// For a pipeline that builds and tests in one step and packages in
+    /// another: what is signed is then exactly what was tested.
+    #[arg(long)]
+    no_build: bool,
 }
 
 #[derive(Args)]
@@ -273,6 +289,8 @@ struct Plan {
     icon: Option<PathBuf>,
     /// The `update` section of the manifest, when updates are published.
     update: Option<serde_json::Value>,
+    /// Whether the binaries were built by someone else, earlier.
+    no_build: bool,
     package_dir: PathBuf,
     staging: PathBuf,
     out_dir: PathBuf,
@@ -317,7 +335,18 @@ fn plan(metadata: &Metadata, package: &Package, common: &Common) -> Result<Plan>
     };
     let icon = icon.map(|path| inside_the_package(&path, "icon")).transpose()?;
     let update = update_spec(&settings)?;
-    Ok(Plan { settings, id, binaries, launch, icon, update, package_dir, staging, out_dir })
+    Ok(Plan {
+        settings,
+        id,
+        binaries,
+        launch,
+        icon,
+        update,
+        no_build: common.no_build,
+        package_dir,
+        staging,
+        out_dir,
+    })
 }
 
 /// The manifest's `update` section: `update-url` for this platform, and the
@@ -364,15 +393,55 @@ fn inside_the_package(path: &Path, what: &str) -> Result<PathBuf> {
 ///
 /// Named by `--bin` from the workspace root, so a package may ship binaries
 /// that other members of its workspace build.
-fn build(metadata: &Metadata, plan: &Plan) -> Result<PathBuf> {
+fn build(metadata: &Metadata, plan: &Plan, common: &Common) -> Result<()> {
     let mut command = cargo();
     command.arg("build").arg("--release");
     command.arg("--manifest-path").arg(metadata.workspace_root.join("Cargo.toml"));
+    if let Some(target) = &common.target {
+        command.arg("--target").arg(target);
+    }
     for binary in &plan.binaries {
         command.arg("--bin").arg(binary);
     }
-    run(&mut command, "cargo build --release")?;
-    Ok(metadata.target_directory.join("release"))
+    run(&mut command, "cargo build --release").map(|_| ())
+}
+
+/// Where Cargo puts the release binaries: `target/release`, or
+/// `target/<triple>/release` for `--target`.
+fn release_dir(metadata: &Metadata, common: &Common) -> Result<PathBuf> {
+    let Some(target) = &common.target else {
+        return Ok(metadata.target_directory.join("release"));
+    };
+    let host = xpack_core::Platform::host().map_err(|e| e.to_string())?;
+    let platform = platform_of(target)
+        .ok_or_else(|| format!("--target {target} is not a platform xPack packages for"))?;
+    if platform != host.to_string() {
+        return Err(format!(
+            "--target {target} builds for {platform}, but this machine is {host}; \
+             build each platform's package on that platform"
+        ));
+    }
+    Ok(metadata.target_directory.join(target).join("release"))
+}
+
+/// The xPack platform a target triple builds for, such as `linux-x64` for
+/// `x86_64-unknown-linux-musl`.
+fn platform_of(triple: &str) -> Option<String> {
+    let arch = match triple.split('-').next()? {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    let os = if triple.contains("-linux-") {
+        "linux"
+    } else if triple.ends_with("-apple-darwin") {
+        "macos"
+    } else if triple.contains("-windows-") {
+        "windows"
+    } else {
+        return None;
+    };
+    Some(format!("{os}-{arch}"))
 }
 
 fn executable(name: &str) -> String {
@@ -390,8 +459,13 @@ fn assemble(plan: &Plan, built: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
     for binary in &plan.binaries {
         let from = built.join(executable(binary));
-        std::fs::copy(&from, bin.join(executable(binary)))
-            .map_err(|e| format!("{}: {e}", from.display()))?;
+        std::fs::copy(&from, bin.join(executable(binary))).map_err(|e| {
+            if plan.no_build {
+                format!("--no-build, but {} is not built: {e}", from.display())
+            } else {
+                format!("{}: {e}", from.display())
+            }
+        })?;
     }
     for resource in &plan.settings.resources {
         let resource = inside_the_package(resource, "resource")?;
@@ -480,7 +554,10 @@ fn pack(common: &Common) -> Result<PathBuf> {
     let metadata = metadata(common)?;
     let package = chosen(&metadata, common)?;
     let plan = plan(&metadata, package, common)?;
-    let built = build(&metadata, &plan)?;
+    let built = release_dir(&metadata, common)?;
+    if !common.no_build {
+        build(&metadata, &plan, common)?;
+    }
     let payload = assemble(&plan, &built)?;
 
     let config = plan.staging.join("xpack.json");

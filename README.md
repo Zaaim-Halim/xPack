@@ -357,7 +357,9 @@ update-url = "https://updates.example.com/mytool/{platform}"
 update-channel = "stable"   # the default
 ```
 
-Everything lands in `target/xpack`.
+Everything lands in `target/xpack`. `--target <triple>` builds for another C
+library on the same machine, such as `x86_64-unknown-linux-musl`, and
+`--no-build` packages binaries an earlier step already built and tested.
 
 ## Maven
 
