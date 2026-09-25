@@ -1459,3 +1459,63 @@ fn a_decline_left_by_a_failed_first_attempt_does_not_bind_the_next_one() {
     );
     assert!(!paths.desktop_preference_file().exists());
 }
+
+/// A real, verified package whose manifest claims more than the disk holds.
+///
+/// The claim cannot be made through a signed package without actually
+/// shipping that many bytes, so the test wraps the verified source and
+/// changes only the figure the installer checks; extraction must never start.
+struct Oversized {
+    inner: xpack_package::VerifiedPackage,
+    manifest: xpack_core::Manifest,
+}
+
+impl xpack_install::InstallSource for Oversized {
+    fn manifest(&self) -> &xpack_core::Manifest {
+        &self.manifest
+    }
+    fn manifest_bytes(&self) -> &[u8] {
+        xpack_install::InstallSource::manifest_bytes(&self.inner)
+    }
+    fn signature(&self) -> &xpack_security::Signature {
+        xpack_install::InstallSource::signature(&self.inner)
+    }
+    fn materialise(
+        &mut self,
+        _: &std::path::Path,
+        _: &dyn xpack_core::progress::ProgressReporter,
+    ) -> xpack_core::Result<()> {
+        panic!("extraction started on a disk that could not hold the version");
+    }
+}
+
+#[test]
+fn a_version_the_disk_cannot_hold_is_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let package = build_package(dir.path(), &key, "1.0.0");
+    let inner = open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    let mut manifest = xpack_install::InstallSource::manifest(&inner).clone();
+    let free = xpack_platform::available_space(dir.path()).unwrap();
+    manifest.payload.total_size = free.saturating_add(1 << 30);
+    let mut source = Oversized { inner, manifest };
+
+    let options = InstallOptions { activate: true, ..Default::default() };
+    let error = Installer::new(&lock).install_from(&mut source, &options).unwrap_err();
+
+    match &error {
+        xpack_core::Error::NotEnoughSpace { needed, available, .. } => {
+            assert!(needed > available, "{error}");
+        }
+        other => panic!("expected NotEnoughSpace, got {other}"),
+    }
+    assert!(error.to_string().contains("not enough free space"), "{error}");
+    assert!(!paths.version_dir(&v("1.0.0")).exists(), "a version directory was written");
+    assert!(
+        lock.load_or_new_state("com.example.app").unwrap().current_version.is_none(),
+        "the refused version was recorded"
+    );
+}

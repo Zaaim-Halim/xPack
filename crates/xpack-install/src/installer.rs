@@ -228,6 +228,10 @@ impl InstallSource for DeltaSource<'_> {
     }
 }
 
+/// Room kept free beyond what a version's files take: the installation's own
+/// state and log writes, and the rest of the user's machine, need some.
+pub const SPACE_MARGIN: u64 = 32 * 1024 * 1024;
+
 /// Drives an installation. Every method runs under the lock it borrows.
 #[derive(Debug)]
 pub struct Installer<'lock> {
@@ -300,16 +304,7 @@ impl<'lock> Installer<'lock> {
         self.ensure_same_application(&manifest.application.id)?;
         package.ensure_installable_on(Platform::host()?)?;
 
-        // Checked here rather than at launch. Windows cannot start a program
-        // from a path longer than `MAX_PATH`, however well the package
-        // extracted, so a version that lands too deep installs cleanly and
-        // then cannot be opened. Refusing now reports it while the user is
-        // still watching the install they asked for.
-        xpack_core::ensure_launch_paths_fit(
-            &paths.version_dir(&version),
-            &manifest.launch,
-            xpack_core::host_launch_path_limit(),
-        )?;
+        Self::ensure_version_fits(paths, &manifest)?;
 
         let mut state = self.load_state()?;
 
@@ -507,6 +502,34 @@ impl<'lock> Installer<'lock> {
             ));
         }
         crate::integration::record_declined_at(file)
+    }
+
+    /// Refuses a version that would install but could not work, while
+    /// nothing has been written.
+    fn ensure_version_fits(
+        paths: &xpack_core::InstallPaths,
+        manifest: &xpack_core::Manifest,
+    ) -> Result<()> {
+        // Checked here rather than at launch. Windows cannot start a program
+        // from a path longer than `MAX_PATH`, however well the package
+        // extracted, so a version that lands too deep installs cleanly and
+        // then cannot be opened. Refusing now reports it while the user is
+        // still watching the install they asked for.
+        xpack_core::ensure_launch_paths_fit(
+            &paths.version_dir(&manifest.application.version),
+            &manifest.launch,
+            xpack_core::host_launch_path_limit(),
+        )?;
+
+        // Against the size the signed manifest declares, which extraction
+        // enforces as a hard limit. A disk that runs out part-way is
+        // recovered from, but the user finds out late and every other
+        // program meanwhile meets a full disk.
+        xpack_platform::ensure_space(
+            paths.root(),
+            manifest.payload.total_size.saturating_add(SPACE_MARGIN),
+            "this version",
+        )
     }
 
     /// Moves a fully verified staging tree into place.

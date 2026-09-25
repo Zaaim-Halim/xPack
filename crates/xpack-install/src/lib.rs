@@ -50,7 +50,7 @@ pub mod trust;
 pub use inspect::{Existing, inspect};
 pub use installer::{
     DeltaSource, InstallOptions, InstallSource, Installed, Installer, LauncherOutcome, Removal,
-    uninstall, uninstall_into, uninstall_with_roots,
+    SPACE_MARGIN, uninstall, uninstall_into, uninstall_with_roots,
 };
 pub use integration::{Entry as DesktopEntry, Outcome as DesktopOutcome};
 pub use recovery::RecoveryReport;

@@ -1854,6 +1854,7 @@ name = "xpack-platform"
 version = "0.3.0"
 dependencies = [
  "reflink-copy",
+ "rustix",
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",

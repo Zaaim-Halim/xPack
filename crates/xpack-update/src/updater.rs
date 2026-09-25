@@ -611,6 +611,17 @@ impl<'a> Updater<'a> {
             )));
         }
         let limit = fetch.size(index).min(MAX_PACKAGE_BYTES);
+
+        // Before the first byte, so a background update never fills a disk
+        // with a download it cannot finish. The size is the index's, which is
+        // trusted for nothing; the worst a server can do with a false one is
+        // have this download refused, which it could do by not serving it.
+        // Unpacking is checked again, against the signed size, at install.
+        xpack_platform::ensure_space(
+            &downloads,
+            limit.saturating_add(xpack_install::SPACE_MARGIN),
+            "the update download",
+        )?;
         let url = package_url(base_url, fetch.file(index));
 
         self.progress.report(&ProgressEvent::DownloadStarted {

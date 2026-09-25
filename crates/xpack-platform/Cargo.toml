@@ -13,11 +13,17 @@ reflink-copy.workspace = true
 xpack-core.workspace = true
 tracing.workspace = true
 
-# One Win32 call: telling running programs that the user's environment
-# changed. See `environment.rs`.
+# Free disk space, through a safe interface. Already in the dependency tree.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+# Two Win32 calls: telling running programs that the user's environment
+# changed (see `environment.rs`), and asking a volume how much room it has
+# (see `space.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

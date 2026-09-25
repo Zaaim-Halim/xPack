@@ -115,6 +115,28 @@ pub enum Error {
     /// A launched process failed or was rejected.
     #[error("launch failed: {0}")]
     Launch(String),
+
+    /// The disk does not have room for what is about to be written.
+    ///
+    /// Checked before writing, so the user hears it while nothing has
+    /// changed, rather than from a write that fails part-way through and a
+    /// disk left full for every other program.
+    #[error(
+        "not enough free space for {what} at {}: needs {}, only {} free",
+        path.display(),
+        crate::progress::format_bytes(*needed),
+        crate::progress::format_bytes(*available)
+    )]
+    NotEnoughSpace {
+        /// What was about to be written, such as "this version".
+        what: String,
+        /// Where it would have been written.
+        path: PathBuf,
+        /// Bytes required, including the margin kept free.
+        needed: u64,
+        /// Bytes the volume has free for this user.
+        available: u64,
+    },
 }
 
 impl Error {
@@ -148,5 +170,24 @@ impl Error {
                 | Self::UnsupportedFormatVersion { .. }
                 | Self::DowngradeRejected { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_enough_space_says_how_much_in_words_a_person_reads() {
+        let error = Error::NotEnoughSpace {
+            what: "this version".into(),
+            path: PathBuf::from("/apps"),
+            needed: 300 * 1024 * 1024,
+            available: 120 * 1024 * 1024,
+        };
+        assert_eq!(
+            error.to_string(),
+            "not enough free space for this version at /apps: needs 300.0 MiB, only 120.0 MiB free"
+        );
     }
 }
