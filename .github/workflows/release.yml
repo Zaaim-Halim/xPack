@@ -212,13 +212,147 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      # Every binary xPack's own package names, as built and smoke-tested
+      # here, for the job that signs them. That job packs these files rather
+      # than building again, so what users install is what was tested. This
+      # is more than the archive holds: the package carries the windowed
+      # builds on every platform.
+      - name: Keep the binaries for packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          suffix=""
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            suffix=".exe"
+          fi
+          mkdir -p prebuilt
+          for bin in xpack cargo-xpack xpack-launcher xpack-launcherw xpack-updater \
+                     xpack-uninstaller xpack-installer xpack-installerw xpack-notify; do
+            cp "$out/$bin$suffix" prebuilt/
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.platform }}
+          path: prebuilt/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # xPack's own signed package and installer, one platform each.
+  #
+  # The only job that sees the signing key. It runs in the `release`
+  # environment, which can be restricted to version tags, so no other branch,
+  # pull request or manual run can read the key. It builds nothing: it signs
+  # the binaries the build job produced.
+  installers:
+    name: installer / ${{ matrix.platform }}
+    needs: build
+    if: github.ref_type == 'tag'
+    environment: release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - platform: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only for `cargo metadata`, which is how `cargo xpack` reads the
+      # package; nothing is compiled.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.platform }}
+          path: prebuilt
+
+      - name: Sign the package and build the installer
+        shell: bash
+        env:
+          XPACK_SIGNING_KEY: ${{ secrets.XPACK_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${XPACK_SIGNING_KEY:-}" ]; then
+            echo "::notice::No XPACK_SIGNING_KEY in the release environment, so this release ships without xPack's own installer and update."
+            exit 0
+          fi
+          # Checked before anything is signed: a key that does not match the
+          # published one would produce packages no installation accepts.
+          public="keys/xpack-release.pub.json"
+          if [ ! -f "$public" ]; then
+            echo "::error::$public is missing; commit the public half of the signing key"
+            exit 1
+          fi
+
+          suffix=""
+          if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+            suffix=".exe"
+          fi
+          # Artifacts do not keep the executable bit.
+          chmod +x prebuilt/*
+          # Where Cargo would have built them, which is where `--no-build`
+          # looks.
+          release="target/${{ matrix.target }}/release"
+          mkdir -p "$release"
+          cp prebuilt/* "$release/"
+
+          key="$RUNNER_TEMP/xpack-signing.json"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s' "$XPACK_SIGNING_KEY" > "$key")
+
+          report=$("prebuilt/cargo-xpack$suffix" xpack installer -p xpack-cli \
+            --target "${{ matrix.target }}" --no-build \
+            --key "$key" --xpack "prebuilt/xpack$suffix" --out-dir signed)
+          package=$(printf '%s\n' "$report" | sed -n 1p)
+          installer=$(printf '%s\n' "$report" | sed -n 2p)
+
+          "prebuilt/xpack$suffix" verify "$package" --key "$public"
+
+          mkdir -p dist
+          cp "$package" dist/
+          # GitHub turns spaces in asset names into dots.
+          name=$(basename "$installer" | tr ' ' '-')
+          if [ -d "$installer" ]; then
+            # A macOS bundle is a directory; ditto keeps what a zip of it
+            # needs to open again as an application.
+            ditto -c -k --keepParent "$installer" "dist/${name%.app}-${GITHUB_REF_NAME#v}-${{ matrix.platform }}.zip"
+          else
+            cp "$installer" "dist/$name"
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: ignore
+
   publish:
     name: publish the release
-    needs: build
+    needs: [build, installers]
     runs-on: ubuntu-latest
     # A dry run stops here. Everything above it has already proved the
     # archives can be built, which is the part that breaks.
     if: github.ref_type == 'tag'
+    outputs:
+      updates: ${{ steps.index.outputs.updates }}
     steps:
       - uses: actions/checkout@v4
 
@@ -231,12 +365,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find incoming -type f -name '*.tar.gz' -exec mv {} dist/ \;
-          find incoming -type f -name '*.zip' -exec mv {} dist/ \;
+          find incoming -path 'incoming/prebuilt-*' -prune -o -type f -name '*.tar.gz' -exec mv {} dist/ \;
+          find incoming -path 'incoming/prebuilt-*' -prune -o -type f -name '*.zip' -exec mv {} dist/ \;
           # One SHA256SUMS beside the archives, in the format `sha256sum -c`
           # reads, so verifying a download needs no tooling beyond coreutils.
-          find incoming -type f -name '*.sha256' -exec cat {} + | sort -k2 > dist/SHA256SUMS
-          rm -rf incoming
+          find incoming -type f -name '*.sha256' -exec cat {} + > sums
+          # xPack's own packages and installers, when the release was signed.
+          # The zipped macOS installer was already moved with the archives.
+          if compgen -G 'incoming/signed-*/*' > /dev/null; then
+            for f in incoming/signed-*/*; do
+              mv "$f" dist/
+            done
+          fi
+          (cd dist && for f in *.xpkg Install-*; do
+            [ -f "$f" ] && sha256sum "$f"
+          done) >> sums || true
+          sort -k2 -u sums > dist/SHA256SUMS
+          # The Linux binaries, to write the update index with.
+          mkdir -p tools
+          cp incoming/prebuilt-linux-x64/xpack tools/
+          chmod +x tools/xpack
+          rm -rf incoming sums
           echo "publishing:"
           ls -la dist
           cat dist/SHA256SUMS
@@ -279,3 +428,46 @@ jobs:
             --notes "$notes" \
             --verify-tag \
             dist/*
+
+      # The update index installations read, one per platform. The packages
+      # stay on the release just published; the index names them by URL, so
+      # the static site holds only a few small files.
+      - name: Write the update index
+        id: index
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! compgen -G 'dist/*.xpkg' > /dev/null; then
+            echo "::notice::No signed packages, so no update index is published."
+            echo "updates=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p site
+          tools/xpack index dist/*.xpkg \
+            --out-dir site/updates \
+            --key keys/xpack-release.pub.json \
+            --package-url "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME"
+          find site -type f -print -exec cat {} \;
+          echo "updates=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.index.outputs.updates == 'true'
+        with:
+          path: site
+
+  # Serves the update index. A separate job because deploying to Pages needs
+  # permissions nothing else here should have.
+  updates:
+    name: publish the update index
+    needs: publish
+    if: needs.publish.outputs.updates == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

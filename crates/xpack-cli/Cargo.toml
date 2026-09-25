@@ -34,6 +34,9 @@ binaries = [
 installer-ui = "installer-ui.json"
 # Each platform's own format; only the one being built is packed.
 icon = { macos = "assets/xpack.icns", windows = "assets/xpack.ico", linux = "assets/xpack.png" }
+# Each platform's update index, published to GitHub Pages by the release
+# workflow; the packages it names are attached to the GitHub Release.
+update-url = "https://zaaim-halim.github.io/xPack/updates/{platform}"
 
 [[bin]]
 name = "xpack"
