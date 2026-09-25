@@ -253,6 +253,15 @@ This writes `updates/<platform>/stable.json`. Upload the `updates` directory
 **and copy each package into its platform directory beside the index**, so
 that `<update.url>/stable.json` and the package sit side by side.
 
+Or keep the packages somewhere else, such as attached to a GitHub Release,
+and upload only the small index files: `--package-url` names each package by
+its full address.
+
+```sh
+xpack index MyApp-1.3.0-*.xpkg --out-dir updates --key ~/keys/signing.pub.json \
+  --package-url https://github.com/example/myapp/releases/download/v1.3.0
+```
+
 Installed applications check in the background and apply the update on the
 next start. You can also trigger it by hand:
 

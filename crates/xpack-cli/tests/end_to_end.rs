@@ -646,6 +646,51 @@ fn index_lands_where_the_updater_would_fetch_it() {
 }
 
 #[test]
+fn index_names_packages_by_full_url_when_they_live_elsewhere() {
+    // The index on a static site, the package attached to a release.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    let base = "https://github.com/example/demo/releases/download/v1.0.0";
+    let out = fixture.run(&[
+        "index",
+        &package,
+        "--out-dir",
+        "updates",
+        "--package-url",
+        &format!("{base}/"),
+        "--json",
+    ]);
+    assert!(out.status.success(), "index failed: {}", stderr(&out));
+    let written: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let expected = format!("{base}/{package}");
+    assert_eq!(written[0]["package"], expected.as_str());
+
+    let body = std::fs::read(fixture.path().join(written[0]["path"].as_str().unwrap())).unwrap();
+    let index = xpack_update::index::UpdateIndex::from_slice(&body).expect("updater must parse it");
+    assert_eq!(index.package.file, expected);
+}
+
+#[test]
+fn index_refuses_a_package_url_that_is_not_https() {
+    // The updater refuses to download over plain HTTP, so an index naming
+    // one would be a release every client fails to fetch.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = fixture.pack("1.0.0");
+
+    for url in ["http://example.com/releases", "https://", "example.com/releases"] {
+        let out = fixture.run(&["index", &package, "--out-dir", "updates", "--package-url", url]);
+        assert!(!out.status.success(), "{url} was accepted");
+        assert!(
+            !fixture.path().join("updates").exists(),
+            "{url}: a refused run must write nothing"
+        );
+    }
+}
+
+#[test]
 fn index_verifies_when_given_a_key() {
     let fixture = Fixture::new();
     fixture.keygen();

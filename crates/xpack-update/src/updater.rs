@@ -714,3 +714,32 @@ fn package_url(base_url: &str, file: &str) -> String {
 fn declared_size(size: u64) -> Option<u64> {
     (size > 0).then_some(size)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_beside_the_index_is_fetched_from_the_index_directory() {
+        assert_eq!(
+            package_url("https://updates.example.com/app/macos-arm64/", "App-1.0.0.xpkg"),
+            "https://updates.example.com/app/macos-arm64/App-1.0.0.xpkg"
+        );
+    }
+
+    #[test]
+    fn a_file_named_by_its_full_url_is_fetched_from_there() {
+        // The index on one host, the package on another: a static site for
+        // the index and a release's download link for the package.
+        let file = "https://github.com/example/app/releases/download/v1.0.0/App-1.0.0.xpkg";
+        assert_eq!(package_url("https://example.github.io/app/updates/macos-arm64", file), file);
+    }
+
+    #[test]
+    fn the_index_is_the_channel_file_in_the_update_directory() {
+        assert_eq!(
+            index_url("https://updates.example.com/app/linux-x64/", "stable"),
+            "https://updates.example.com/app/linux-x64/stable.json"
+        );
+    }
+}

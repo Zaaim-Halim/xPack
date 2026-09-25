@@ -66,6 +66,17 @@ pub(crate) struct Args {
     #[arg(long, value_name = "KEY")]
     key: Option<String>,
 
+    /// Where the packages and deltas are downloaded from, when that is not
+    /// beside the index.
+    ///
+    /// Each is then named by its full URL, `<URL>/<file name>`, rather than
+    /// relative to the index. Lets the index live on one host and the
+    /// packages on another, such as the index on a static site and the
+    /// packages attached to a release. Must be `https`: the updater refuses
+    /// anything else, and would only find out after the release went out.
+    #[arg(long, value_name = "URL", value_parser = parse_package_url)]
+    package_url: Option<String>,
+
     /// URL of the release notes, recorded in every index written.
     #[arg(long, value_name = "URL")]
     release_notes: Option<String>,
@@ -95,6 +106,25 @@ pub(crate) struct Args {
     json: bool,
 }
 
+/// Accepts an `https` URL, without the trailing slash.
+fn parse_package_url(value: &str) -> std::result::Result<String, String> {
+    let rest = value
+        .strip_prefix("https://")
+        .ok_or_else(|| format!("{value:?} must start with https://"))?;
+    if rest.trim_matches('/').is_empty() {
+        return Err(format!("{value:?} names no host"));
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
+/// The name the index gives a file: beside the index, or under `--package-url`.
+fn file_reference(args: &Args, file_name: &str) -> String {
+    match &args.package_url {
+        Some(base) => format!("{base}/{file_name}"),
+        None => file_name.to_string(),
+    }
+}
+
 /// One index that was written.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +136,8 @@ struct Written {
     /// A string rather than the struct a `Platform` serialises to: this is a
     /// command-line contract, and the value has to be usable as an argument.
     platform: String,
-    /// The package it names, relative to the index.
+    /// The package it names: relative to the index, or a full URL with
+    /// `--package-url`.
     package: String,
     /// The URL the installed application will fetch this from, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,7 +447,7 @@ fn write_index(
         platform: manifest.platform,
         channel: channel.clone(),
         package: PackageRef {
-            file: package.file_name.clone(),
+            file: file_reference(args, &package.file_name),
             size: package.size,
             sha256: Some(package.sha256),
         },
@@ -434,7 +465,7 @@ fn write_index(
             })
             .map(|d| DeltaRef {
                 from: d.base.clone(),
-                file: d.file_name.clone(),
+                file: file_reference(args, &d.file_name),
                 size: d.size,
                 sha256: Some(d.sha256),
             })
@@ -459,7 +490,7 @@ fn write_index(
     Ok(Written {
         path,
         platform: manifest.platform.to_string(),
-        package: package.file_name.clone(),
+        package: index.package.file.clone(),
         url: manifest
             .update
             .url
