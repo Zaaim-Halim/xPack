@@ -76,7 +76,8 @@
 //!
 //! Records go to standard error, never standard output, so a command's results
 //! stay pipeable. The file, when enabled, is `state/logs/xpack.log.<date>` in
-//! the installation, rotated daily and capped at [`MAX_LOG_FILES`] files.
+//! the installation: a new file each day (by the UTC date), each one stopping
+//! at [`MAX_LOG_FILE_BYTES`], and only the newest [`MAX_LOG_FILES`] kept.
 //!
 //! ## Changing levels at run time
 //!
@@ -112,6 +113,7 @@
 //! bytes, or anything derived from them, are not. `KeyPair`'s `Debug` prints
 //! only a fingerprint for exactly this reason — do not work around it.
 
+mod capped;
 mod retention;
 
 use std::io::IsTerminal;
@@ -122,6 +124,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 use xpack_core::InstallPaths;
 
+pub use capped::MAX_LOG_FILE_BYTES;
 pub use retention::MAX_LOG_FILES;
 
 /// Environment variable that overrides every level decision.
@@ -298,12 +301,12 @@ fn open_file_layer(
     // decides when to start a new file; something has to end the old ones.
     retention::prune(&dir);
 
-    // A blocking appender on purpose. The non-blocking writer needs a guard
+    // Written synchronously on purpose. A non-blocking writer needs a guard
     // held for the lifetime of the process, and dropping it early silently
     // truncates the log — the exact failure this crate exists to prevent, in
     // the exact situation where nobody is watching. At this volume the cost of
     // writing synchronously is irrelevant.
-    let appender = tracing_appender::rolling::daily(&dir, "xpack.log");
+    let appender = capped::CappedLog::daily(dir.clone(), "xpack.log", format);
 
     // The file records everything this project emits, and deliberately ignores
     // the environment override. That variable exists to make a terminal
@@ -331,15 +334,18 @@ fn open_single_file(
     if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let file = std::fs::OpenOptions::new()
+    // Opened now, so a file that cannot be written is reported here rather
+    // than discovered by the first record.
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    // Blocking, for the reason the rolling file is: nothing may be lost when
+    // Synchronous, for the reason the daily file is: nothing may be lost when
     // the process ends. Everything this project emits, whatever the console
-    // is set to, because this is the record of a failure nobody watched.
-    let writer = std::sync::Mutex::new(file);
+    // is set to, because this is the record of a failure nobody watched. Every
+    // run appends to it, so it has the same size limit.
+    let writer = capped::CappedLog::fixed(path.to_path_buf(), format);
     let filter = default_filter("debug");
     let layer: BoxedLayer = match format {
         Format::Text => {

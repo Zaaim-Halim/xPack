@@ -2,12 +2,15 @@
 
 use std::path::Path;
 
-/// How many rotated log files to keep.
+/// How many log files to keep: the five most recent days an installation
+/// logged on.
 ///
-/// Two weeks of daily files. An installer that runs every day for three years
-/// would otherwise leave a thousand of them behind: rotation decides when to
-/// start a new file, and something separate has to end the old ones.
-pub const MAX_LOG_FILES: usize = 14;
+/// Enough to see what happened around a failure someone reports a few days
+/// late, and with each file capped at [`crate::MAX_LOG_FILE_BYTES`] the whole
+/// directory stays under about 80 MiB. An installation used every day for
+/// three years would otherwise leave a thousand files behind: a new file each
+/// day is not enough, something has to end the old ones.
+pub const MAX_LOG_FILES: usize = 5;
 
 /// Removes the oldest log files beyond [`MAX_LOG_FILES`].
 ///

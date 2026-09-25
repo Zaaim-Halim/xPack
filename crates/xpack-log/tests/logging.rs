@@ -70,10 +70,8 @@ fn old_log_files_are_pruned_so_the_directory_stays_bounded() {
         remaining.len()
     );
     // The oldest go first, so the newest must still be there.
-    assert!(
-        remaining.iter().any(|n| n.contains("2020-01-23")),
-        "the newest files must be kept: {remaining:?}"
-    );
+    let newest = format!("xpack.log.2020-01-{:02}", MAX_LOG_FILES + 9);
+    assert!(remaining.contains(&newest), "the newest files must be kept: {remaining:?}");
     assert!(logs.join("keep-me.txt").exists(), "unrelated files must not be touched");
 }
 
