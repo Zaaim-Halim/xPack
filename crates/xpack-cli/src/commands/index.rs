@@ -212,12 +212,14 @@ struct Described {
 /// With a key, the manifest comes from a verified package. Without one it is
 /// read unverified, exactly as `xpack inspect` does, and the caller is told.
 fn describe(path: &std::path::Path, key: Option<&xpack_security::PublicKey>) -> Result<Described> {
-    let manifest = match key {
-        Some(key) => PackageReader::open(path)?
-            .verify_with_keys(std::slice::from_ref(key))?
-            .manifest()
-            .clone(),
-        None => PackageReader::open(path)?.peek_manifest_unverified()?.clone(),
+    let mut reader = PackageReader::open(path)?;
+    let manifest = if let Some(key) = key {
+        reader.verify_with_keys(std::slice::from_ref(key))?.manifest().clone()
+    } else {
+        // Unverified, so a delta would otherwise be offered as the full
+        // package, and every client would download it and refuse it.
+        reader.ensure_full_package()?;
+        reader.peek_manifest_unverified()?.clone()
     };
 
     let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;

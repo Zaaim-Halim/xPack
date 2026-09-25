@@ -122,6 +122,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // the artefact trustworthy is the key pinned into the plan, and the
     // signature the *installer* checks at install time against it.
     let mut reader = PackageReader::open(&args.package)?;
+    // Read unverified below, so a delta would otherwise pass for a package
+    // and become an installer that fails on every machine.
+    reader.ensure_full_package()?;
     let manifest = reader.peek_manifest_unverified()?.clone();
 
     let signing_key = manifest.signing_key.clone().ok_or_else(|| {

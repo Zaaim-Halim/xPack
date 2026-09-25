@@ -691,6 +691,37 @@ fn index_refuses_a_package_url_that_is_not_https() {
 }
 
 #[test]
+fn a_delta_given_where_a_package_belongs_is_refused_and_says_what_it_is() {
+    // `installer` and an unverified `index` used to take a delta for a
+    // package: an installer that fails on every machine, an index every
+    // client downloads and refuses. `install` and `verify` called it an
+    // unsafe entry, a security failure for the wrong kind of file.
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let base = fixture.pack("1.0.0");
+    let target = fixture.pack("1.1.0");
+    let made = fixture.run(&["delta", &base, &target, "--out", "update.xpkgd"]);
+    assert!(made.status.success(), "{}", stderr(&made));
+
+    for args in [
+        &["installer", "update.xpkgd", "--out-dir", "out"][..],
+        &["index", "update.xpkgd", "--out-dir", "out"],
+        &["index", "update.xpkgd", "--out-dir", "out", "--key", "signing.pub.json"],
+        &["verify", "update.xpkgd", "--key", "signing.pub.json"],
+        &["install", "update.xpkgd", "--trust", "signing.pub.json"],
+    ] {
+        let out = fixture.run_in_root(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("is a delta (an update from 1.0.0), not a full package"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+        assert!(!fixture.path().join("out").exists(), "{args:?} wrote output");
+    }
+}
+
+#[test]
 fn index_verifies_when_given_a_key() {
     let fixture = Fixture::new();
     fixture.keygen();

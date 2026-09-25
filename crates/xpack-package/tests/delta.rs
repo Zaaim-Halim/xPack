@@ -318,6 +318,32 @@ fn a_full_package_is_not_accepted_as_a_delta() {
 }
 
 #[test]
+fn a_delta_is_not_accepted_as_a_full_package_and_says_what_it_is() {
+    // Read as a package, the delta's plan is an entry outside the payload,
+    // which used to be reported as an unsafe entry: a security failure for
+    // what is only the wrong kind of file.
+    let world = World::new();
+    let (path, _) = world.build_delta();
+
+    let reader = PackageReader::open(&path).unwrap();
+    assert!(reader.is_delta());
+    let error = reader.verify_with_keys(&[world.key.public()]).unwrap_err();
+
+    assert!(!error.is_integrity_failure(), "reported as a security failure: {error}");
+    let message = error.to_string();
+    assert!(message.contains("is a delta (an update from 1.0.0), not a full package"), "{message}");
+    assert!(message.contains("xpack index --delta"), "{message}");
+}
+
+#[test]
+fn a_full_package_is_not_mistaken_for_a_delta() {
+    let world = World::new();
+    let mut reader = PackageReader::open(&world.target_package).unwrap();
+    assert!(!reader.is_delta());
+    reader.ensure_full_package().unwrap();
+}
+
+#[test]
 #[cfg(unix)]
 fn a_reused_executable_keeps_its_permission_bits() {
     // A reused file is adopted from the installed version rather than

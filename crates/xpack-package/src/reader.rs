@@ -48,6 +48,42 @@ impl PackageReader {
         Ok(Self { archive, path: path.to_path_buf() })
     }
 
+    /// Whether this file is a delta rather than a full package.
+    ///
+    /// Read from the archive itself rather than the file name, which is only
+    /// a convention.
+    pub fn is_delta(&self) -> bool {
+        self.archive.index_for_name(crate::delta::DELTA_ENTRY).is_some()
+    }
+
+    /// Refuses a delta, with an explanation, where a full package is needed.
+    ///
+    /// Read as a package, a delta's plan is simply an entry outside the
+    /// payload, and would be reported as an unsafe entry — a security failure
+    /// for what is only the wrong kind of file. Worse, a command that never
+    /// verifies would take it for a package: an installer built from it, or
+    /// an index offering it, fails on every machine it reaches.
+    pub fn ensure_full_package(&mut self) -> Result<()> {
+        if !self.is_delta() {
+            return Ok(());
+        }
+        let from = self
+            .peek_delta_base_unverified()
+            .map_or_else(|_| String::new(), |base| format!(" from {base}"));
+        let name = self.path.file_name().map_or_else(
+            || self.path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        Err(Error::invalid(
+            "package",
+            format!(
+                "{name} is a delta (an update{from}), not a full package. The updater applies \
+                 deltas it finds in an update index; to install or publish a version, use its \
+                 full .xpkg, and offer a delta with `xpack index --delta`"
+            ),
+        ))
+    }
+
     /// Parses the manifest **without checking the signature**.
     ///
     /// The deliberately awkward name is the point: the result is
@@ -82,6 +118,7 @@ impl PackageReader {
     /// manifest to verify it would break on any serialiser whitespace or
     /// key-order difference.
     pub fn verify(mut self, trust: &TrustStore) -> Result<VerifiedPackage> {
+        self.ensure_full_package()?;
         let manifest_bytes = self.read_manifest_bytes()?;
         let signature = self.read_signature()?;
 
@@ -97,6 +134,7 @@ impl PackageReader {
     /// Used by `xpack verify --key` and by the first install, where the pin
     /// does not exist yet.
     pub fn verify_with_keys(mut self, keys: &[PublicKey]) -> Result<VerifiedPackage> {
+        self.ensure_full_package()?;
         let manifest_bytes = self.read_manifest_bytes()?;
         let signature = self.read_signature()?;
         let signing_key = signature::verify_any(keys, &manifest_bytes, &signature)
