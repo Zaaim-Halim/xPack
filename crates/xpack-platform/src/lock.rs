@@ -105,6 +105,34 @@ impl InstallLock {
         Ok(Self { file, paths: paths.clone() })
     }
 
+    /// Takes the lock, waiting up to `timeout` for another process to let go.
+    ///
+    /// For a caller that must not fail merely because another operation is
+    /// briefly busy: the launcher, which starts the background updater just
+    /// before taking the lock itself and would otherwise refuse to open the
+    /// application whenever that updater got there first. Past the timeout
+    /// it fails exactly as [`Self::acquire`] does.
+    pub fn acquire_within(paths: &InstallPaths, timeout: std::time::Duration) -> Result<Self> {
+        /// Short enough that a lock held for a few milliseconds costs about
+        /// that much, long enough not to spin.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match Self::acquire(paths) {
+                Err(Error::Locked(held)) => {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        return Err(Error::Locked(held));
+                    }
+                    tracing::debug!(lock = %held, "installation busy; waiting");
+                    std::thread::sleep(POLL.min(deadline - now));
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// The installation this lock protects.
     pub fn paths(&self) -> &InstallPaths {
         &self.paths

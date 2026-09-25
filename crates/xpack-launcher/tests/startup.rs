@@ -1058,3 +1058,25 @@ fn a_manifest_cannot_lie_to_the_application_about_where_it_lives() {
     let observed = std::fs::read_to_string(world.paths.root().join("observed-dir")).unwrap();
     assert_eq!(std::path::Path::new(&observed), world.paths.root());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_start_waits_for_a_brief_holder_of_the_installation_rather_than_failing() {
+    // The background updater the launcher has just started takes the lock
+    // for the moment it records a check. A start that lost that race used to
+    // refuse to open the application at all.
+    let world = World::new();
+    world.install("1.0.0", Behaviour::ExitsCleanly, 5);
+
+    let held = InstallLock::acquire(&world.paths).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    let outcome = world.launcher().launch(&[], true);
+    releaser.join().unwrap();
+
+    let outcome = outcome.expect("the start gave up while the lock was briefly held");
+    assert_eq!(outcome.version, v("1.0.0"));
+    assert_eq!(outcome.exit_code, Some(0));
+}

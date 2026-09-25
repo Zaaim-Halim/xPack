@@ -31,6 +31,11 @@ pub const APPLICATION_DIR_ENV: &str = xpack_core::paths::APPLICATION_DIR_ENV;
 /// How often a probationary process is checked for having exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a start waits for another operation to let go of the
+/// installation. Long enough for the updater to unpack an ordinary update;
+/// past it, the person is told another operation is running.
+const LOCK_WAIT: Duration = Duration::from_secs(15);
+
 /// What happened to a probationary launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupResult {
@@ -341,8 +346,15 @@ impl Launcher {
         Ok(rolled_back)
     }
 
+    /// Takes the installation lock, waiting for a brief holder.
+    ///
+    /// The launcher starts the background updater just before it needs the
+    /// lock itself, and that updater takes the lock for the moment it records
+    /// a check, or for as long as it unpacks an update it downloaded. Failing
+    /// at once would leave a person's click doing nothing whenever the
+    /// updater got there first.
     fn lock(&self) -> Result<InstallLock> {
-        InstallLock::acquire(&self.paths)
+        InstallLock::acquire_within(&self.paths, LOCK_WAIT)
     }
 
     fn application_id(&self) -> Result<String> {

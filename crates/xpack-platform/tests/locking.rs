@@ -315,3 +315,40 @@ fn a_download_lease_is_released_when_its_holder_ends() {
         spawn_child("lease-free", dir.path(), "a_download_lease_is_released_when_its_holder_ends");
     assert_eq!(status.code(), Some(CHILD_LEASE_FREE), "the lease outlived its holder");
 }
+
+#[test]
+fn waiting_for_the_lock_succeeds_once_a_brief_holder_lets_go() {
+    // The launcher's case: its own background updater holds the lock for the
+    // moment it takes to record a check. Held here in this process, which
+    // excludes a second acquisition exactly as another process would.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    let held = InstallLock::acquire(&paths).unwrap();
+    assert!(InstallLock::acquire(&paths).is_err(), "the lock was not held");
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+    });
+    let started = std::time::Instant::now();
+    let lock = InstallLock::acquire_within(&paths, std::time::Duration::from_secs(10));
+    releaser.join().unwrap();
+
+    assert!(lock.is_ok(), "{:?}", lock.err());
+    assert!(started.elapsed() >= std::time::Duration::from_millis(250), "it did not wait");
+}
+
+#[test]
+fn waiting_for_the_lock_gives_up_at_the_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    let _held = InstallLock::acquire(&paths).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = InstallLock::acquire_within(&paths, std::time::Duration::from_millis(300));
+    let waited = started.elapsed();
+
+    assert!(matches!(result, Err(xpack_core::Error::Locked(_))), "{result:?}");
+    assert!(waited >= std::time::Duration::from_millis(300), "gave up after {waited:?}");
+    assert!(waited < std::time::Duration::from_secs(5), "overran to {waited:?}");
+}
