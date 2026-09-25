@@ -39,6 +39,19 @@ public class IndexMojo extends AbstractXPackMojo {
     private String releaseNotes;
 
     /**
+     * Where the packages are downloaded from, when that is not beside the
+     * index.
+     *
+     * <p>Left empty, each package is named by file name and uploaded next to
+     * its platform's index. Set, each is named by its full address,
+     * {@code <packageUrl>/<file name>}: the index can then live on a static
+     * site while the packages are attached to a release. Must be
+     * {@code https}; the command line refuses anything else.
+     */
+    @Parameter(property = "xpack.index.packageUrl")
+    private String packageUrl;
+
+    /**
      * Deltas to offer beside the full packages, named directly.
      *
      * <p>Left empty, every delta {@code xpack:delta} produced is offered.
@@ -85,6 +98,10 @@ public class IndexMojo extends AbstractXPackMojo {
         if (releaseNotes != null && !releaseNotes.isBlank()) {
             arguments.add("--release-notes");
             arguments.add(releaseNotes);
+        }
+        if (packageUrl != null && !packageUrl.isBlank()) {
+            arguments.add("--package-url");
+            arguments.add(packageUrl);
         }
         for (Path delta : deltasToPublish()) {
             arguments.add("--delta");

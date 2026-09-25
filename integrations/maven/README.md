@@ -138,6 +138,23 @@ no earlier version.
 Attaching can be turned off with `-Dxpack.attach=false`, at the cost of having
 to supply earlier packages yourself through `<deltaFromFiles>`.
 
+## Where the packages are served from
+
+`xpack:index` writes one `stable.json` per platform into
+`target/xpack/site`. By default each names its package by file name, so you
+upload the package beside it: one directory per platform, served from the
+`<update><url>` in the manifest.
+
+To keep the packages somewhere else, such as attached to a GitHub Release
+while the small index files go to a static site, name where they are
+downloaded from:
+
+```xml
+<packageUrl>https://github.com/example/myapp/releases/download/v${project.version}</packageUrl>
+```
+
+Each package is then named by its full address. It must be `https`.
+
 ## Windows icons and names
 
 On Windows the icon Explorer draws and the name Task Manager shows live
