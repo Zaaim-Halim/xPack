@@ -184,9 +184,35 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
         "launching application"
     );
 
-    command
-        .spawn()
+    spawn_when_not_busy(&mut command)
         .map_err(|e| Error::Launch(format!("could not start {}: {e}", executable.display())))
+}
+
+/// Starts `command`, waiting out a brief "text file busy".
+///
+/// Linux refuses to execute a file that any process holds open for writing.
+/// A multi-threaded program that has just written an executable, such as an
+/// installer unpacking a version and then opening it, can meet that refusal
+/// even after closing the file: another thread may have created a process in
+/// the moment the file was open, and that child keeps a copy of the handle
+/// until it starts its own program. That lasts milliseconds, so it is waited
+/// out, for at most about a second; anything else fails at once.
+fn spawn_when_not_busy(command: &mut Command) -> std::io::Result<Child> {
+    const ATTEMPTS: u32 = 40;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(PAUSE);
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Resolves the working directory, defaulting to the version directory.

@@ -138,7 +138,20 @@ fn launch_capturing(request: &LaunchRequest) -> String {
     for (k, v) in &request.spec.environment {
         command.env(k, v);
     }
-    let output = command.output().expect("child should run");
+    // Started here directly rather than through `launch`, so the brief
+    // "text file busy" that `launch` waits out is waited out here too.
+    let mut attempts = 0;
+    let output = loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 40 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => break result.expect("child should run"),
+        }
+    };
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
@@ -153,6 +166,32 @@ fn launch_starts_a_real_process_and_reports_its_exit_status() {
     let mut child = launch(&request).expect("the process must start");
     let status = child.wait().unwrap();
     assert!(status.success(), "the script exits zero");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn launch_waits_out_an_executable_briefly_held_open_for_writing() {
+    // What another thread's child does to a file this process just wrote:
+    // holds a write handle to it for a moment. Linux refuses to execute the
+    // file meanwhile.
+    let dir = tempfile::tempdir().unwrap();
+    write_script(dir.path(), "bin/run.sh");
+    let writer =
+        std::fs::OpenOptions::new().append(true).open(dir.path().join("bin/run.sh")).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(writer);
+    });
+
+    let mut request = LaunchRequest::new(dir.path(), spec("bin/run.sh", &[]));
+    request.inherit_stdio = false;
+    let started = std::time::Instant::now();
+    let child = launch(&request);
+    releaser.join().unwrap();
+
+    let mut child = child.expect("launch gave up on a file busy for a moment");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(250), "it did not wait");
+    assert!(child.wait().unwrap().success());
 }
 
 // --- the derived current link -------------------------------------------
