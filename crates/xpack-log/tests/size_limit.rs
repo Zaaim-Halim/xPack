@@ -29,7 +29,10 @@ fn a_program_logging_in_a_loop_stops_at_the_limit() {
         .filter(|e| e.file_name().to_string_lossy().starts_with("xpack.log"))
         .collect();
     assert_eq!(files.len(), 1, "one day, one file");
-    let size = files[0].metadata().unwrap().len();
+    // Asked of the file itself. A directory entry's size can lag on Windows
+    // while the file is still open for writing, as this one is: the logging
+    // set up above keeps it open for the rest of the process.
+    let size = std::fs::metadata(files[0].path()).unwrap().len();
     assert!(size >= MAX_LOG_FILE_BYTES, "stopped early, at {size} bytes");
     assert!(size < MAX_LOG_FILE_BYTES + 4096, "grew to {size} bytes, past the limit");
 
