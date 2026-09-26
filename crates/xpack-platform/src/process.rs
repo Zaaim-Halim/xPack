@@ -21,6 +21,21 @@ pub struct LaunchRequest {
     pub user_arguments: Vec<String>,
     /// Whether the child keeps this process's standard streams.
     pub inherit_stdio: bool,
+    /// Whether the child must run without a console window.
+    ///
+    /// Only for a graphical application, started by a launcher that has no
+    /// console itself, such as the one a Start-Menu shortcut opens. Windows
+    /// gives a console-subsystem program (`java.exe`, most interpreters) a
+    /// console of its own when its parent has none, and for a program that
+    /// draws its own windows that console is only a black window behind them.
+    ///
+    /// Never for an application that needs a terminal: the console is where it
+    /// reads and writes, and without one it could not be used at all. Nor for a
+    /// launcher started from a terminal, whose application writes to that
+    /// terminal. The caller decides, since only it knows both; this only
+    /// carries the answer out. Nothing changes on other platforms, where a
+    /// spawned process never gets a window it did not open.
+    pub without_console: bool,
     /// Environment the launcher adds, on top of the manifest's.
     ///
     /// Kept separate from the manifest's own entries because these are set by
@@ -38,6 +53,7 @@ impl LaunchRequest {
             spec,
             user_arguments: Vec::new(),
             inherit_stdio: true,
+            without_console: false,
             launcher_environment: Vec::new(),
         }
     }
@@ -174,6 +190,9 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
     } else {
         command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     }
+    if request.without_console {
+        without_a_console(&mut command);
+    }
 
     tracing::info!(
         executable = %executable.display(),
@@ -186,6 +205,34 @@ pub fn launch(request: &LaunchRequest) -> Result<Child> {
 
     spawn_when_not_busy(&mut command)
         .map_err(|e| Error::Launch(format!("could not start {}: {e}", executable.display())))
+}
+
+/// Stops Windows giving a child a console window of its own.
+///
+/// A console-subsystem program gets a console when its parent has none to
+/// inherit, and that console is a black window. `CREATE_NO_WINDOW` suppresses
+/// it. A program that opens its own windows is unaffected: Windows ignores the
+/// flag for it, so it is safe whatever the child turns out to be.
+///
+/// `DETACHED_PROCESS` would suppress the window too. It is deliberately not
+/// used: the two are documented as mutually exclusive, and `CREATE_NO_WINDOW`
+/// is the one that leaves the child's standard handles as the caller set them.
+#[cfg(windows)]
+pub fn without_a_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    /// `CREATE_NO_WINDOW` from `processthreadsapi.h`. Spelled out rather than
+    /// taken from `windows-sys`, where it needs another feature: its value is
+    /// part of a stable ABI.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// Nothing to do: no Unix platform gives a spawned process a window.
+#[cfg(not(windows))]
+pub fn without_a_console(command: &mut Command) {
+    let _ = command;
 }
 
 /// Starts `command`, waiting out a brief "text file busy".

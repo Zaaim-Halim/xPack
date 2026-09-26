@@ -31,6 +31,6 @@ pub mod windows_manifest;
 pub use environment::announce_environment_change;
 pub use link::{LinkOutcome, update_current_link};
 pub use lock::{DownloadLease, InstallLock};
-pub use process::{LaunchRequest, launch, request_close, resolve_executable};
+pub use process::{LaunchRequest, launch, request_close, resolve_executable, without_a_console};
 pub use space::{available_space, ensure_space};
 pub use windows_manifest::WINDOWS_MANIFEST;

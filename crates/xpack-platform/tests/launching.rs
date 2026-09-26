@@ -335,3 +335,36 @@ fn a_link_failure_is_not_a_result_and_cannot_fail_an_install() {
     assert!(!unsupported.is_updated());
     unsupported.log();
 }
+
+// --- no console window ---------------------------------------------------
+
+/// A console program started without a console has no console window at all.
+///
+/// Performs what a Start-Menu shortcut does to the application's own program:
+/// starts a console-subsystem executable (PowerShell, as `java.exe` is one),
+/// which then asks Windows for its console window and writes the answer to a
+/// file. Without the flag it would have one: inherited from this test's
+/// console, or, under a parent with none, a new window on the user's screen.
+#[cfg(windows)]
+#[test]
+fn a_child_started_without_a_console_has_no_console_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let answer = dir.path().join("console.txt");
+    let script = format!(
+        "$t = Add-Type -Name Console -Namespace XpackTest -PassThru -MemberDefinition \
+         '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; \
+         [System.IO.File]::WriteAllText('{}', $t::GetConsoleWindow().ToInt64().ToString())",
+        answer.display()
+    );
+    let mut request = xpack_platform::LaunchRequest::new(
+        dir.path(),
+        spec("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]),
+    );
+    request.inherit_stdio = false;
+    request.without_console = true;
+
+    let status = xpack_platform::launch(&request).expect("PowerShell must start").wait().unwrap();
+    assert!(status.success(), "the script failed: {status}");
+    let window = fs::read_to_string(&answer).expect("the script wrote no answer");
+    assert_eq!(window.trim(), "0", "the child had a console window");
+}
