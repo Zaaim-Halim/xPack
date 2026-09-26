@@ -18,6 +18,7 @@ import org.eclipse.aether.resolution.ArtifactResult;
 import org.eclipse.aether.resolution.VersionRangeRequest;
 import org.eclipse.aether.resolution.VersionRangeResolutionException;
 import org.eclipse.aether.resolution.VersionRangeResult;
+import org.eclipse.aether.transfer.MetadataNotFoundException;
 import org.eclipse.aether.version.Version;
 
 /**
@@ -94,7 +95,37 @@ public final class ReleaseArchive {
             log.warn("xpack: could not ask the repository which versions exist: " + e.getMessage());
             return Releases.unknown();
         }
+        Exception failure = unanswered(result);
+        if (failure != null) {
+            log.warn("xpack: could not ask the repository which versions exist: " + failure.getMessage());
+            return Releases.unknown();
+        }
+        return released(result, below);
+    }
 
+    /**
+     * Why a repository could not say which versions exist, or null when every
+     * repository answered.
+     *
+     * <p>The resolver does not throw when a repository refuses (a 401 from a
+     * registry that wants credentials) or cannot be reached: it records the
+     * failure and answers with what the others said, which may be nothing.
+     * Read at face value, that is the answer of a first release, and a
+     * release would go out with no delta for anyone. A repository that
+     * simply has no listing for the artefact is different: that is what a
+     * first release looks like, and it is recorded as not found.
+     */
+    static Exception unanswered(VersionRangeResult result) {
+        for (Exception exception : result.getExceptions()) {
+            if (!(exception instanceof MetadataNotFoundException)) {
+                return exception;
+            }
+        }
+        return null;
+    }
+
+    /** The released versions in a complete answer, oldest first, earlier than {@code below}. */
+    static Releases released(VersionRangeResult result, String below) {
         List<String> found = new ArrayList<>();
         for (Version version : result.getVersions()) {
             String text = version.toString();

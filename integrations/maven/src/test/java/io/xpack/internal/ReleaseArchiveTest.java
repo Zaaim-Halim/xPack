@@ -8,6 +8,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.aether.metadata.DefaultMetadata;
+import org.eclipse.aether.metadata.Metadata;
+import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.VersionRangeRequest;
+import org.eclipse.aether.resolution.VersionRangeResult;
+import org.eclipse.aether.transfer.MetadataNotFoundException;
+import org.eclipse.aether.transfer.MetadataTransferException;
+import org.eclipse.aether.util.version.GenericVersionScheme;
 import org.junit.jupiter.api.Test;
 
 class ReleaseArchiveTest {
@@ -70,5 +78,70 @@ class ReleaseArchiveTest {
         for (String version : new String[] {"1.0.0", "0.0.1", "10.20.30"}) {
             assertEquals(0, ReleaseArchive.compare(version, version));
         }
+    }
+
+    private static final Metadata LISTING =
+            new DefaultMetadata("com.example", "app", "maven-metadata.xml",
+                    Metadata.Nature.RELEASE_OR_SNAPSHOT);
+    private static final RemoteRepository REGISTRY =
+            new RemoteRepository.Builder("github", "default",
+                    "https://maven.pkg.github.com/example/app").build();
+
+    private static VersionRangeResult answer(String... versions)
+            throws Exception {
+        VersionRangeResult result =
+                new VersionRangeResult(
+                        new VersionRangeRequest());
+        GenericVersionScheme scheme =
+                new GenericVersionScheme();
+        for (String version : versions) {
+            result.addVersion(scheme.parseVersion(version));
+        }
+        return result;
+    }
+
+    @Test
+    void a_repository_that_refused_is_not_a_first_release() throws Exception {
+        // What GitHub Packages answers without credentials. The resolver
+        // records it and returns no versions; taken at its word, that is a
+        // first release, and the release ships with no delta for anyone.
+        VersionRangeResult result = answer();
+        result.addException(new MetadataTransferException(LISTING, REGISTRY,
+                "status code: 401, reason phrase: Unauthorized (401)"));
+
+        assertTrue(ReleaseArchive.unanswered(result) != null);
+    }
+
+    @Test
+    void a_refusal_counts_even_when_another_repository_answered() throws Exception {
+        // One repository's versions are not all of them: the refusing one may
+        // hold the releases users actually have.
+        VersionRangeResult result = answer("1.0.0");
+        result.addException(new MetadataTransferException(LISTING, REGISTRY,
+                "Connection refused"));
+
+        assertTrue(ReleaseArchive.unanswered(result) != null);
+    }
+
+    @Test
+    void no_listing_anywhere_is_a_first_release() throws Exception {
+        // The first release of anything: the repository answers, and has
+        // nothing.
+        VersionRangeResult result = answer();
+        result.addException(new MetadataNotFoundException(LISTING, REGISTRY));
+
+        assertEquals(null, ReleaseArchive.unanswered(result));
+        ReleaseArchive.Releases releases = ReleaseArchive.released(result, "1.0.0");
+        assertTrue(releases.known());
+        assertTrue(releases.versions().isEmpty());
+    }
+
+    @Test
+    void a_complete_answer_lists_the_earlier_releases_oldest_first() throws Exception {
+        VersionRangeResult result =
+                answer("1.10.0", "1.2.0", "1.9.0", "2.0.0-SNAPSHOT", "2.0.0");
+
+        assertEquals(null, ReleaseArchive.unanswered(result));
+        assertEquals(List.of("1.2.0", "1.9.0", "1.10.0"), ReleaseArchive.released(result, "2.0.0").versions());
     }
 }
