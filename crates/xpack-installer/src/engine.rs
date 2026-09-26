@@ -27,6 +27,7 @@ impl Engine for VerifiedPayload {
         let request = Request {
             root: choices.root.clone(),
             desktop_entry: choices.desktop_entry,
+            desktop_shortcut: choices.desktop_shortcut,
             command: choices.command,
         };
         let outcome = self.install_into(&request, progress)?;

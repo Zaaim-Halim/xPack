@@ -116,6 +116,7 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     let request = Request {
         root,
         desktop_entry: if args.no_shortcut { Some(false) } else { None },
+        desktop_shortcut: true,
         command: if args.no_path { Some(false) } else { None },
     };
     let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;

@@ -132,6 +132,11 @@ pub struct Request {
     /// Whether to add the desktop entry the package asks for. `None` leaves
     /// it to the package. See [`InstallOptions::desktop_entry`].
     pub desktop_entry: Option<bool>,
+    /// Whether to put a shortcut on the desktop beside the desktop entry.
+    /// Yes unless declined, as the installer offers it ticked; it only ever
+    /// happens where the entry is made on a first installation. See
+    /// [`InstallOptions::desktop_shortcut`].
+    pub desktop_shortcut: bool,
     /// Whether to add the command the package asks for. `None` leaves it to
     /// the package. See [`InstallOptions::command`].
     pub command: Option<bool>,
@@ -140,7 +145,7 @@ pub struct Request {
 impl Request {
     /// Install into `root`, choosing nothing else.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, desktop_entry: None, command: None }
+        Self { root, desktop_entry: None, desktop_shortcut: true, command: None }
     }
 }
 
@@ -157,6 +162,8 @@ pub struct Outcome {
     pub launcher: PathBuf,
     /// What happened to the desktop entry, if the package asked for one.
     pub desktop: xpack_install::DesktopOutcome,
+    /// What happened to the shortcut on the desktop.
+    pub desktop_shortcut: xpack_install::DesktopOutcome,
     /// What happened to the command, if the package asked for one.
     pub command: xpack_install::DesktopOutcome,
     /// What the user types to start the application and its companions: the
@@ -453,7 +460,7 @@ impl VerifiedPayload {
             notifier: payload.binary("xpack-notify"),
             desktop_roots: None,
             desktop_entry: request.desktop_entry,
-            desktop_shortcut: false,
+            desktop_shortcut: request.desktop_shortcut,
             command: request.command,
             command_roots: None,
         };
@@ -474,6 +481,7 @@ impl VerifiedPayload {
             activated: installed.activated,
             launcher: launcher_to_report(&paths, &names),
             desktop: installed.desktop,
+            desktop_shortcut: installed.desktop_shortcut,
             command_names: added_commands(&installed.command),
             command_off_path: command_off_path(&installed.command),
             command: installed.command,
@@ -607,6 +615,17 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_nobody_was_asked_about_makes_what_the_installer_offers_ticked() {
+        // The console run with no flags and the wizard clicked straight
+        // through must do the same thing: the desktop shortcut is offered
+        // ticked, so a request that says nothing asks for one.
+        let request = Request::new(PathBuf::from("/apps"));
+        assert!(request.desktop_shortcut);
+        assert_eq!(request.desktop_entry, None);
+        assert_eq!(request.command, None);
+    }
 
     #[test]
     fn a_directory_on_the_path_is_found_and_one_off_it_is_not() {
