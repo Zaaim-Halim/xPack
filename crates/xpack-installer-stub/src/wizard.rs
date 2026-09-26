@@ -94,7 +94,11 @@ pub(crate) fn run(args: &Args, log: Option<std::path::PathBuf>) -> Option<ExitCo
     let icon = payload.icon().map(|icon| icon.bytes.clone());
     let engine: Arc<dyn Engine> = Arc::new(payload);
 
-    match window::run(Wizard::new(spec), engine, icon.as_deref()) {
+    let mut wizard = Wizard::new(spec);
+    if args.no_desktop_shortcut {
+        wizard.untick_desktop_shortcut();
+    }
+    match window::run(wizard, engine, icon.as_deref()) {
         Shown::NotShown => None,
         Shown::Ended(conclusion) => Some(ExitCode::from(exit_code(conclusion))),
     }

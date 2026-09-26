@@ -45,6 +45,13 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) no_shortcut: bool,
 
+    /// Do not put a shortcut on the desktop beside the desktop entry.
+    ///
+    /// One is added on a first installation that adds the entry, unless this
+    /// says not to. An existing installation never gets one.
+    #[arg(long)]
+    pub(crate) no_desktop_shortcut: bool,
+
     /// Do not add the command the application asks for.
     ///
     /// The command is what a terminal starts the application by. On the same
@@ -105,6 +112,13 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     if args.dry_run {
         xpack_core::outln!("would install into {}", payload.paths(&root)?.root().display());
         xpack_core::outln!("signed by       {}", short_key(&payload.plan().signing_key));
+        if payload.manifest().desktop.shortcut
+            && !args.no_shortcut
+            && !args.no_desktop_shortcut
+            && existing.is_first_install()
+        {
+            xpack_core::outln!("would add       a shortcut on the desktop");
+        }
         if let Some(command) = &payload.manifest().command
             && !args.no_path
         {
@@ -116,16 +130,18 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     let request = Request {
         root,
         desktop_entry: if args.no_shortcut { Some(false) } else { None },
-        desktop_shortcut: true,
+        desktop_shortcut: !args.no_desktop_shortcut,
         command: if args.no_path { Some(false) } else { None },
     };
     let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
 
     xpack_core::outln!();
     xpack_core::outln!("Installed into {}", outcome.root.display());
-    if let xpack_install::DesktopOutcome::Done(entries) = &outcome.desktop {
-        for entry in entries {
-            xpack_core::outln!("Added         {}", entry.display());
+    for outcome in [&outcome.desktop, &outcome.desktop_shortcut] {
+        if let xpack_install::DesktopOutcome::Done(entries) = outcome {
+            for entry in entries {
+                xpack_core::outln!("Added         {}", entry.display());
+            }
         }
     }
     xpack_core::outln!();

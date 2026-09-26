@@ -324,7 +324,8 @@ MyApp-1.3.0-windows-x64-Setup.exe --silent
 | `--silent` | No window. |
 | `--dry-run` | Report what installing would do, and exit with the code it would return. |
 | `--root <DIR>` | Install somewhere other than the per-user default. |
-| `--no-shortcut` | Skip the Start Menu / Applications entry (first install only). |
+| `--no-shortcut` | Skip the Start Menu / Applications entry, and with it the desktop shortcut (first install only). |
+| `--no-desktop-shortcut` | Skip the shortcut on the desktop, which is otherwise added beside the entry (first install only). |
 | `--no-path` | Skip the command the application asks for, so a terminal cannot start it by name (first install only). |
 | `--log <FILE>` | Also write a log of the run. |
 
