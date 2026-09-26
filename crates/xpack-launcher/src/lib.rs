@@ -68,4 +68,4 @@ pub use launcher::{
     APPLICATION_DIR_ENV, HEALTH_FILE_ENV, Launcher, Outcome, RunningApplication, StartupResult,
     announce_a_staged_version, spawn_periodic_update_checks, spawn_updater,
 };
-pub use run::run;
+pub use run::{run, run_windowed};

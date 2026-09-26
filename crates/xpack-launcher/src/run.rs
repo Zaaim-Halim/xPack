@@ -64,9 +64,9 @@ fn launch_with_one_restart(
     // and leave nothing to bring it back — the user's application would simply
     // disappear. It still checks, stages and announces; the wording becomes
     // "at the next start", which by then is the truth.
-    Launcher::for_application_dir(launcher.paths().root())
-        .without_restart_offers()
-        .launch(arguments, true)
+    let again = Launcher::for_application_dir(launcher.paths().root()).without_restart_offers();
+    let again = if launcher.is_windowed() { again.windowed() } else { again };
+    again.launch(arguments, true)
 }
 
 /// Runs a launcher binary from start to finish.
@@ -75,9 +75,24 @@ fn launch_with_one_restart(
 /// itself, so that both `main` functions stay one line long and this stays
 /// testable.
 pub fn run() -> ExitCode {
+    run_as(false)
+}
+
+/// Runs the windowed launcher binary from start to finish.
+///
+/// The same as [`run`], for the build with no console of its own: which one
+/// is running is fixed when it is linked, so it is said here rather than
+/// guessed from the process at runtime, where a console build whose output
+/// is redirected would look the same.
+pub fn run_windowed() -> ExitCode {
+    run_as(true)
+}
+
+fn run_as(windowed: bool) -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     let launcher = match Launcher::discover() {
+        Ok(launcher) if windowed => launcher.windowed(),
         Ok(launcher) => launcher,
         Err(error) => {
             // Logging is not configured yet: without an installation there is

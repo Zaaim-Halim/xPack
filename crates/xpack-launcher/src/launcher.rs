@@ -91,12 +91,34 @@ pub struct Outcome {
 pub struct Launcher {
     paths: InstallPaths,
     offer_restart: bool,
+    windowed: bool,
 }
 
 impl Launcher {
     /// Builds a launcher for an explicit installation directory.
     pub fn for_application_dir(dir: impl Into<PathBuf>) -> Self {
-        Self { paths: InstallPaths::from_application_dir(dir), offer_restart: true }
+        Self {
+            paths: InstallPaths::from_application_dir(dir),
+            offer_restart: true,
+            windowed: false,
+        }
+    }
+
+    /// A launcher with no console of its own: the windowed build, which
+    /// shortcuts open.
+    ///
+    /// It starts a graphical application without a console, so none appears
+    /// behind the application's window. An application that needs a terminal
+    /// keeps its console either way: it is where the program is used.
+    #[must_use]
+    pub fn windowed(mut self) -> Self {
+        self.windowed = true;
+        self
+    }
+
+    /// Whether this launcher is the windowed build.
+    pub fn is_windowed(&self) -> bool {
+        self.windowed
     }
 
     /// Stops an update prompt offering to restart the application.
@@ -225,13 +247,15 @@ impl Launcher {
         let health_file = self.paths.health_file(&version);
         let _ = std::fs::remove_file(&health_file);
 
-        let request = LaunchRequest::new(self.paths.version_dir(&version), manifest.launch.clone())
-            .with_user_arguments(arguments.to_vec())
-            .with_launcher_environment(HEALTH_FILE_ENV, health_file.display().to_string())
-            .with_launcher_environment(
-                APPLICATION_DIR_ENV,
-                self.paths.root().display().to_string(),
-            );
+        let mut request =
+            LaunchRequest::new(self.paths.version_dir(&version), manifest.launch.clone())
+                .with_user_arguments(arguments.to_vec())
+                .with_launcher_environment(HEALTH_FILE_ENV, health_file.display().to_string())
+                .with_launcher_environment(
+                    APPLICATION_DIR_ENV,
+                    self.paths.root().display().to_string(),
+                );
+        request.without_console = self.windowed && !manifest.desktop.terminal;
         let mut child = launch(&request)?;
 
         let watch = self.watch_for_updates(&manifest, child.id(), wait);
@@ -585,7 +609,10 @@ fn spawn_updater_process(paths: &InstallPaths) -> Option<std::process::Child> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    without_a_console(&mut command);
+    // The updater is a console-subsystem binary started by a launcher that may
+    // have no console: without this, a black window sits over the application
+    // for as long as the update check runs.
+    xpack_platform::without_a_console(&mut command);
 
     match command.spawn() {
         Ok(child) => {
@@ -944,7 +971,9 @@ fn run_notifier(notifier: &Path, announcement: &Announcement, can_restart: bool)
     if can_restart {
         command.arg("--can-restart");
     }
-    without_a_console(&mut command);
+    // The notifier is windowed, so Windows ignores this for it: harmless, and
+    // it keeps a console away from whatever binary is found under its name.
+    xpack_platform::without_a_console(&mut command);
 
     let status = match command.status() {
         Ok(status) => status,
@@ -1043,42 +1072,6 @@ fn check_is_due(paths: &InstallPaths, interval: Duration) -> bool {
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
     loaded.value.update_check_is_due(now, interval.as_secs())
-}
-
-/// Stops Windows giving a background child a console window of its own.
-///
-/// The updater is a console-subsystem binary. Windows gives such a process a
-/// console when its parent has none to inherit, and that console is a black
-/// window that appears over the user's application and stays there for as long
-/// as the update check runs. `CREATE_NO_WINDOW` suppresses it.
-///
-/// `DETACHED_PROCESS` would suppress it too, and is the flag the name
-/// "detached" suggests. It is deliberately not used: the two are documented as
-/// mutually exclusive, and `CREATE_NO_WINDOW` is the one that leaves the
-/// child's standard handles alone — which matters, because the caller has
-/// already redirected all three to null and a second mechanism fighting over
-/// them buys nothing.
-///
-/// Detachment in the sense that matters — the updater outliving the launcher —
-/// needs no flag on Windows. A child process there has no lifetime tie to its
-/// parent; that tie is a Unix notion, and the thread waiting on the child
-/// handles it.
-#[cfg(windows)]
-fn without_a_console(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-
-    /// `CREATE_NO_WINDOW` from `processthreadsapi.h`. Spelled out rather than
-    /// pulled from a Windows crate: one constant does not justify the
-    /// dependency, and its value is part of a stable ABI.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-/// Nothing to do: no Unix platform gives a spawned process a window.
-#[cfg(not(windows))]
-fn without_a_console(command: &mut std::process::Command) {
-    let _ = command;
 }
 
 #[cfg(test)]
