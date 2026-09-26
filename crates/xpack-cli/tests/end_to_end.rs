@@ -1362,3 +1362,143 @@ fn a_commands_copy_of_the_launcher_starts_the_application() {
     assert!(run.status.success(), "{}", stderr(&run));
     assert!(stdout(&run).contains("running 1.0.0 args=x"), "{}", stdout(&run));
 }
+
+// --- the update notice ---------------------------------------------------
+
+/// Packs version 1.0.0 asking, or not, to announce its updates. Announcing
+/// needs the check while running, which is what finds an update to announce.
+fn pack_announcing(fixture: &Fixture, notify: bool) -> String {
+    fixture.write_payload("1.0.0", 0);
+    let path = fixture.path().join("xpack-1.0.0.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["update"] = serde_json::json!({ "notify": notify, "checkWhileRunning": true });
+    std::fs::write(&path, config.to_string()).unwrap();
+    fixture.pack_existing("1.0.0")
+}
+
+/// Builds an installer for `package` with the given `xpack`, runs it
+/// silently into a fresh root, and returns the application's installation.
+fn build_and_install(fixture: &Fixture, xpack: &Path, package: &str) -> PathBuf {
+    let built = Command::new(xpack)
+        .current_dir(fixture.path())
+        .args(["installer", package, "--out", "Demo-installer", "--json"])
+        .output()
+        .expect("xpack should run");
+    assert!(built.status.success(), "building the installer failed: {}", stderr(&built));
+    let report: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    let installer = match report["layout"].as_str() {
+        Some("bundle") => std::fs::read_dir(fixture.path().join("Demo-installer/Contents/MacOS"))
+            .unwrap()
+            .next()
+            .expect("a bundle executable")
+            .unwrap()
+            .path(),
+        _ => fixture.path().join("Demo-installer"),
+    };
+    let root = fixture.path().join("installed");
+    let ran = Command::new(&installer)
+        .args(["--root", &root.to_string_lossy(), "--silent"])
+        .output()
+        .expect("the installer should run");
+    assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
+    root.join("com.example.demo")
+}
+
+/// Where the notice lands for the fixture's application, named after it.
+fn notice_in(installation: &Path) -> PathBuf {
+    installation.join(format!("Demo Update Notice{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn notice_is_built() -> bool {
+    binary_dir().join(format!("xpack-notify{}", std::env::consts::EXE_SUFFIX)).is_file()
+}
+
+#[test]
+fn an_application_that_asks_to_announce_updates_is_installed_with_the_notice() {
+    // Only an installer can place the notice, and an update never adds one:
+    // an installer that leaves it out makes every update silent for good,
+    // whatever the publisher asked for. Seen on a real application, whose
+    // launcher then logged that it had no dialog to show.
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        // Linux has no notice; the next test covers what happens there.
+        return;
+    }
+    if !installer_binaries_are_built() || !notice_is_built() {
+        eprintln!("skipping: run `cargo build --workspace` first");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = pack_announcing(&fixture, true);
+    let installation = build_and_install(&fixture, &xpack(), &package);
+    let notice = notice_in(&installation);
+    assert!(notice.is_file(), "no update notice was installed at {}", notice.display());
+}
+
+#[test]
+fn an_application_that_does_not_ask_gets_no_notice() {
+    if !installer_binaries_are_built() {
+        eprintln!("skipping: run `cargo build --workspace` first");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = pack_announcing(&fixture, false);
+    let installation = build_and_install(&fixture, &xpack(), &package);
+    assert!(installation.is_dir(), "nothing was installed at {}", installation.display());
+    assert!(!notice_in(&installation).exists(), "a notice was installed nobody asked for");
+
+    // Where there is no dialog, asking changes nothing either.
+    if cfg!(target_os = "linux") {
+        let fixture = Fixture::new();
+        fixture.keygen();
+        let package = pack_announcing(&fixture, true);
+        let installation = build_and_install(&fixture, &xpack(), &package);
+        assert!(!notice_in(&installation).exists());
+    }
+}
+
+#[test]
+fn a_missing_notice_stops_the_installer_rather_than_leaving_it_out() {
+    // The failure this replaces was silent: an installer was built, installed
+    // fine, and its application never announced an update. So an `xpack`
+    // whose siblings lack the notice must refuse, and say what is missing.
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return;
+    }
+    if !installer_binaries_are_built() {
+        eprintln!("skipping: run `cargo build --workspace` first");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let package = pack_announcing(&fixture, true);
+
+    // A copy of `xpack` with every sibling it needs except the notice.
+    let tools = fixture.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let mut siblings =
+        vec!["xpack", "xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller"];
+    if cfg!(windows) {
+        siblings.extend(["xpack-installerw", "xpack-launcherw"]);
+    }
+    for name in siblings {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::fs::copy(binary_dir().join(&file), tools.join(&file)).unwrap();
+    }
+    let lonely = tools.join(format!("xpack{}", std::env::consts::EXE_SUFFIX));
+
+    let built = Command::new(&lonely)
+        .current_dir(fixture.path())
+        .args(["installer", &package, "--out", "Demo-installer"])
+        .output()
+        .expect("xpack should run");
+    assert!(!built.status.success(), "an installer was built without the notice it needs");
+    assert!(
+        stderr(&built).contains("xpack-notify"),
+        "the error does not say what is missing: {}",
+        stderr(&built)
+    );
+    assert!(!fixture.path().join("Demo-installer").exists(), "a partial installer was left behind");
+}

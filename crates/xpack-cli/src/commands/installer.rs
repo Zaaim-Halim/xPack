@@ -53,7 +53,9 @@ pub(crate) struct Args {
     ///
     /// Repeatable. Defaults to the launcher, updater and uninstaller sitting
     /// beside this executable, plus the windowed launcher when targeting
-    /// Windows.
+    /// Windows, and the update notice (`xpack-notify`) when the package asks
+    /// to announce its updates, checks for them while running, and targets
+    /// macOS or Windows.
     #[arg(long = "binary", value_name = "FILE")]
     binaries: Vec<PathBuf>,
 
@@ -150,7 +152,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         Some(path) => path.clone(),
         None => super::sibling_binary_required(stub_name(manifest.platform.os, args.console))?,
     };
-    let binaries = resolve_binaries(args, manifest.platform.os)?;
+    let binaries = resolve_binaries(args, &manifest)?;
 
     // Branded before they are embedded, and the stub before the payload is
     // appended: rewriting a resource section moves bytes, so doing it to the
@@ -450,7 +452,8 @@ fn stub_name(target: Os, console: bool) -> &'static str {
 }
 
 /// The runtime binaries to ship, defaulting to those beside this executable.
-fn resolve_binaries(args: &Args, target: Os) -> Result<Vec<PathBuf>> {
+fn resolve_binaries(args: &Args, manifest: &xpack_core::Manifest) -> Result<Vec<PathBuf>> {
+    let target = manifest.platform.os;
     if !args.binaries.is_empty() {
         for path in &args.binaries {
             if !path.is_file() {
@@ -466,12 +469,33 @@ fn resolve_binaries(args: &Args, target: Os) -> Result<Vec<PathBuf>> {
     if target == Os::Windows {
         wanted.push("xpack-launcherw");
     }
+    // An application that asks to announce its updates needs the notice
+    // installed with it, and only an installer can put it there: an update
+    // never adds one. Left out, every update is applied in silence whatever
+    // the publisher asked for. It exists where there is a dialog to show, and
+    // one that cannot be found is an error rather than a quiet omission.
+    if wants_notice(manifest) {
+        wanted.push("xpack-notify");
+    }
 
     let mut found = Vec::new();
     for name in wanted {
         found.push(super::sibling_binary_required(name)?);
     }
     Ok(found)
+}
+
+/// Whether an installer for this package must carry the update notice.
+///
+/// Exactly when installing it will place one: the application asks to
+/// announce updates, checks for them while it runs (the only check that can
+/// find one to announce), and the platform is one xPack has a dialog for,
+/// macOS or Windows. The installer applies the same rule, so shipping the
+/// notice under any other condition would only add bytes nobody installs.
+fn wants_notice(manifest: &xpack_core::Manifest) -> bool {
+    manifest.update.notify
+        && manifest.update.check_while_running
+        && matches!(manifest.platform.os, Os::Windows | Os::Macos)
 }
 
 /// Writes a stub with the payload and trailer appended.
@@ -920,6 +944,19 @@ mod tests {
         ] {
             let path = settings(dir.path(), json, licence);
             assert!(load_ui(Some(&path)).is_err(), "{json} was accepted");
+        }
+    }
+
+    #[test]
+    fn the_notice_is_shipped_where_it_is_asked_for_and_has_a_dialog() {
+        for (os, expected) in [(Os::Macos, true), (Os::Windows, true), (Os::Linux, false)] {
+            let mut manifest = manifest_named("Demo");
+            manifest.platform.os = os;
+            assert!(!wants_notice(&manifest), "{os:?} without update.notify");
+            manifest.update.notify = true;
+            assert!(!wants_notice(&manifest), "{os:?} announcing without checking while running");
+            manifest.update.check_while_running = true;
+            assert_eq!(wants_notice(&manifest), expected, "{os:?} announcing and checking");
         }
     }
 
