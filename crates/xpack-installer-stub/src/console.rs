@@ -9,11 +9,15 @@ use clap::Parser;
 use xpack_install::Existing;
 use xpack_installer::{Request, RootSource, exit};
 
-/// The installer's command line.
+// A plain comment, not a doc comment: clap turns doc comments into the help
+// a user reads. The bool count trips a lint meant for domain types, where
+// several flags usually mean a missing enum; these are command-line switches,
+// each independently settable, and clap requires exactly this shape.
+/// Installs the application this installer carries.
 ///
-/// The bool count trips a lint meant for domain types, where several flags
-/// usually mean a missing enum. These are command-line switches: each one is
-/// independently settable and clap requires exactly this shape.
+/// Run with no options, the macOS bundle and the windowed Windows build open
+/// the installation wizard. `--silent` installs without a window, and
+/// `--dry-run` says what would be installed without installing it.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]
 #[command(name = "xpack-installer", version, about = "Installs an xPack application")]
@@ -187,4 +191,22 @@ fn dry_run_code(existing: &Existing) -> u8 {
 /// told what to expect.
 fn short_key(hex: &str) -> String {
     hex.chars().take(16).collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Args;
+
+    #[test]
+    fn the_help_a_user_reads_is_written_for_them() {
+        // Doc comments become `--help`. A note meant for whoever maintains the
+        // code once reached every user who asked the installer for help.
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("Installs the application this installer carries"), "{help}");
+        for internal in ["lint", "clippy", "clap", "command line."] {
+            assert!(!help.contains(internal), "--help mentions {internal:?}:\n{help}");
+        }
+    }
 }
