@@ -117,6 +117,9 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         desktop_roots: None,
         // The manifest's request, or a choice recorded at an earlier install.
         desktop_entry: None,
+        // A shortcut on the desktop is a choice the installers offer; a
+        // developer installing a package from a terminal is not asked.
+        desktop_shortcut: false,
         // The same for the command, in the user's own `~/.local/bin` and `PATH`.
         command: None,
         command_roots: None,

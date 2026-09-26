@@ -1519,3 +1519,196 @@ fn a_version_the_disk_cannot_hold_is_refused_before_anything_is_written() {
         "the refused version was recorded"
     );
 }
+
+// --- the shortcut on the desktop ----------------------------------------
+
+/// Installs a package that asks for a desktop entry, choosing a desktop
+/// shortcut or not.
+fn install_with_a_desktop_shortcut(
+    dir: &std::path::Path,
+    key: &KeyPair,
+    version: &str,
+    desktop_shortcut: bool,
+    desktop_entry: Option<bool>,
+) -> xpack_install::Installed {
+    let lock = InstallLock::acquire(&install_paths(dir)).unwrap();
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir, "launcher")),
+        desktop_roots: Some(common::desktop_roots(dir)),
+        desktop_entry,
+        desktop_shortcut,
+        ..Default::default()
+    };
+    let package = common::build_package_with(dir, key, version, &wants_a_shortcut());
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    Installer::new(&lock).install(&mut verified, &options).unwrap()
+}
+
+/// The one shortcut on the test's desktop.
+fn shortcut_on_the_desktop(dir: &std::path::Path) -> std::path::PathBuf {
+    let desktop = common::desktop_roots(dir).desktop.unwrap();
+    let mut entries: Vec<_> =
+        std::fs::read_dir(&desktop).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(entries.len(), 1, "expected one shortcut on the desktop: {entries:?}");
+    entries.remove(0)
+}
+
+#[test]
+fn a_first_installation_that_asks_puts_a_shortcut_on_the_desktop_and_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let installed = install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", true, None);
+
+    let shortcut = shortcut_on_the_desktop(dir.path());
+    assert_eq!(
+        installed.desktop_shortcut,
+        xpack_install::DesktopOutcome::Done(vec![shortcut.clone()])
+    );
+    // What opens the application: the same thing its menu entry opens.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        std::fs::read_link(&shortcut).unwrap(),
+        common::desktop_roots(dir.path()).home.join("Applications").join("Example.app")
+    );
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let text = std::fs::read_to_string(&shortcut).unwrap();
+        assert!(text.contains("Exec="), "not a desktop entry: {text}");
+        assert_eq!(std::fs::metadata(&shortcut).unwrap().permissions().mode() & 0o111, 0o111);
+    }
+    let record =
+        std::fs::read_to_string(install_paths(dir.path()).desktop_shortcut_file()).unwrap();
+    assert!(record.contains(&*shortcut.file_name().unwrap().to_string_lossy()), "{record}");
+}
+
+#[test]
+fn no_shortcut_is_made_unless_asked_or_without_a_menu_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let not_asked = install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", false, None);
+    assert_eq!(not_asked.desktop_shortcut, xpack_install::DesktopOutcome::NothingToDo);
+
+    let other = tempfile::tempdir().unwrap();
+    let no_entry = install_with_a_desktop_shortcut(other.path(), &key, "1.0.0", true, Some(false));
+    assert_eq!(no_entry.desktop_shortcut, xpack_install::DesktopOutcome::NotRequested);
+
+    for base in [dir.path(), other.path()] {
+        assert!(!common::desktop_roots(base).desktop.unwrap().exists(), "a shortcut was made");
+        assert!(!install_paths(base).desktop_shortcut_file().exists(), "a record was made");
+    }
+}
+
+#[test]
+fn an_update_never_adds_a_shortcut_the_first_installation_did_not_make() {
+    // An installation made before desktop shortcuts existed has an
+    // uninstaller that could never remove one.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", false, None);
+    let update = install_with_a_desktop_shortcut(dir.path(), &key, "2.0.0", true, None);
+
+    assert_eq!(update.desktop_shortcut, xpack_install::DesktopOutcome::NothingToDo);
+    assert!(!common::desktop_roots(dir.path()).desktop.unwrap().exists());
+}
+
+#[test]
+fn an_update_refreshes_the_shortcut_where_it_was_written_even_after_the_desktop_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", true, None);
+    let shortcut = shortcut_on_the_desktop(dir.path());
+
+    // The update runs where the desktop is somewhere else now, as after a
+    // user synced it to another folder: the recorded file is the one kept.
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+    let mut moved = common::desktop_roots(dir.path());
+    moved.desktop = Some(dir.path().join("moved-desktop"));
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(common::fake_binary(dir.path(), "launcher")),
+        desktop_roots: Some(moved),
+        ..Default::default()
+    };
+    let package = common::build_package_with(dir.path(), &key, "2.0.0", &wants_a_shortcut());
+    let mut verified =
+        open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+    let update = Installer::new(&lock).install(&mut verified, &options).unwrap();
+
+    assert_eq!(
+        update.desktop_shortcut,
+        xpack_install::DesktopOutcome::Done(vec![shortcut.clone()])
+    );
+    assert!(std::fs::symlink_metadata(&shortcut).is_ok());
+    assert!(!dir.path().join("moved-desktop").exists(), "a second shortcut was made");
+}
+
+#[test]
+fn a_shortcut_the_user_deleted_stays_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", true, None);
+    let shortcut = shortcut_on_the_desktop(dir.path());
+    std::fs::remove_file(&shortcut).unwrap();
+
+    let update = install_with_a_desktop_shortcut(dir.path(), &key, "2.0.0", false, None);
+    assert_eq!(update.desktop_shortcut, xpack_install::DesktopOutcome::NothingToDo);
+    assert!(std::fs::symlink_metadata(&shortcut).is_err(), "the shortcut came back");
+    assert!(!install_paths(dir.path()).desktop_shortcut_file().exists(), "the record stayed");
+
+    let later = install_with_a_desktop_shortcut(dir.path(), &key, "3.0.0", false, None);
+    assert_eq!(later.desktop_shortcut, xpack_install::DesktopOutcome::NothingToDo);
+    assert!(std::fs::symlink_metadata(&shortcut).is_err(), "the shortcut came back later");
+}
+
+#[test]
+fn uninstalling_removes_the_recorded_shortcut_and_nothing_else_on_the_desktop() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", true, None);
+    let shortcut = shortcut_on_the_desktop(dir.path());
+    let desktop = common::desktop_roots(dir.path());
+    let theirs = desktop.desktop.clone().unwrap().join("notes.txt");
+    std::fs::write(&theirs, b"the user's own").unwrap();
+
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+    let removal = xpack_install::uninstall_with_roots(lock, Some(&desktop)).unwrap();
+
+    assert_eq!(
+        removal.desktop_shortcut,
+        xpack_install::DesktopOutcome::Done(vec![shortcut.clone()])
+    );
+    assert!(std::fs::symlink_metadata(&shortcut).is_err(), "the shortcut survived the uninstall");
+    assert!(theirs.is_file(), "the user's own file was removed");
+    assert!(removal.is_complete(), "the root was not empty afterwards: {:?}", removal.remaining);
+}
+
+#[test]
+fn a_file_already_on_the_desktop_under_the_shortcuts_name_is_never_touched() {
+    // Perhaps a shortcut the user made by hand. Replaced and recorded, the
+    // uninstall would delete it.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let desktop = common::desktop_roots(dir.path()).desktop.unwrap();
+    // Named as this platform names the shortcut, found by making one first.
+    let probe = tempfile::tempdir().unwrap();
+    install_with_a_desktop_shortcut(probe.path(), &key, "1.0.0", true, None);
+    let name = shortcut_on_the_desktop(probe.path()).file_name().unwrap().to_owned();
+    std::fs::create_dir_all(&desktop).unwrap();
+    let theirs = desktop.join(&name);
+    std::fs::write(&theirs, b"the user's own shortcut").unwrap();
+
+    let installed = install_with_a_desktop_shortcut(dir.path(), &key, "1.0.0", true, None);
+    assert!(
+        matches!(&installed.desktop_shortcut, xpack_install::DesktopOutcome::Failed(reason) if reason.contains("already")),
+        "{:?}",
+        installed.desktop_shortcut
+    );
+    assert!(!install_paths(dir.path()).desktop_shortcut_file().exists(), "it was recorded as ours");
+
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+    xpack_install::uninstall_with_roots(lock, Some(&common::desktop_roots(dir.path()))).unwrap();
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own shortcut");
+}

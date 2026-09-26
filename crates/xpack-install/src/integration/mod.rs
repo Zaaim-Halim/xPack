@@ -31,7 +31,8 @@
 //! [`remove`] recomputes precisely what [`install`] would have written. The
 //! alternative — a list of created files in the state document — has a failure
 //! mode this design does not: a state file lost or rolled back leaves entries
-//! nobody can find to delete.
+//! nobody can find to delete. The one exception is the desktop shortcut, whose
+//! folder belongs to the user and moves; `desktop_shortcut` says why.
 //!
 //! # Failure here never fails an installation
 //!
@@ -54,6 +55,7 @@ mod macos;
 mod windows;
 
 pub mod command;
+pub(crate) mod desktop_shortcut;
 pub mod lnk;
 
 /// What creating or removing a desktop entry did.
@@ -287,12 +289,23 @@ pub struct Roots {
     pub data: PathBuf,
     /// The user's home directory, which on macOS holds `Applications/`.
     pub home: PathBuf,
+    /// The user's desktop folder, when they have one.
+    ///
+    /// Worked out per platform, because it is not always under the home
+    /// directory: Windows may keep it in a synced folder, and its name on
+    /// Linux follows the session's language.
+    pub desktop: Option<PathBuf>,
 }
 
 /// Resolves the directories this user's desktop entries belong in.
 pub fn host_roots() -> Option<Roots> {
     let dirs = directories::BaseDirs::new()?;
-    Some(Roots { data: dirs.data_dir().to_path_buf(), home: dirs.home_dir().to_path_buf() })
+    let home = dirs.home_dir().to_path_buf();
+    Some(Roots {
+        data: dirs.data_dir().to_path_buf(),
+        desktop: desktop_shortcut::desktop_dir(&home),
+        home,
+    })
 }
 
 /// Creates the desktop entry this platform uses.

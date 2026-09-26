@@ -493,6 +493,9 @@ impl<'a> Updater<'a> {
             // An update never asks. The choice made at the first install, if
             // any, is recorded and honoured by the installer.
             desktop_entry: None,
+            // Never made by an update, only refreshed: one the first install
+            // made, and the user kept, is brought up to date.
+            desktop_shortcut: false,
             // The same for the command: never asked, a recorded decline
             // honoured, and the user's real `~/.local/bin` and `PATH`.
             command: None,

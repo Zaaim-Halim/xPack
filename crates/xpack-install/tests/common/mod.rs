@@ -158,7 +158,11 @@ pub(crate) fn fake_binary(dir: &Path, name: &str) -> PathBuf {
 /// ran the suite, and stay there.
 #[allow(dead_code)]
 pub(crate) fn desktop_roots(base: &Path) -> xpack_install::integration::Roots {
-    xpack_install::integration::Roots { data: base.join("data"), home: base.join("home") }
+    xpack_install::integration::Roots {
+        data: base.join("data"),
+        home: base.join("home"),
+        desktop: Some(base.join("desktop")),
+    }
 }
 
 /// A temporary installation root plus its layout.

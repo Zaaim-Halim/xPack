@@ -95,7 +95,7 @@ pub(super) fn remove(entry: &Entry, roots: &Roots) -> Outcome {
 ///
 /// The per-user directory, not `/Applications`, so that installing needs no
 /// administrator password — the same choice the installation root makes.
-fn bundle_path(entry: &Entry, roots: &Roots) -> PathBuf {
+pub(super) fn bundle_path(entry: &Entry, roots: &Roots) -> PathBuf {
     roots.home.join("Applications").join(format!("{}.app", bundle_directory_name(&entry.name)))
 }
 
@@ -343,7 +343,11 @@ mod tests {
     }
 
     fn roots(base: &Path) -> Roots {
-        Roots { data: base.join("data"), home: base.join("home") }
+        Roots {
+            data: base.join("data"),
+            home: base.join("home"),
+            desktop: Some(base.join("desktop")),
+        }
     }
 
     #[test]

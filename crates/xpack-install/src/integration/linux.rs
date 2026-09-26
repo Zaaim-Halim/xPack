@@ -221,7 +221,11 @@ mod tests {
     }
 
     fn roots(base: &Path) -> Roots {
-        Roots { data: base.join("data"), home: base.join("home") }
+        Roots {
+            data: base.join("data"),
+            home: base.join("home"),
+            desktop: Some(base.join("desktop")),
+        }
     }
 
     #[test]

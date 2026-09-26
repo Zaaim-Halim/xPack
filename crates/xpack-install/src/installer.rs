@@ -79,6 +79,14 @@ pub struct InstallOptions {
     /// its next update; a choice that is silently undone is worse than one
     /// that is refused.
     pub desktop_entry: Option<bool>,
+    /// Whether to put a shortcut on the user's desktop, beside the menu entry.
+    ///
+    /// Honoured on a **first** installation that writes a menu entry, and
+    /// ignored otherwise: an installation made earlier may have an
+    /// uninstaller that does not know desktop shortcuts, and one it cannot
+    /// remove is worse than none. Every later install refreshes a shortcut
+    /// made this way while it is still on the desktop.
+    pub desktop_shortcut: bool,
     /// Whether the user wants the command the package asks for.
     ///
     /// The same rules as [`desktop_entry`](Self::desktop_entry): `None`
@@ -124,6 +132,8 @@ pub struct Installed {
     pub notifier: Option<LauncherOutcome>,
     /// What happened to the desktop entry the manifest asked for.
     pub desktop: crate::integration::Outcome,
+    /// What happened to the shortcut on the user's desktop.
+    pub desktop_shortcut: crate::integration::Outcome,
     /// What happened to the command the manifest asked for.
     pub command: crate::integration::Outcome,
     /// What recovery cleaned up beforehand.
@@ -307,6 +317,9 @@ impl<'lock> Installer<'lock> {
         Self::ensure_version_fits(paths, &manifest)?;
 
         let mut state = self.load_state()?;
+        // Asked before a version is recorded, which is what makes the next
+        // install not the first.
+        let first_installation = state.versions.is_empty();
 
         // Before anything is written, so a refusal leaves no trace.
         Self::apply_choices(&state, paths, options)?;
@@ -424,8 +437,13 @@ impl<'lock> Installer<'lock> {
         // long as the window between the two writes lasted.
         //
         // Never fails the install: see the integration module for why.
-        let desktop =
+        let (desktop, written) =
             self.update_desktop_entry(&manifest, &version, options.desktop_roots.as_ref());
+        let desktop_shortcut = self.update_desktop_shortcut(
+            written.as_ref(),
+            first_installation && options.desktop_shortcut,
+            options.desktop_roots.as_ref(),
+        );
         // After the binaries too: the command runs the launcher.
         let command =
             self.update_commands(&manifest, &previous_commands, options.command_roots.as_ref());
@@ -450,6 +468,7 @@ impl<'lock> Installer<'lock> {
             uninstaller,
             notifier,
             desktop,
+            desktop_shortcut,
             command,
             recovery: report,
         })
@@ -782,12 +801,12 @@ impl<'lock> Installer<'lock> {
         manifest: &xpack_core::Manifest,
         version: &Version,
         roots: Option<&crate::integration::Roots>,
-    ) -> crate::integration::Outcome {
+    ) -> (crate::integration::Outcome, Option<crate::integration::Entry>) {
         let paths = self.lock.paths();
         let names = self.binary_names();
         let Some(mut entry) = crate::integration::Entry::from_manifest(manifest, paths, &names)
         else {
-            return crate::integration::Outcome::NotRequested;
+            return (crate::integration::Outcome::NotRequested, None);
         };
 
         // The package asked; the user said no, at this install or an earlier
@@ -795,7 +814,7 @@ impl<'lock> Installer<'lock> {
         // not.
         if crate::integration::is_declined(paths) {
             tracing::info!("the user declined a desktop entry; none is written");
-            return crate::integration::Outcome::NotRequested;
+            return (crate::integration::Outcome::NotRequested, None);
         }
 
         // The launcher the entry names has to be on disk. A shortcut to a
@@ -811,10 +830,13 @@ impl<'lock> Installer<'lock> {
         match resolve_entry_target(&entry, paths, &names) {
             Some(target) => entry.target = target,
             None => {
-                return crate::integration::Outcome::Failed(format!(
-                    "{} is not installed, so a desktop entry would point at nothing",
-                    entry.target.display()
-                ));
+                return (
+                    crate::integration::Outcome::Failed(format!(
+                        "{} is not installed, so a desktop entry would point at nothing",
+                        entry.target.display()
+                    )),
+                    None,
+                );
             }
         }
 
@@ -828,6 +850,38 @@ impl<'lock> Installer<'lock> {
             None => crate::integration::install(&entry),
         };
         outcome.log("install");
+        let written = outcome.is_done().then_some(entry);
+        (outcome, written)
+    }
+
+    /// Makes, refreshes or leaves the shortcut on the user's desktop.
+    ///
+    /// Only beside a menu entry this install wrote, which is what it shows
+    /// and starts. `create` is the person installing's choice, and only ever
+    /// true on a first installation; otherwise a recorded shortcut is
+    /// refreshed, and nothing new is made. Never fails the install, for the
+    /// reason the menu entry does not.
+    fn update_desktop_shortcut(
+        &self,
+        entry: Option<&crate::integration::Entry>,
+        create: bool,
+        roots: Option<&crate::integration::Roots>,
+    ) -> crate::integration::Outcome {
+        use crate::integration::{Outcome, desktop_shortcut};
+
+        let Some(entry) = entry else {
+            return Outcome::NotRequested;
+        };
+        let Some(roots) = roots.cloned().or_else(crate::integration::host_roots) else {
+            return Outcome::Failed("no home directory for the current user".to_string());
+        };
+        let paths = self.lock.paths();
+        let outcome = if create {
+            desktop_shortcut::create(entry, &roots, paths)
+        } else {
+            desktop_shortcut::refresh(entry, &roots, paths)
+        };
+        outcome.log("desktop shortcut");
         outcome
     }
 
@@ -1114,6 +1168,8 @@ pub struct Removal {
     pub remaining: Vec<PathBuf>,
     /// What happened to the desktop entry, if there was one.
     pub desktop: crate::integration::Outcome,
+    /// What happened to the shortcut on the desktop, if there was one.
+    pub desktop_shortcut: crate::integration::Outcome,
     /// What happened to the command, if there was one.
     pub command: crate::integration::Outcome,
 }
@@ -1260,6 +1316,9 @@ pub fn uninstall_into(
         }
         None => crate::integration::Outcome::NothingToDo,
     };
+    // By its record, which is in the state directory removed below.
+    let desktop_shortcut = crate::integration::desktop_shortcut::remove(&paths);
+    desktop_shortcut.log("uninstall");
     let command = match (commands.is_empty(), command_roots.cloned().or_else(CommandRoots::host)) {
         (true, _) => crate::integration::Outcome::NothingToDo,
         (false, Some(roots)) => {
@@ -1294,7 +1353,7 @@ pub fn uninstall_into(
         );
     }
     tracing::info!(root = %root.display(), root_removed, "installation removed");
-    Ok(Removal { root, root_removed, remaining, desktop, command })
+    Ok(Removal { root, root_removed, remaining, desktop, desktop_shortcut, command })
 }
 
 /// Picks a launcher that actually exists for a desktop entry to point at.

@@ -453,6 +453,7 @@ impl VerifiedPayload {
             notifier: payload.binary("xpack-notify"),
             desktop_roots: None,
             desktop_entry: request.desktop_entry,
+            desktop_shortcut: false,
             command: request.command,
             command_roots: None,
         };
