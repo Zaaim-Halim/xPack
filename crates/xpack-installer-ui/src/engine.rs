@@ -66,6 +66,9 @@ pub struct Choices {
     /// `Some(false)` when they declined the desktop entry. Never `Some(true)`:
     /// agreeing to what the package asks for is the same as not being asked.
     pub desktop_entry: Option<bool>,
+    /// Whether they want a shortcut on the desktop as well. Only ever true on
+    /// a first installation that makes a desktop entry, where it was offered.
+    pub desktop_shortcut: bool,
     /// `Some(false)` when they declined the command, on the same terms.
     pub command: Option<bool>,
 }

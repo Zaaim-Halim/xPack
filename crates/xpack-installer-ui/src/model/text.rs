@@ -147,6 +147,7 @@ pub enum Key {
     LocationTarget,
     LocationFixed,
     LocationShortcut,
+    LocationDesktopShortcut,
     LocationCommand,
     LocationCommandTaken,
 
@@ -173,6 +174,9 @@ pub enum Key {
     ReadyShortcutLabel,
     ReadyShortcutYes,
     ReadyShortcutNo,
+    ReadyDesktopLabel,
+    ReadyDesktopYes,
+    ReadyDesktopNo,
     ReadyCommandLabel,
     ReadyCommandYes,
     ReadyCommandNo,
@@ -217,7 +221,7 @@ pub enum Key {
 impl Key {
     /// Every key, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 83] = {
+    pub(crate) const ALL: [Self; 87] = {
         use Key::*;
         [
             WindowTitle,
@@ -245,6 +249,7 @@ impl Key {
             LocationTarget,
             LocationFixed,
             LocationShortcut,
+            LocationDesktopShortcut,
             LocationCommand,
             LocationCommandTaken,
             StatusChecking,
@@ -269,6 +274,9 @@ impl Key {
             ReadyShortcutLabel,
             ReadyShortcutYes,
             ReadyShortcutNo,
+            ReadyDesktopLabel,
+            ReadyDesktopYes,
+            ReadyDesktopNo,
             ReadyCommandLabel,
             ReadyCommandYes,
             ReadyCommandNo,
@@ -361,6 +369,7 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
             Some("{name} is already installed for your account, so Setup uses the same folder.")
         }
         Key::LocationShortcut => either("Add to Start Menu", "Add to Applications"),
+        Key::LocationDesktopShortcut => Some("Add to Desktop"),
         Key::LocationCommand => Some("Add {command} to the command line"),
         Key::LocationCommandTaken => {
             Some("Already used by another program, so not added: {command}.")
@@ -394,6 +403,9 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::ReadyShortcutLabel => either("Start Menu", "Applications"),
         Key::ReadyShortcutYes => either("Add a shortcut", "Adds {name} to ~/Applications"),
         Key::ReadyShortcutNo => Some("No shortcut"),
+        Key::ReadyDesktopLabel => Some("Desktop"),
+        Key::ReadyDesktopYes => Some("Add a shortcut"),
+        Key::ReadyDesktopNo => Some("Nothing added"),
         Key::ReadyCommandLabel => Some("Command line"),
         Key::ReadyCommandYes => Some("Adds {command}"),
         Key::ReadyCommandNo => Some("Not added"),

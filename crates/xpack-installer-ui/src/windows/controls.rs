@@ -46,6 +46,7 @@ pub(super) enum Action {
     LaunchExisting,
     Accept,
     Shortcut,
+    DesktopShortcut,
     Command,
     Launch,
 }
@@ -73,6 +74,7 @@ pub(super) struct Controls {
     launch_existing: nwg::Button,
     pub(super) accept: nwg::CheckBox,
     pub(super) shortcut: nwg::CheckBox,
+    pub(super) desktop_shortcut: nwg::CheckBox,
     pub(super) command: nwg::CheckBox,
     pub(super) launch: nwg::CheckBox,
     progress: nwg::ProgressBar,
@@ -147,7 +149,9 @@ impl Controls {
         ] {
             nwg::Button::builder().font(Some(&c.normal)).parent(window).build(button)?;
         }
-        for checkbox in [&mut c.accept, &mut c.shortcut, &mut c.command, &mut c.launch] {
+        for checkbox in
+            [&mut c.accept, &mut c.shortcut, &mut c.desktop_shortcut, &mut c.command, &mut c.launch]
+        {
             nwg::CheckBox::builder().font(Some(&c.normal)).parent(window).build(checkbox)?;
         }
         Ok(c)
@@ -164,6 +168,7 @@ impl Controls {
             (&self.launch_existing.handle, Action::LaunchExisting),
             (&self.accept.handle, Action::Accept),
             (&self.shortcut.handle, Action::Shortcut),
+            (&self.desktop_shortcut.handle, Action::DesktopShortcut),
             (&self.command.handle, Action::Command),
             (&self.launch.handle, Action::Launch),
         ]
@@ -307,6 +312,21 @@ impl Controls {
         y += 10;
         if wizard.shortcut_offered() {
             check(&self.shortcut, &texts.line(Key::LocationShortcut), wizard.shortcut(), BODY_X, y);
+            place(&self.shortcut, BODY_X, y, BODY_WIDTH / 2, 20);
+            // Beside the entry it depends on, on the same row, so the
+            // command and its note keep the room below.
+            if wizard.desktop_shortcut_visibility() != Visibility::Hidden {
+                check(
+                    &self.desktop_shortcut,
+                    &texts.line(Key::LocationDesktopShortcut),
+                    wizard.desktop_shortcut(),
+                    BODY_X + BODY_WIDTH / 2,
+                    y,
+                );
+                place(&self.desktop_shortcut, BODY_X + BODY_WIDTH / 2, y, BODY_WIDTH / 2, 20);
+                self.desktop_shortcut
+                    .set_enabled(wizard.desktop_shortcut_visibility() == Visibility::Enabled);
+            }
             y += 26;
         }
         if let Some(label) = wizard.command_label() {
@@ -459,7 +479,9 @@ impl Controls {
         {
             button.set_visible(false);
         }
-        for checkbox in [&self.accept, &self.shortcut, &self.command, &self.launch] {
+        for checkbox in
+            [&self.accept, &self.shortcut, &self.desktop_shortcut, &self.command, &self.launch]
+        {
             checkbox.set_visible(false);
         }
     }

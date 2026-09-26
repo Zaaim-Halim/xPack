@@ -192,6 +192,7 @@ enum Phase {
 struct Selections {
     accepted: bool,
     shortcut: bool,
+    desktop_shortcut: bool,
     command: bool,
     launch: bool,
 }
@@ -238,6 +239,9 @@ impl Wizard {
             selections: Selections {
                 accepted: false,
                 shortcut: spec.plan.shortcut_default,
+                // Ticked for every application; the person installing can
+                // untick it.
+                desktop_shortcut: true,
                 command: spec.plan.path_default,
                 // Ticked when offered: the publisher offering it is the
                 // reason it is there.
@@ -328,6 +332,33 @@ impl Wizard {
     /// Whether the desktop-entry box is ticked.
     pub fn shortcut(&self) -> bool {
         self.selections.shortcut
+    }
+
+    /// Whether the desktop-shortcut box is drawn, and whether it can be ticked.
+    ///
+    /// Beside the desktop entry and on its terms: offered only when that is,
+    /// since only a first installation may make a shortcut. It shows what
+    /// the entry opens, so with the entry unticked it is drawn unticked and
+    /// cannot be changed.
+    pub fn desktop_shortcut_visibility(&self) -> Visibility {
+        if !self.shortcut_offered() {
+            Visibility::Hidden
+        } else if self.selections.shortcut {
+            Visibility::Enabled
+        } else {
+            Visibility::Disabled
+        }
+    }
+
+    /// Whether the desktop-shortcut box is ticked.
+    pub fn desktop_shortcut(&self) -> bool {
+        self.selections.shortcut && self.selections.desktop_shortcut
+    }
+
+    /// Starts with the desktop-shortcut box unticked, as asked on the command
+    /// line.
+    pub fn untick_desktop_shortcut(&mut self) {
+        self.selections.desktop_shortcut = false;
     }
 
     /// Whether the command box is drawn, and whether it can be ticked.
@@ -500,6 +531,13 @@ impl Wizard {
         }
     }
 
+    /// The desktop-shortcut box. Ignored where it cannot be used.
+    pub fn set_desktop_shortcut(&mut self, wanted: bool) {
+        if self.is_choosing() && self.desktop_shortcut_visibility() == Visibility::Enabled {
+            self.selections.desktop_shortcut = wanted;
+        }
+    }
+
     /// The command box. Ignored where it cannot be used.
     pub fn set_command(&mut self, wanted: bool) {
         if self.is_choosing() && self.command_visibility() == Visibility::Enabled {
@@ -646,6 +684,8 @@ impl Wizard {
         Choices {
             root: self.root.clone(),
             desktop_entry: declined.then_some(false),
+            desktop_shortcut: self.desktop_shortcut_visibility() == Visibility::Enabled
+                && self.desktop_shortcut(),
             command: command_declined.then_some(false),
         }
     }
@@ -674,6 +714,12 @@ impl Wizard {
                 texts.line(Key::ReadyShortcutNo)
             };
             rows.push((texts.line(Key::ReadyShortcutLabel), value));
+            let value = if self.desktop_shortcut() {
+                texts.line(Key::ReadyDesktopYes)
+            } else {
+                texts.line(Key::ReadyDesktopNo)
+            };
+            rows.push((texts.line(Key::ReadyDesktopLabel), value));
         }
         if let Some(offer) = &self.command_offer
             && self.command_visibility() != Visibility::Hidden
@@ -997,6 +1043,82 @@ mod tests {
         assert!(!wizard.shortcut_offered());
     }
 
+    // --- the desktop shortcut ----------------------------------------------------
+
+    #[test]
+    fn a_first_install_offers_a_desktop_shortcut_ticked_and_passes_it_on() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.desktop_shortcut_visibility(), Visibility::Enabled);
+        assert!(wizard.desktop_shortcut(), "ticked by default");
+        assert!(start_install(&mut wizard).desktop_shortcut);
+    }
+
+    #[test]
+    fn unticking_the_desktop_shortcut_passes_that_on() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        wizard.set_desktop_shortcut(false);
+        assert!(!wizard.desktop_shortcut());
+        assert!(!start_install(&mut wizard).desktop_shortcut);
+    }
+
+    #[test]
+    fn without_the_desktop_entry_the_desktop_shortcut_is_unticked_and_cannot_be_ticked() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        wizard.set_shortcut(false);
+        assert_eq!(wizard.desktop_shortcut_visibility(), Visibility::Disabled);
+        assert!(!wizard.desktop_shortcut(), "shown ticked beside an unticked entry");
+        wizard.set_desktop_shortcut(true);
+        assert!(!wizard.desktop_shortcut(), "ticked with nothing to open");
+        let choices = start_install(&mut wizard);
+        assert!(!choices.desktop_shortcut);
+        assert_eq!(choices.desktop_entry, Some(false));
+    }
+
+    #[test]
+    fn ticking_the_entry_again_brings_back_the_desktop_shortcut_as_it_was() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        wizard.set_shortcut(false);
+        wizard.set_shortcut(true);
+        assert!(wizard.desktop_shortcut());
+    }
+
+    #[test]
+    fn the_desktop_shortcut_is_never_offered_on_an_existing_installation() {
+        // Its uninstaller may know nothing of desktop shortcuts.
+        let mut wizard = wizard_with(spec(), Ok(Existing::Older(v("1.0.0"))));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.desktop_shortcut_visibility(), Visibility::Hidden);
+        assert!(!start_install(&mut wizard).desktop_shortcut);
+    }
+
+    #[test]
+    fn the_desktop_shortcut_is_not_offered_when_the_package_asks_for_no_entry() {
+        let mut none = spec();
+        none.shortcut_requested = false;
+        let mut wizard = wizard_with(none, Ok(Existing::Nothing));
+        assert_eq!(wizard.desktop_shortcut_visibility(), Visibility::Hidden);
+        assert!(!start_install(&mut wizard).desktop_shortcut);
+    }
+
+    #[test]
+    fn the_desktop_shortcut_can_start_unticked_and_the_summary_says_so() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Nothing));
+        wizard.untick_desktop_shortcut();
+        advance_to(&mut wizard, Page::Location);
+        assert!(!wizard.desktop_shortcut());
+        let texts = wizard.texts().clone();
+        assert!(
+            wizard
+                .summary()
+                .contains(&(texts.line(Key::ReadyDesktopLabel), texts.line(Key::ReadyDesktopNo)))
+        );
+        assert!(!start_install(&mut wizard).desktop_shortcut);
+    }
+
     // --- the command box -------------------------------------------------------
 
     fn commanding(taken: bool) -> WizardSpec {
@@ -1302,7 +1424,12 @@ mod tests {
         let choices = start_install(&mut wizard);
         assert_eq!(
             choices,
-            Choices { root: PathBuf::from("/home/u/apps"), desktop_entry: None, command: None }
+            Choices {
+                root: PathBuf::from("/home/u/apps"),
+                desktop_entry: None,
+                desktop_shortcut: true,
+                command: None,
+            }
         );
     }
 }

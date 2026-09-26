@@ -210,8 +210,22 @@ impl App {
                 sel!(toggleShortcut:),
                 mtm,
             );
-            shortcut.setFrame(rect(INSET, y.max(INSET), width, 22.0));
+            shortcut.setFrame(rect(INSET, y.max(INSET), width / 2.0, 22.0));
             inner.addSubview(&shortcut);
+        }
+        if wizard.desktop_shortcut_visibility() != Visibility::Hidden {
+            // Beside the entry it depends on: below it, the note about a
+            // taken command would run out of room under a two-line status.
+            let desktop = checkbox(
+                &texts.line(Key::LocationDesktopShortcut),
+                wizard.desktop_shortcut(),
+                &self.controller,
+                sel!(toggleDesktopShortcut:),
+                mtm,
+            );
+            desktop.setFrame(rect(INSET + width / 2.0, y.max(INSET), width / 2.0, 22.0));
+            desktop.setEnabled(wizard.desktop_shortcut_visibility() == Visibility::Enabled);
+            inner.addSubview(&desktop);
         }
         if let Some(text) = wizard.command_label() {
             y -= 26.0;
