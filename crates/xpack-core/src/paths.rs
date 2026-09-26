@@ -113,6 +113,20 @@ impl InstallPaths {
         self.state_dir().join("desktop.json")
     }
 
+    /// The record of the shortcut put on the user's desktop, when one was.
+    ///
+    /// It names the file that was written, so an update refreshes that file
+    /// and an uninstall removes it, even after the desktop folder has moved:
+    /// a desktop synced to another folder is found where the record says,
+    /// not where the folder is now. No record, no shortcut: an update never
+    /// adds one the person installing did not choose.
+    ///
+    /// A file of its own for the reason given on
+    /// [`desktop_preference_file`](Self::desktop_preference_file).
+    pub fn desktop_shortcut_file(&self) -> PathBuf {
+        self.state_dir().join("desktop-shortcut.json")
+    }
+
     /// Whether a version's files are present: its directory and the manifest
     /// it was installed from.
     ///
@@ -541,6 +555,14 @@ mod tests {
 
         fn paths() -> InstallPaths {
             InstallPaths::new(std::path::Path::new("/r"), "com.example.app").unwrap()
+        }
+
+        #[test]
+        fn the_desktop_shortcut_record_is_kept_apart_from_the_state_and_the_menu_choice() {
+            let p = paths();
+            assert_eq!(p.desktop_shortcut_file(), p.state_dir().join("desktop-shortcut.json"));
+            assert_ne!(p.desktop_shortcut_file(), p.state_file());
+            assert_ne!(p.desktop_shortcut_file(), p.desktop_preference_file());
         }
 
         #[test]
