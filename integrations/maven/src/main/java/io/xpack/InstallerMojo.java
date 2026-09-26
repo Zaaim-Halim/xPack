@@ -114,7 +114,7 @@ public class InstallerMojo extends AbstractXPackMojo {
                 arguments.add("--ui");
                 arguments.add(settings.toString());
             }
-            addCrossBuildBinaries(arguments, target);
+            addCrossBuildBinaries(arguments, target, pkg);
 
             Map<String, Object> result = cli().json("installer", arguments);
             getLog().info("xpack: installer for " + Json.string(result, "platform")
@@ -149,7 +149,7 @@ public class InstallerMojo extends AbstractXPackMojo {
      * <p>Left alone for the host, where the command line finds the stub and
      * the runtime binaries sitting beside itself.
      */
-    private void addCrossBuildBinaries(List<String> arguments, Target target)
+    private void addCrossBuildBinaries(List<String> arguments, Target target, Path pkg)
             throws MojoExecutionException {
         String configured = targetBinaries.get(target.id());
         if (configured == null || configured.isBlank()) {
@@ -167,13 +167,12 @@ public class InstallerMojo extends AbstractXPackMojo {
         Path home = Path.of(configured);
         arguments.add("--stub");
         arguments.add(binary(home, InstallerSettings.stubName(target, console)).toString());
-        for (String name : List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller")) {
+        // The package, not this POM, says whether it announces its updates:
+        // it is what the installer will install.
+        boolean notice = InstallerSettings.wantsNotice(cli().json("inspect", List.of(pkg.toString())));
+        for (String name : InstallerSettings.runtimeBinaries(target, notice)) {
             arguments.add("--binary");
             arguments.add(binary(home, name).toString());
-        }
-        if (target.os() == Target.Os.WINDOWS) {
-            arguments.add("--binary");
-            arguments.add(binary(home, "xpack-launcherw").toString());
         }
     }
 }

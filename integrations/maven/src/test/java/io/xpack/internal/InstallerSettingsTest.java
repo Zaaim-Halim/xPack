@@ -77,4 +77,43 @@ class InstallerSettingsTest {
             assertEquals("xpack-installer", InstallerSettings.stubName(target, true));
         }
     }
+
+    private static Map<String, Object> manifest(String os, boolean notify, boolean checkWhileRunning) {
+        // As `xpack inspect --json` reports it: a flag left at false is not written.
+        Map<String, Object> update = new java.util.HashMap<>();
+        update.put("channel", "stable");
+        if (notify) {
+            update.put("notify", true);
+        }
+        if (checkWhileRunning) {
+            update.put("checkWhileRunning", true);
+        }
+        return Map.of("platform", Map.of("os", os, "arch", "x64"), "update", update);
+    }
+
+    @Test
+    void the_notice_is_wanted_exactly_when_installing_would_place_it() {
+        assertTrue(InstallerSettings.wantsNotice(manifest("macos", true, true)));
+        assertTrue(InstallerSettings.wantsNotice(manifest("windows", true, true)));
+        // No dialog on Linux.
+        assertFalse(InstallerSettings.wantsNotice(manifest("linux", true, true)));
+        // Nothing checks while running, so there is nothing to announce.
+        assertFalse(InstallerSettings.wantsNotice(manifest("macos", true, false)));
+        assertFalse(InstallerSettings.wantsNotice(manifest("windows", false, true)));
+        assertFalse(InstallerSettings.wantsNotice(Map.of("platform", "macos-arm64")));
+    }
+
+    @Test
+    void a_cross_built_installer_carries_the_notice_it_was_asked_for() {
+        // Only an installer can place the notice: left out here, every update
+        // of the application would be applied without a word.
+        Target mac = Target.parse("macos-arm64");
+        Target windows = Target.parse("windows-x64");
+        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-notify"),
+                InstallerSettings.runtimeBinaries(mac, true));
+        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller"),
+                InstallerSettings.runtimeBinaries(mac, false));
+        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-launcherw",
+                "xpack-notify"), InstallerSettings.runtimeBinaries(windows, true));
+    }
 }

@@ -1,6 +1,9 @@
 package io.xpack.internal;
 
 import io.xpack.config.InstallerUiSpec;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * What {@code xpack:installer} hands the command line about the wizard.
@@ -47,5 +50,48 @@ public final class InstallerSettings {
             return "xpack-installerw";
         }
         return "xpack-installer";
+    }
+
+    /**
+     * The runtime binaries a cross-built installer carries, by name.
+     *
+     * <p>The same list the command line gathers for its own host: launcher,
+     * updater and uninstaller; the windowed launcher for Windows; and the
+     * update notice when the package asks for it (see {@link #wantsNotice}).
+     * Only an installer can place the notice, so leaving it out here would
+     * make every update of such an application silent.
+     */
+    public static List<String> runtimeBinaries(Target target, boolean notice) {
+        List<String> names = new ArrayList<>(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller"));
+        if (target.os() == Target.Os.WINDOWS) {
+            names.add("xpack-launcherw");
+        }
+        if (notice) {
+            names.add("xpack-notify");
+        }
+        return names;
+    }
+
+    /**
+     * Whether an installer for this package must carry the update notice.
+     *
+     * <p>The rule installing applies: the package asks to announce updates
+     * ({@code update.notify}), checks for them while it runs
+     * ({@code update.checkWhileRunning}, the only check that can find one to
+     * announce), and targets a platform xPack has a dialog for, macOS or
+     * Windows.
+     *
+     * @param manifest the package's manifest, as {@code xpack inspect --json}
+     *     reports it
+     */
+    public static boolean wantsNotice(Map<String, Object> manifest) {
+        Object update = manifest.get("update");
+        if (!(update instanceof Map<?, ?> spec)) {
+            return false;
+        }
+        Target.Os os = Target.parse(Json.platform(manifest)).os();
+        return Boolean.TRUE.equals(spec.get("notify"))
+                && Boolean.TRUE.equals(spec.get("checkWhileRunning"))
+                && (os == Target.Os.MACOS || os == Target.Os.WINDOWS);
     }
 }
