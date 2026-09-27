@@ -355,8 +355,28 @@ mod tests {
 
     #[test]
     fn a_directory_only_root_can_write_is_accepted() {
-        // Nothing is created: the part that exists is what is checked.
-        ensure_safe_root(Path::new("/usr/share/xpack-test-never-created/com.example.app")).unwrap();
+        // Found, not assumed: a CI image may loosen a system directory (the
+        // GitHub Ubuntu runner's `/usr/share` is writable by a group), and
+        // then refusing it is right. Judged here independently of the code
+        // under test. Nothing is created: the part that exists is checked.
+        let candidates = ["/usr/share", "/usr/lib", "/usr/bin", "/usr", "/etc"];
+        let Some(dir) = candidates.iter().map(Path::new).find(|dir| only_root_can_write(dir))
+        else {
+            eprintln!("skipped: no directory here that only root can write");
+            return;
+        };
+        ensure_safe_root(&dir.join("xpack-test-never-created/com.example.app")).unwrap();
+    }
+
+    /// Whether root alone can write `dir` and every directory above it.
+    fn only_root_can_write(dir: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(resolved) = std::fs::canonicalize(dir) else {
+            return false;
+        };
+        resolved.ancestors().all(|dir| {
+            std::fs::metadata(dir).is_ok_and(|meta| meta.uid() == 0 && meta.mode() & 0o022 == 0)
+        })
     }
 
     #[test]
