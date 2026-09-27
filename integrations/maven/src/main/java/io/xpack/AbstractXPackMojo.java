@@ -2,6 +2,7 @@ package io.xpack;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.ProtectionSpec;
 import io.xpack.config.RuntimeSpec;
 import io.xpack.config.UpdateSpec;
 import io.xpack.internal.Json;
@@ -146,6 +147,21 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     @Parameter(property = "xpack.singleInstance")
     protected Boolean singleInstance;
 
+    /**
+     * Locking the application behind a password: {@code <installer>} makes
+     * the installer ask for it; {@code <packages>} also seals every package,
+     * update and delta, and needs {@code <installer>}. Both off by default.
+     * The password is read from {@code XPACK_PASSWORD}, or the variable
+     * {@code <passwordEnv>} names, in the build's environment, never from the
+     * POM.
+     *
+     * <p>Changing the password, or turning {@code <packages>} on for an
+     * application already released, cuts every existing installation off
+     * from its updates.
+     */
+    @Parameter
+    protected ProtectionSpec protection = new ProtectionSpec();
+
     // --------------------------------------------------------------- targets
 
     /** Platforms to build, as {@code <os>-<arch>}. Defaults to the host. */
@@ -254,7 +270,7 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     }
 
     protected XPackCli cli() throws MojoExecutionException {
-        return new XPackCli(executable(), getLog(), timeoutMinutes);
+        return new XPackCli(executable(), getLog(), timeoutMinutes, protection.getPasswordEnv());
     }
 
     /** The platforms to build for. */

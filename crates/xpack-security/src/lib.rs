@@ -70,6 +70,7 @@
 
 pub mod hash;
 pub mod keys;
+pub mod seal;
 pub mod signature;
 pub mod trust;
 

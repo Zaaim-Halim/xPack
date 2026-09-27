@@ -108,6 +108,10 @@ pub struct InstallOptions {
     /// being, having checked the directory with
     /// [`crate::integration::machine::ensure_safe_root`].
     pub scope: xpack_core::InstallScope,
+    /// The key the package was sealed with, when it was: kept in the
+    /// installation so its background updates, sealed the same way, can be
+    /// opened. Not kept in an installation for everyone, which has none.
+    pub seal_key: Option<std::sync::Arc<xpack_security::seal::SealKey>>,
 }
 
 /// What installing a launcher did.
@@ -426,6 +430,11 @@ impl<'lock> Installer<'lock> {
         // Before activation, so that a version becoming current always has an
         // entry point by the time anything could try to start it.
         let placed = self.place_binaries(options, &manifest)?;
+        if let Some(key) = &options.seal_key
+            && options.scope == xpack_core::InstallScope::User
+        {
+            keep_seal_key(paths, key)?;
+        }
 
         // After the binaries, because the entry points at one of them, and a
         // shortcut to a launcher that is not there yet would be broken for as
@@ -1309,6 +1318,83 @@ fn write_version_metadata(staging: &std::path::Path, package: &dyn InstallSource
         format!("{}\n", package.signature().to_hex()).as_bytes(),
     )?;
     Ok(())
+}
+
+/// Keeps the key sealed updates are opened with, readable by the owner only.
+fn keep_seal_key(
+    paths: &xpack_core::InstallPaths,
+    key: &xpack_security::seal::SealKey,
+) -> Result<()> {
+    use std::io::Write;
+
+    let file = paths.seal_key_file();
+    atomic::create_dir_all(&paths.config_dir())?;
+    // Created readable by the owner only, never for a moment by anyone else,
+    // then put in place whole.
+    let incoming = file.with_extension("key.new");
+    let _ = std::fs::remove_file(&incoming);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&incoming)
+        .and_then(|mut out| out.write_all(key.to_hex().as_bytes()).and_then(|()| out.sync_all()))
+        .map_err(|e| Error::io(&incoming, e));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&incoming);
+        return Err(e);
+    }
+    std::fs::rename(&incoming, &file).map_err(|e| Error::io(&file, e))
+}
+
+/// The key an installation keeps for its sealed updates, if it has one.
+pub fn kept_seal_key(
+    paths: &xpack_core::InstallPaths,
+) -> Result<Option<xpack_security::seal::SealKey>> {
+    let file = paths.seal_key_file();
+    match std::fs::read_to_string(&file) {
+        Ok(text) => {
+            let text = zeroize::Zeroizing::new(text);
+            xpack_security::seal::SealKey::from_hex(&text).map(Some)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io(&file, e)),
+    }
+}
+
+/// Opens `package` into `into` when it is sealed, with `key`, and returns the
+/// file to verify: the opened one, or `package` itself when it is not sealed.
+///
+/// A sealed package with no key, or one sealed for another application, is
+/// refused: the signature cannot be checked through the seal.
+pub fn open_if_sealed(
+    package: &Path,
+    into: &Path,
+    application_id: &str,
+    key: Option<&xpack_security::seal::SealKey>,
+) -> Result<PathBuf> {
+    if !xpack_security::seal::is_sealed(package)? {
+        return Ok(package.to_path_buf());
+    }
+    let sealed_for = xpack_security::seal::application_of(package)?;
+    if sealed_for != application_id {
+        return Err(Error::Integrity(format!(
+            "the sealed package is for {sealed_for}, not {application_id}"
+        )));
+    }
+    let key = key.ok_or_else(|| {
+        Error::invalid(
+            "package",
+            "it is sealed with a password, and this installation has no key to open it; \
+             install it again from the application's installer",
+        )
+    })?;
+    xpack_security::seal::open(package, into, key)?;
+    Ok(into.to_path_buf())
 }
 
 /// What placing xPack's own programs did, one entry per program.

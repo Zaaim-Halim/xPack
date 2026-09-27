@@ -47,6 +47,10 @@ semver = { version = "1.0.28", features = ["serde"] }
 sha2 = "0.11.0"
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
+argon2 = "0.6.0"
+chacha20poly1305 = "0.11.0"
+aead-stream = { version = "0.6.0", features = ["alloc"] }
+zeroize = "1.9.0"
 hex = "0.4.3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 walkdir = "2.5.0"
@@ -85,3 +89,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Deriving a sealing key is slow on purpose: 64 MiB and three passes of
+# Argon2id. Unoptimised, that takes long enough to make every test and every
+# debug build that seals or opens a package crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

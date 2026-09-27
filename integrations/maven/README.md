@@ -275,6 +275,25 @@ program's `mytool`, and is removed on uninstall.
 Each of these makes the package format 2, which installations made with xPack
 0.1.0 cannot install or update to. Leave them off for a windowed application.
 
+## Locking with a password
+
+```xml
+<protection>
+  <installer>true</installer>   <!-- the installer asks for the password -->
+  <packages>true</packages>     <!-- every package, update and delta is sealed -->
+  <passwordEnv>XPACK_PASSWORD</passwordEnv>
+</protection>
+```
+
+Both are off by default, and `<packages>` needs `<installer>`. The password
+is read from `XPACK_PASSWORD`, or the variable `<passwordEnv>` names, in the
+build's environment (a CI secret), never from the POM. With `<packages>`,
+`xpack:pack` attaches only the sealed package, and `xpack:delta` opens sealed
+earlier releases with the same password. Changing the password, or turning
+`<packages>` on for an application already released, cuts existing
+installations off from their updates. See
+[Locking an application with a password](../../README.md#locking-an-application-with-a-password).
+
 ## One running copy
 
 To keep one copy of the application running for each user:

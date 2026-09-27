@@ -412,6 +412,8 @@ impl<'a> Updater<'a> {
             return Ok(None);
         }
 
+        self.open_or_discard(lock, downloaded, &application)?;
+
         // Verification is the same code path a local install uses. A second
         // implementation of this check would eventually disagree with the
         // first, and the weaker one would be the bug.
@@ -479,31 +481,7 @@ impl<'a> Updater<'a> {
         // where deleting an open file is refused outright.
         self.clear_phase(lock)?;
 
-        let install_options = InstallOptions {
-            allow_downgrade: options.allow_downgrade,
-            activate: options.activate,
-            launcher: options.launcher.clone(),
-            gui_launcher: options.gui_launcher.clone(),
-            updater: options.updater.clone(),
-            uninstaller: options.uninstaller.clone(),
-            notifier: options.notifier.clone(),
-            // The user's real directories. An update is a real installation,
-            // not a test, and the entry it refreshes is the one in their menu.
-            desktop_roots: None,
-            // An update never asks. The choice made at the first install, if
-            // any, is recorded and honoured by the installer.
-            desktop_entry: None,
-            // Never made by an update, only refreshed: one the first install
-            // made, and the user kept, is brought up to date.
-            desktop_shortcut: false,
-            // The same for the command: never asked, a recorded decline
-            // honoured, and the user's real `~/.local/bin` and `PATH`.
-            command: None,
-            command_roots: None,
-            // What the installation already is: an update never changes who
-            // it is for.
-            scope: lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope),
-        };
+        let install_options = install_options(lock, options);
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
 
         let outcome = if let Some(delta) = delta.as_mut() {
@@ -664,6 +642,24 @@ impl<'a> Updater<'a> {
         }
     }
 
+    /// Opens a download sealed with the publisher's password, with the key
+    /// the installation kept, and puts it where the download was, so
+    /// everything after this treats it as the package it is. One that does
+    /// not open is destroyed like one that does not verify.
+    fn open_or_discard(
+        &self,
+        lock: &InstallLock,
+        downloaded: &std::path::Path,
+        application: &str,
+    ) -> Result<()> {
+        if let Err(e) = open_in_place(downloaded, application, self.paths) {
+            let _ = atomic::remove_file_if_exists(downloaded);
+            self.clear_phase(lock)?;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Acquires the installation lock for one short window.
     fn lock(&self) -> Result<InstallLock> {
         InstallLock::acquire(self.paths)
@@ -708,6 +704,53 @@ impl<'a> Updater<'a> {
 }
 
 /// Builds the index URL for a channel.
+/// What an update installs with: the options this update was given, and
+/// what every update keeps from the installation it updates.
+fn install_options(lock: &InstallLock, options: &UpdateOptions) -> InstallOptions {
+    InstallOptions {
+        allow_downgrade: options.allow_downgrade,
+        activate: options.activate,
+        launcher: options.launcher.clone(),
+        gui_launcher: options.gui_launcher.clone(),
+        updater: options.updater.clone(),
+        uninstaller: options.uninstaller.clone(),
+        notifier: options.notifier.clone(),
+        // The user's real directories. An update is a real installation,
+        // not a test, and the entry it refreshes is the one in their menu.
+        desktop_roots: None,
+        // An update never asks. The choice made at the first install, if
+        // any, is recorded and honoured by the installer.
+        desktop_entry: None,
+        // Never made by an update, only refreshed: one the first install
+        // made, and the user kept, is brought up to date.
+        desktop_shortcut: false,
+        // The same for the command: never asked, a recorded decline
+        // honoured, and the user's real `~/.local/bin` and `PATH`.
+        command: None,
+        command_roots: None,
+        // What the installation already is: an update never changes who
+        // it is for.
+        scope: lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope),
+        // Already kept, from the install that asked for the password.
+        seal_key: None,
+    }
+}
+
+/// Opens `downloaded` in place when it is sealed; leaves it alone otherwise.
+fn open_in_place(
+    downloaded: &std::path::Path,
+    application: &str,
+    paths: &InstallPaths,
+) -> Result<()> {
+    if !xpack_security::seal::is_sealed(downloaded)? {
+        return Ok(());
+    }
+    let key = xpack_install::kept_seal_key(paths)?;
+    let opened = downloaded.with_extension("opened");
+    xpack_install::open_if_sealed(downloaded, &opened, application, key.as_ref())?;
+    std::fs::rename(&opened, downloaded).map_err(|e| Error::io(downloaded, e))
+}
+
 fn index_url(base_url: &str, channel: &str) -> String {
     format!("{}/{channel}.json", base_url.trim_end_matches('/'))
 }

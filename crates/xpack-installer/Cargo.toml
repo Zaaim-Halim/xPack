@@ -11,6 +11,8 @@ authors.workspace = true
 [dependencies]
 xpack-core.workspace = true
 xpack-security.workspace = true
+hex.workspace = true
+getrandom.workspace = true
 xpack-package.workspace = true
 xpack-platform.workspace = true
 xpack-install.workspace = true

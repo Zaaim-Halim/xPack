@@ -31,10 +31,23 @@ public final class XPackCli {
     private final Log log;
     private final long timeoutMinutes;
 
+    /** The environment variable holding the password, when one is named. */
+    private final String passwordEnv;
+
     public XPackCli(Path executable, Log log, long timeoutMinutes) {
+        this(executable, log, timeoutMinutes, null);
+    }
+
+    /**
+     * A command line that reads the password of sealed packages from
+     * {@code passwordEnv}, when it is not blank, rather than
+     * {@code XPACK_PASSWORD}.
+     */
+    public XPackCli(Path executable, Log log, long timeoutMinutes, String passwordEnv) {
         this.executable = executable;
         this.log = log;
         this.timeoutMinutes = timeoutMinutes;
+        this.passwordEnv = passwordEnv == null || passwordEnv.isBlank() ? null : passwordEnv.trim();
     }
 
     /** Whether a subcommand can be asked for machine-readable output. */
@@ -141,11 +154,24 @@ public final class XPackCli {
         return result.stdout();
     }
 
+    /** The subcommands that read a package, and so take its password. */
+    static final java.util.Set<String> READS_PACKAGES = java.util.Set.of(
+            "pack", "delta", "index", "installer", "inspect", "install", "verify");
+
+    /** The command line for a subcommand; visible for tests. */
+    List<String> commandFor(String subcommand, List<String> arguments) {
+        return command(subcommand, arguments);
+    }
+
     private List<String> command(String subcommand, List<String> arguments) {
         List<String> command = new ArrayList<>();
         command.add(executable.toString());
         command.add(subcommand);
         command.addAll(arguments);
+        if (passwordEnv != null && READS_PACKAGES.contains(subcommand)) {
+            command.add("--password-env");
+            command.add(passwordEnv);
+        }
         return command;
     }
 

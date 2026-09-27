@@ -30,6 +30,11 @@ pub(crate) struct Args {
     /// Emit the result as JSON.
     #[arg(long)]
     json: bool,
+
+    /// The password, when the packages are sealed. The delta is then sealed
+    /// too, so a locked application's releases never leave this unsealed.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// What `xpack delta --json` prints.
@@ -49,17 +54,30 @@ struct DeltaReport<'a> {
 
 /// Runs `xpack delta`.
 pub(crate) fn run(args: &Args) -> Result<ExitCode> {
+    let base = super::sealing::open(&args.base, &args.password)?;
+    let target = super::sealing::open(&args.target, &args.password)?;
     let application = {
-        let mut reader = xpack_package::PackageReader::open(&args.target)?;
+        let mut reader = xpack_package::PackageReader::open(&target.path)?;
         reader.peek_manifest_unverified()?.application.id
     };
 
     let output = match &args.out {
         Some(path) => path.clone(),
-        None => args.out_dir.join(default_name(&args.base, &args.target)?),
+        None => args.out_dir.join(default_name(&base.path, &target.path)?),
     };
 
-    let built = delta::build(&args.base, &args.target, &output)?;
+    let seal_key = target.key.as_ref().or(base.key.as_ref());
+    let staging = tempfile::tempdir()
+        .map_err(|e| xpack_core::Error::io(std::path::Path::new("a temporary directory"), e))?;
+    let built_at =
+        if seal_key.is_some() { staging.path().join("plain.xpkgd") } else { output.clone() };
+    let mut built = delta::build(&base.path, &target.path, &built_at)?;
+    if let Some(key) = seal_key {
+        super::sealing::seal_to(&built_at, &output, &application, key)?;
+        built.path.clone_from(&output);
+        built.size =
+            std::fs::metadata(&output).map_err(|e| xpack_core::Error::io(&output, e))?.len();
+    }
 
     if args.json {
         crate::output::json(&DeltaReport {

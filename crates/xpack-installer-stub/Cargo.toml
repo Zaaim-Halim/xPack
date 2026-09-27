@@ -33,6 +33,8 @@ doc = false
 xpack-core.workspace = true
 xpack-install.workspace = true
 xpack-platform.workspace = true
+xpack-security.workspace = true
+zeroize.workspace = true
 xpack-installer.workspace = true
 xpack-installer-ui = { workspace = true, features = ["window"] }
 xpack-log.workspace = true

@@ -38,4 +38,15 @@ class XPackCliTest {
         assertEquals(List.of(" WARN something the reader should see"),
                 XPackCli.worthShowing(stderr));
     }
+
+    @Test
+    void the_password_variable_is_passed_only_to_commands_that_read_a_package() {
+        XPackCli cli = new XPackCli(java.nio.file.Path.of("xpack"),
+                new org.apache.maven.plugin.logging.SystemStreamLog(), 1, "RELEASE_PASSWORD");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                List.of("xpack", "pack", "payload", "--password-env", "RELEASE_PASSWORD"),
+                cli.commandFor("pack", List.of("payload")));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                List.of("xpack", "list"), cli.commandFor("list", List.of()));
+    }
 }

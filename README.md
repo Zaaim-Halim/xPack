@@ -421,6 +421,54 @@ What changes for an installation every user shares:
 - A directory or `/Applications` bundle of the same name that belongs to
   another program is never written to: the install stops and says so.
 
+### Locking an application with a password
+
+To let only people who know a password install the application, lock it in
+`xpack.json`. Both locks are off unless turned on:
+
+```json
+"protection": { "installer": true, "packages": true, "passwordEnv": "XPACK_PASSWORD" }
+```
+
+- **`installer`**: the installer asks for the password before anything else,
+  and carries the application encrypted, so it cannot be taken out of the
+  file without it. Build it with `xpack installer <package> --config
+  xpack.json`.
+- **`packages`**: every package, update and delta is sealed too, so one taken
+  from the update server cannot be installed with `xpack install` either.
+  Needs `installer`: an installation gets the key that opens its updates from
+  the password its installer was given. With it on, `xpack pack` writes only
+  the sealed package, and `delta`, `index`, `inspect` and `verify` open sealed
+  packages when given the password.
+
+The password is never written in a file. Commands read it from the variable
+`passwordEnv` names (`XPACK_PASSWORD` by default), or from standard input with
+`--password-stdin`, and refuse one shorter than 12 characters. A silent
+install reads it from `XPACK_INSTALLER_PASSWORD` or `--password-stdin`; a
+wrong one exits with code 3 and installs nothing. Under `sudo`, which drops
+most of the environment, use `--password-stdin`.
+
+The key comes from the password through Argon2id, and the package is
+encrypted with XChaCha20-Poly1305. The publisher's signature is still checked
+after it is opened. What this is, and is not:
+
+- It keeps a copy of the download from being installed by someone without the
+  password. It is **not** a licence system: anyone with the password can pass
+  it on.
+- Nothing limits guessing: the slow key derivation is all that stands between
+  a copied installer and an attacker, so choose a long password.
+- **Changing the password cuts every existing installation off from its
+  updates, and so does turning `packages` on for installations made from an
+  installer that was not locked.** Each keeps the key its installer was
+  given, and an update sealed with another one, or reaching an installation
+  that has none, is refused. Installations made from an installer locked with
+  the same password keep updating. Reinstalling from a new installer is the
+  way back.
+- An installation for one user keeps the key (never the password) in its
+  `config` directory, readable by that user only, to open its updates. One
+  for everyone keeps none: an administrator updates it by installing again,
+  with the password.
+
 ## Rust
 
 `cargo xpack` ships beside `xpack`, so a Rust project is packaged with the

@@ -102,6 +102,17 @@ pub(crate) struct Args {
     /// Emit the result as JSON.
     #[arg(long)]
     json: bool,
+
+    /// Project configuration to read `protection` from: with
+    /// `protection.installer`, the installer asks for a password before it
+    /// installs anything. A sealed package makes a locked installer either
+    /// way.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// The password, when the installer is locked or the package sealed.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// What `xpack installer --json` prints.
@@ -123,7 +134,11 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // so the installer can report it before anything is trusted. What makes
     // the artefact trustworthy is the key pinned into the plan, and the
     // signature the *installer* checks at install time against it.
-    let mut reader = PackageReader::open(&args.package)?;
+    let protection = protection_in(args.config.as_deref())?;
+    // Everything below reads the package through this: the file itself, or
+    // its opened copy when it is sealed.
+    let opened = super::sealing::open(&args.package, &args.password)?;
+    let mut reader = PackageReader::open(&opened.path)?;
     // Read unverified below, so a delta would otherwise pass for a package
     // and become an installer that fails on every machine.
     reader.ensure_full_package()?;
@@ -158,15 +173,17 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // appended: rewriting a resource section moves bytes, so doing it to the
     // stub afterwards would leave the trailer pointing into the wrong place.
     let workshop = tempfile::tempdir().map_err(|e| Error::io(Path::new("temporary"), e))?;
-    let icon = resolve_icon(args, &manifest, &signing_key, workshop.path())?;
+    let icon = resolve_icon(args, &opened.path, &manifest, &signing_key, workshop.path())?;
     let windows_icon =
         icon.as_ref().filter(|icon| icon.for_windows).map(|icon| icon.path.as_path());
     let branded = brand_for_windows(&manifest, &binaries, windows_icon, workshop.path())?;
     let binaries = branded.as_ref().unwrap_or(&binaries);
 
+    let embedded =
+        package_to_embed(args, &protection, &opened, &manifest.application.id, workshop.path())?;
     let payload = xpack_installer::bundle::build_with_licence(
         &plan,
-        &args.package,
+        &embedded,
         binaries,
         licence.as_deref(),
     )?;
@@ -283,6 +300,35 @@ impl ResolvedIcon {
 /// Where the icon comes from: the package's own `desktop.icon`, the one
 /// source every other surface uses, unless `--icon` still names one.
 ///
+/// The `protection` section of the configuration, when one was given.
+fn protection_in(config: Option<&Path>) -> Result<crate::config::Protection> {
+    match config {
+        Some(path) => Ok(crate::config::ProjectConfig::load(path)?.protection),
+        None => Ok(crate::config::Protection::default()),
+    }
+}
+
+/// The package the installer carries.
+///
+/// Locked, it carries the package sealed: as it came, when it came sealed;
+/// sealed here with the password, when it did not. Otherwise as given.
+fn package_to_embed(
+    args: &Args,
+    protection: &crate::config::Protection,
+    opened: &super::sealing::Opened,
+    application_id: &str,
+    workshop: &Path,
+) -> Result<PathBuf> {
+    if opened.was_sealed() || !protection.installer {
+        return Ok(args.package.clone());
+    }
+    let password = args.password.require(protection.password_env.as_deref())?;
+    let key = super::sealing::key_for(&password, application_id)?;
+    let sealed = workshop.join("application.sealed.xpkg");
+    super::sealing::seal_to(&opened.path, &sealed, application_id, &key)?;
+    Ok(sealed)
+}
+
 /// Read from the package only after checking it against the key it declares,
 /// with the file's size and digest held to the signed manifest. A package
 /// that fails that is refused, as the installer would refuse it later. An
@@ -290,6 +336,7 @@ impl ResolvedIcon {
 /// a warning: a build that worked before an icon was inferred keeps working.
 fn resolve_icon(
     args: &Args,
+    package: &Path,
     manifest: &xpack_core::Manifest,
     signing_key: &str,
     workshop: &Path,
@@ -307,7 +354,7 @@ fn resolve_icon(
 
     let key = xpack_security::PublicKey::parse_hex(signing_key)?;
     let mut verified =
-        PackageReader::open(&args.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+        PackageReader::open(package)?.verify_with_keys(std::slice::from_ref(&key))?;
     let bytes = match verified.read_payload_file(name, xpack_installer::MAX_ICON_BYTES) {
         Ok(bytes) => bytes,
         Err(error) if error.is_integrity_failure() => return Err(error),

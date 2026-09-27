@@ -120,6 +120,30 @@ class ManifestWriterTest {
     }
 
     @Test
+    void writes_the_locks_asked_for_and_never_a_password() {
+        io.xpack.config.ProtectionSpec protection = new io.xpack.config.ProtectionSpec();
+        protection.setInstaller(true);
+        protection.setPackages(true);
+        protection.setPasswordEnv("RELEASE_PASSWORD");
+
+        Map<String, Object> manifest =
+                Json.parseObject(minimal().protection(protection).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> written = (Map<String, Object>) manifest.get("protection");
+        assertEquals(
+                Map.of("installer", true, "packages", true, "passwordEnv", "RELEASE_PASSWORD"),
+                written);
+    }
+
+    @Test
+    void writes_no_protection_unless_asked_for() {
+        String json = minimal().protection(new io.xpack.config.ProtectionSpec()).toJson();
+        assertFalse(json.contains("\"protection\""), json);
+        assertEquals(minimal().toJson(), json);
+    }
+
+    @Test
     void omits_sections_that_were_never_configured() {
         String json = minimal().toJson();
         assertFalse(json.contains("\"update\""), json);

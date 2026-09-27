@@ -37,6 +37,24 @@ pub fn run(wizard: Wizard, engine: Arc<dyn Engine>, icon: Option<&[u8]>) -> Show
     }
 }
 
+/// Asks for the password a locked installer needs, before anything else.
+///
+/// `note` is shown under the question: why it is asked again, after a wrong
+/// password. `None` when it was cancelled, or no window could be shown.
+pub fn ask_password(title: &str, question: &str, note: Option<&str>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return crate::macos::ask_password(title, question, note);
+
+    #[cfg(windows)]
+    return crate::windows::ask_password(title, question, note);
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (title, question, note);
+        None
+    }
+}
+
 /// Shows a message in place of the wizard. `false` when it could not be.
 pub fn alert(title: &str, body: &str) -> bool {
     #[cfg(target_os = "macos")]

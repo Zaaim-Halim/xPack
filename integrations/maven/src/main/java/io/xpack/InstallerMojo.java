@@ -114,6 +114,12 @@ public class InstallerMojo extends AbstractXPackMojo {
                 arguments.add("--ui");
                 arguments.add(settings.toString());
             }
+            // Locked, the installer reads the lock from the configuration
+            // this target was packed with.
+            if (protection.locksInstaller()) {
+                arguments.add("--config");
+                arguments.add(layout().manifest(target).toString());
+            }
             addCrossBuildBinaries(arguments, target, pkg);
 
             Map<String, Object> result = cli().json("installer", arguments);

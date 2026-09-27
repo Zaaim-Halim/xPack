@@ -59,6 +59,10 @@ pub(crate) struct Args {
     /// given with `--trust` or already be pinned.
     #[arg(long, conflicts_with = "trust_on_first_use")]
     pub(crate) all_users: bool,
+
+    /// The password, when the package is sealed with one.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 impl Args {
@@ -83,8 +87,12 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // The application id decides which installation this belongs to, so it has
     // to be read before the package can be verified against that
     // installation's pinned keys.
+    //
+    // A sealed package is opened first, into this user's temporary directory,
+    // only to read those: what is installed is opened again below.
+    let peeked = super::sealing::open(&args.package, &args.password)?;
     let (application_id, name) = {
-        let mut reader = PackageReader::open(&args.package)?;
+        let mut reader = PackageReader::open(&peeked.path)?;
         let manifest = reader.peek_manifest_unverified()?;
         (manifest.application.id, manifest.application.name)
     };
@@ -102,11 +110,31 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         let paths = xpack_install::integration::machine::prepare(&application_id, &name)?;
         let lock = xpack_platform::InstallLock::acquire(&paths)?;
         let copy = xpack_install::integration::machine::bring_in(&args.package, &paths)?;
-        (lock, copy, xpack_core::InstallScope::Machine)
+        // Sealed, it is opened here, in the installation, from the copy the
+        // user cannot change; never from the one opened in their directory.
+        let package = match &peeked.key {
+            Some(key) => {
+                let opened = copy.with_extension("opened");
+                let result =
+                    xpack_install::open_if_sealed(&copy, &opened, &application_id, Some(key));
+                let _ = std::fs::remove_file(&copy);
+                result?
+            }
+            None => copy,
+        };
+        (lock, package, xpack_core::InstallScope::Machine)
     } else {
-        (context.lock(&application_id)?, args.package.clone(), xpack_core::InstallScope::User)
+        (context.lock(&application_id)?, peeked.path.clone(), xpack_core::InstallScope::User)
     };
-    let installed = install_from(args, &lock, &package, scope);
+    // Kept by an installation for one user, whose updates come sealed the
+    // same way.
+    let seal_key = match (&peeked.key, scope) {
+        (Some(key), xpack_core::InstallScope::User) => {
+            Some(std::sync::Arc::new(xpack_security::seal::SealKey::from_hex(&key.to_hex())?))
+        }
+        _ => None,
+    };
+    let installed = install_from(args, &lock, &package, scope, seal_key);
     if args.all_users {
         let _ = std::fs::remove_file(&package);
     }
@@ -154,6 +182,7 @@ fn install_from(
     lock: &xpack_platform::InstallLock,
     package: &std::path::Path,
     scope: xpack_core::InstallScope,
+    seal_key: Option<std::sync::Arc<xpack_security::seal::SealKey>>,
 ) -> Result<(xpack_install::Installed, TrustDecision, String)> {
     let decision = match (&args.trust, args.trust_on_first_use) {
         (Some(key), _) => TrustDecision::Explicit(super::public_key(key)?),
@@ -199,6 +228,7 @@ fn install_from(
         command: None,
         command_roots: None,
         scope,
+        seal_key,
     };
     let installed = Installer::new(lock).install(&mut verified, &options)?;
     Ok((installed, decision, signed_by))

@@ -292,6 +292,17 @@ impl InstallPaths {
         self.config_dir().join("trust.json")
     }
 
+    /// The key that opens this application's sealed updates, when its
+    /// packages are sealed with a password.
+    ///
+    /// The key, never the password, readable by the installation's owner
+    /// only. Kept only in an installation of one user's: one for every user
+    /// is updated by an administrator installing again, who is asked for the
+    /// password then. Removed with the rest of `config` on uninstall.
+    pub fn seal_key_file(&self) -> PathBuf {
+        self.config_dir().join("seal.key")
+    }
+
     /// Whoever owns this installation's answer about automatic updates.
     ///
     /// Beside the trust store rather than in installation state, because it is

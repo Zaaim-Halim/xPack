@@ -104,6 +104,12 @@ pub(crate) struct Args {
     /// Emit the result as JSON.
     #[arg(long)]
     json: bool,
+
+    /// The password, when the packages are sealed. It opens each one to read
+    /// what it is; the index names the sealed files, which are what is
+    /// published.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// Accepts an `https` URL, without the trailing slash.
@@ -153,12 +159,12 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
 
     let mut described = Vec::new();
     for path in &args.packages {
-        described.push(describe(path, key.as_ref())?);
+        described.push(describe(path, key.as_ref(), &args.password)?);
     }
 
     let mut deltas = Vec::new();
     for path in &args.deltas {
-        deltas.push(describe_delta(path)?);
+        deltas.push(describe_delta(path, &args.password)?);
     }
 
     ensure_one_application(&described)?;
@@ -211,8 +217,15 @@ struct Described {
 ///
 /// With a key, the manifest comes from a verified package. Without one it is
 /// read unverified, exactly as `xpack inspect` does, and the caller is told.
-fn describe(path: &std::path::Path, key: Option<&xpack_security::PublicKey>) -> Result<Described> {
-    let mut reader = PackageReader::open(path)?;
+fn describe(
+    path: &std::path::Path,
+    key: Option<&xpack_security::PublicKey>,
+    password: &super::sealing::PasswordArgs,
+) -> Result<Described> {
+    // Sealed, the manifest is read from an opened copy; the size and digest
+    // below are the sealed file's, which is what clients download.
+    let opened = super::sealing::open(path, password)?;
+    let mut reader = PackageReader::open(&opened.path)?;
     let manifest = if let Some(key) = key {
         reader.verify_with_keys(std::slice::from_ref(key))?.manifest().clone()
     } else {
@@ -252,8 +265,12 @@ struct DescribedDelta {
 ///
 /// Unverified, exactly as a package is here: this decides what to publish, and
 /// what makes the result trustworthy is the signature the client checks.
-fn describe_delta(path: &std::path::Path) -> Result<DescribedDelta> {
-    let mut reader = PackageReader::open(path)?;
+fn describe_delta(
+    path: &std::path::Path,
+    password: &super::sealing::PasswordArgs,
+) -> Result<DescribedDelta> {
+    let opened = super::sealing::open(path, password)?;
+    let mut reader = PackageReader::open(&opened.path)?;
     let manifest = reader.peek_manifest_unverified()?;
     let base = reader.peek_delta_base_unverified()?;
 

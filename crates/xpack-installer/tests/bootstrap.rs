@@ -292,21 +292,27 @@ fn a_plan_naming_another_application_is_refused() {
 }
 
 #[test]
-fn what_is_shown_comes_from_the_signed_package_not_the_plan() {
-    // A rewritten plan can say anything; only the manifest is signed.
+fn a_plan_that_names_the_application_differently_from_its_package_is_refused() {
+    // A rewritten plan can say anything, and a locked installer shows the
+    // plan's name before the password opens the signed package. So a plan
+    // that disagrees with the package is a rewritten installer, and nothing
+    // is installed from it.
     let dir = tempfile::tempdir().unwrap();
     let key = KeyPair::generate().unwrap();
     let package = build_package(dir.path(), &key);
     let binaries = vec![fake_binary(dir.path(), "xpack-launcher")];
 
-    let mut rewritten = plan(&key);
-    rewritten.application_name = "Totally Trustworthy Bank".into();
-    rewritten.version = "99.0.0".into();
-    let payload = bundle::build(&rewritten, &package, &binaries).unwrap();
+    for (name, version) in [("Totally Trustworthy Bank", "1.0.0"), ("Demo", "99.0.0")] {
+        let mut rewritten = plan(&key);
+        rewritten.application_name = name.into();
+        rewritten.version = version.into();
+        let payload = bundle::build(&rewritten, &package, &binaries).unwrap();
 
-    let verified = Payload::unpack(&payload).unwrap().verify().unwrap();
-    assert_eq!(verified.manifest().application.name, "Demo");
-    assert_eq!(verified.manifest().application.version, Version::parse("1.0.0").unwrap());
+        let Err(err) = Payload::unpack(&payload).unwrap().verify() else {
+            panic!("a plan naming {name} {version} was accepted");
+        };
+        assert!(err.is_integrity_failure(), "{err}");
+    }
 }
 
 #[test]

@@ -43,12 +43,58 @@ pub(crate) struct ProjectConfig {
     /// How many copies of the application may run at once.
     #[serde(default, skip_serializing_if = "InstanceSpec::is_default")]
     pub(crate) instance: InstanceSpec,
+    /// Whether the installer, and the packages, are locked with a password.
+    #[serde(default, skip_serializing_if = "Protection::is_off")]
+    pub(crate) protection: Protection,
+}
+
+/// Locking the application behind a password.
+///
+/// Both off unless turned on. The password itself is never here: it is read
+/// from the environment variable [`Protection::password_env`] names, or from
+/// standard input, when a command needs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Protection {
+    /// The installer asks for the password before it installs anything.
+    #[serde(default)]
+    pub(crate) installer: bool,
+    /// Packages, updates and deltas are sealed with the password too, so a
+    /// package taken from the update server cannot be installed without it.
+    /// Needs `installer`: an installation gets the key that opens its updates
+    /// from the password its installer was given.
+    #[serde(default)]
+    pub(crate) packages: bool,
+    /// The environment variable holding the password. `XPACK_PASSWORD` when
+    /// left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) password_env: Option<String>,
+}
+
+impl Protection {
+    fn is_off(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Refuses the one combination that cannot protect anything.
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.packages && !self.installer {
+            return Err(xpack_core::Error::invalid(
+                "protection",
+                "sealed packages need the installer lock: an installation gets the key that \
+                 opens its updates from the password its installer is given",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ProjectConfig {
     /// Reads `xpack.json`.
     pub(crate) fn load(path: &Path) -> Result<Self> {
-        atomic::read_json(path)
+        let config: Self = atomic::read_json(path)?;
+        config.protection.validate()?;
+        Ok(config)
     }
 
     /// Builds the manifest template this configuration describes.

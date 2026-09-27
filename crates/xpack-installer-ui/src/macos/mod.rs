@@ -178,6 +178,33 @@ pub(super) fn alert(title: &str, body: &str) -> bool {
     true
 }
 
+/// Asks for a password in an alert with a secure field, which never shows
+/// what is typed.
+pub(super) fn ask_password(title: &str, question: &str, note: Option<&str>) -> Option<String> {
+    use objc2_app_kit::{NSAlertFirstButtonReturn, NSSecureTextField};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let mtm = MainThreadMarker::new()?;
+    bring_forward(&NSApplication::sharedApplication(mtm));
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    let text = match note {
+        Some(note) => format!("{question}\n\n{note}"),
+        None => question.to_string(),
+    };
+    alert.setInformativeText(&NSString::from_str(&text));
+    alert.addButtonWithTitle(&NSString::from_str("Continue"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let field = NSSecureTextField::initWithFrame(
+        mtm.alloc::<NSSecureTextField>(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(280.0, 24.0)),
+    );
+    alert.setAccessoryView(Some(&field));
+    alert.window().setInitialFirstResponder(Some(&field));
+    let answer = alert.runModal();
+    (answer == NSAlertFirstButtonReturn).then(|| field.stringValue().to_string())
+}
+
 /// Makes this process a regular application in front of the others.
 ///
 /// It is started from Finder as the executable inside a bundle, but a window

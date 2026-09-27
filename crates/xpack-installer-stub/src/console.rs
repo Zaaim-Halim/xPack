@@ -73,6 +73,16 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) only_me: bool,
 
+    /// Read the password of a locked installer from the first line of
+    /// standard input, rather than from `XPACK_INSTALLER_PASSWORD`.
+    #[arg(long)]
+    pub(crate) password_stdin: bool,
+
+    /// The key a locked installer was opened with, handed to this installer
+    /// running again with administrator rights. Read once and deleted.
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub(crate) seal_key_file: Option<std::path::PathBuf>,
+
     /// Describe what would be installed, without installing it.
     ///
     /// Exits with the code the installation itself would, so a script can ask
@@ -97,7 +107,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     // Verified before anything is printed, so every line below describes a
     // package whose signature has been checked.
-    let payload = crate::load()?;
+    let payload = crate::load(&mut |payload| unlock(args, payload))?;
     let application = &payload.manifest().application;
     xpack_core::outln!("{} {}", application.name, application.version);
 
@@ -151,6 +161,62 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     report(&outcome, payload.manifest());
     Ok(ExitCode::from(exit::INSTALLED))
 }
+
+/// Where a locked installer run without a window reads its password.
+pub(crate) const PASSWORD_ENV: &str = "XPACK_INSTALLER_PASSWORD";
+
+/// Opens a locked installer's package: with the key handed to it, when it is
+/// running again with administrator rights, or the password from standard
+/// input or [`PASSWORD_ENV`]. A wrong password is not asked again: a script
+/// gets the refusal, and its exit code says it is not worth retrying.
+fn unlock(args: &Args, payload: &mut xpack_installer::Payload) -> xpack_core::Result<()> {
+    if let Some(file) = &args.seal_key_file {
+        return payload.unlock_with_key(take_key_file(file)?);
+    }
+    let password = if args.password_stdin {
+        let mut line = zeroize::Zeroizing::new(String::new());
+        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
+            .map_err(|e| xpack_core::Error::invalid("password", e.to_string()))?;
+        zeroize::Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        zeroize::Zeroizing::new(std::env::var(PASSWORD_ENV).unwrap_or_default())
+    };
+    if password.is_empty() {
+        return Err(xpack_core::Error::invalid(
+            "installer",
+            format!("it is locked with a password: set {PASSWORD_ENV}, or pass --password-stdin"),
+        ));
+    }
+    payload.unlock(&password)
+}
+
+/// Reads the key file an installer handed to its elevated self, and deletes
+/// it.
+///
+/// Only a regular file named as that installer names them is read, and only
+/// that is deleted: this runs with administrator rights, on a path that came
+/// from its command line.
+fn take_key_file(file: &std::path::Path) -> xpack_core::Result<xpack_security::seal::SealKey> {
+    let named = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(KEY_FILE_PREFIX));
+    let regular = std::fs::symlink_metadata(file).is_ok_and(|meta| meta.file_type().is_file());
+    if !named || !regular {
+        return Err(xpack_core::Error::invalid(
+            "--seal-key-file",
+            format!("{} is not a key this installer handed over", file.display()),
+        ));
+    }
+    let text = zeroize::Zeroizing::new(
+        std::fs::read_to_string(file).map_err(|e| xpack_core::Error::io(file, e))?,
+    );
+    let _ = std::fs::remove_file(file);
+    xpack_security::seal::SealKey::from_hex(&text)
+}
+
+/// How the file handing a key to the elevated installer is named.
+pub(crate) const KEY_FILE_PREFIX: &str = "xpack-seal-key-";
 
 /// The request the options describe.
 fn request(args: &Args, root: std::path::PathBuf, scope: xpack_core::InstallScope) -> Request {

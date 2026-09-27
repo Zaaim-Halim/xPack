@@ -46,6 +46,11 @@ pub(crate) struct Args {
     /// Emit the result as JSON.
     #[arg(long)]
     json: bool,
+
+    /// The password, when the configuration seals packages
+    /// (`protection.packages`).
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// What `xpack pack --json` prints.
@@ -74,6 +79,7 @@ struct PackReport<'a> {
     size: u64,
     sha256: &'a Sha256Digest,
     signed_by: String,
+    sealed: bool,
 }
 
 /// Runs `xpack pack`.
@@ -100,7 +106,28 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // format it is in and whatever it is called.
     ensure_key_is_outside_payload(&args.key, &args.payload)?;
 
-    let packed = PackageBuilder::new(&args.payload, manifest).build(&output, &key)?;
+    // Sealed, the package is built somewhere temporary and only the sealed
+    // copy is written out: with the package lock on, no unsealed package
+    // leaves this command to be published by mistake.
+    let seal_key = if config.protection.packages {
+        let password = args.password.require(config.protection.password_env.as_deref())?;
+        Some(super::sealing::key_for(&password, &manifest.application.id)?)
+    } else {
+        None
+    };
+    let staging = tempfile::tempdir()
+        .map_err(|e| xpack_core::Error::io(std::path::Path::new("a temporary directory"), e))?;
+    let built_at =
+        if seal_key.is_some() { staging.path().join("plain.xpkg") } else { output.clone() };
+    let mut packed = PackageBuilder::new(&args.payload, manifest).build(&built_at, &key)?;
+    if let Some(seal_key) = &seal_key {
+        super::sealing::seal_to(&built_at, &output, &packed.manifest.application.id, seal_key)?;
+        packed.path.clone_from(&output);
+        let mut file =
+            std::fs::File::open(&output).map_err(|e| xpack_core::Error::io(&output, e))?;
+        (packed.sha256, packed.size) = xpack_security::sha256_reader(&mut file)?;
+    }
+    let sealed = seal_key.is_some();
 
     if args.json {
         crate::output::json(&PackReport {
@@ -112,6 +139,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
             size: packed.size,
             sha256: &packed.sha256,
             signed_by: key.public().fingerprint(),
+            sealed,
         })?;
         return super::success();
     }
@@ -124,6 +152,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("size", format_size(packed.size));
     crate::output::field("sha256", packed.sha256);
     crate::output::field("signed by", key.public().fingerprint());
+    if sealed {
+        crate::output::field("sealed", "with the password");
+    }
 
     super::success()
 }

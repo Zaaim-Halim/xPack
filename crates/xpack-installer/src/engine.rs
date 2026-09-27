@@ -117,8 +117,24 @@ impl VerifiedPayload {
         if choices.command == Some(false) {
             arguments.push("--no-path".into());
         }
+        // A locked installer hands its elevated self the key it was opened
+        // with, never the password, in a file only this user can read, which
+        // the elevated run deletes as it reads it.
+        let key_file = match self.seal_key() {
+            Some(key) => {
+                let file = hand_over_key(key)?;
+                arguments.push("--seal-key-file".into());
+                arguments.push(file.clone().into_os_string());
+                Some(file)
+            }
+            None => None,
+        };
 
-        match xpack_platform::run_elevated(&program, &arguments)? {
+        let ran = xpack_platform::run_elevated(&program, &arguments);
+        if let Some(file) = &key_file {
+            let _ = std::fs::remove_file(file);
+        }
+        match ran? {
             xpack_platform::Elevated::Declined => Err(Error::invalid(
                 "installation",
                 "administrator rights were not given, so nothing was installed",
@@ -214,3 +230,23 @@ fn detach(command: &mut Command) {
 /// On Unix a child already does: it is re-parented when the installer exits.
 #[cfg(not(windows))]
 fn detach(_command: &mut Command) {}
+
+/// Writes `key` to a new file only this user can read, for the elevated run.
+fn hand_over_key(key: &xpack_security::seal::SealKey) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let mut name = [0u8; 12];
+    getrandom::fill(&mut name)
+        .map_err(|e| Error::invalid("installer", format!("no randomness: {e}")))?;
+    let file = std::env::temp_dir().join(format!("xpack-seal-key-{}", hex::encode(name)));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut out = options.open(&file).map_err(|e| Error::io(&file, e))?;
+    out.write_all(key.to_hex().as_bytes()).map_err(|e| Error::io(&file, e))?;
+    Ok(file)
+}

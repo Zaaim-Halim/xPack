@@ -883,3 +883,112 @@ fn a_delta_whose_base_was_pruned_falls_back() {
     assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
     assert!(fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")));
 }
+
+// --- packages sealed with a password -----------------------------------------
+
+const PASSWORD: &str = "correct horse battery staple";
+
+fn seal_key(password: &str) -> xpack_security::seal::SealKey {
+    xpack_security::seal::SealKey::derive(password, "com.example.demo").unwrap()
+}
+
+/// Seals `package`, as `xpack pack` does under the package lock.
+fn sealed(package: &Path, key: &xpack_security::seal::SealKey) -> PathBuf {
+    let out = package.with_extension("sealed");
+    xpack_security::seal::seal(package, &out, "com.example.demo", key).unwrap();
+    out
+}
+
+/// Keeps `key` in the installation, as an installer given the password does.
+fn keep(world: &World, key: &xpack_security::seal::SealKey) {
+    std::fs::create_dir_all(world.paths.config_dir()).unwrap();
+    std::fs::write(world.paths.seal_key_file(), key.to_hex().as_bytes()).unwrap();
+}
+
+fn serve_sealed(world: &World, key: &xpack_security::seal::SealKey) -> Fixture {
+    let package = sealed(&build_package(world.dir.path(), &world.key, "1.1.0"), key);
+    let size = std::fs::metadata(&package).unwrap().len();
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
+    fixture
+}
+
+fn nothing_downloaded_left(world: &World) -> bool {
+    std::fs::read_dir(world.paths.downloads_dir()).map_or(true, |mut e| e.next().is_none())
+}
+
+#[test]
+fn a_sealed_update_is_opened_with_the_key_the_installation_kept() {
+    let world = World::new();
+    let key = seal_key(PASSWORD);
+    keep(&world, &key);
+    let fixture = serve_sealed(&world, &key);
+
+    let installed = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(installed, Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn a_sealed_update_with_another_password_is_refused_and_removed() {
+    let world = World::new();
+    keep(&world, &seal_key(PASSWORD));
+    let fixture = serve_sealed(&world, &seal_key("a different password entirely"));
+
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
+
+    assert!(err.is_integrity_failure(), "{err:?}");
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+    assert!(nothing_downloaded_left(&world), "the download was kept");
+}
+
+#[test]
+fn a_sealed_update_reaching_an_installation_without_a_key_is_refused_and_removed() {
+    // What a publisher who turns the package lock on for an application
+    // already out there does to every installation made before.
+    let world = World::new();
+    let fixture = serve_sealed(&world, &seal_key(PASSWORD));
+
+    let err = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap_err();
+
+    assert!(err.to_string().contains("no key"), "{err}");
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+    assert!(nothing_downloaded_left(&world), "the download was kept");
+}
+
+#[test]
+fn a_sealed_delta_is_opened_with_the_kept_key_and_applied() {
+    // What `xpack delta` writes between two sealed releases.
+    let world = World::new();
+    let key = seal_key(PASSWORD);
+    keep(&world, &key);
+    let base = world.dir.path().join("demo-1.0.0.xpkg");
+    let target = build_package(world.dir.path(), &world.key, "1.1.0");
+    let delta = world.dir.path().join("plain.xpkgd");
+    xpack_package::delta::build(&base, &target, &delta).unwrap();
+    let sealed_delta = sealed(&delta, &key);
+    let sealed_target = sealed(&target, &key);
+
+    let fixture = Fixture::default();
+    fixture.serve(
+        &index_url(),
+        index_with_delta(
+            "1.1.0",
+            std::fs::metadata(&sealed_target).unwrap().len(),
+            "1.0.0",
+            "1.0.0-to-1.1.0.xpkgd",
+            std::fs::metadata(&sealed_delta).unwrap().len(),
+        ),
+    );
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &sealed_target);
+    fixture.serve_file(&format!("{BASE}/1.0.0-to-1.1.0.xpkgd"), &sealed_delta);
+
+    let result = Updater::new(&world.paths, &fixture).update(BASE, &options()).unwrap();
+
+    assert_eq!(result, Some(Version::parse("1.1.0").unwrap()));
+    assert!(
+        !fixture.was_fetched(&format!("{BASE}/demo-1.1.0.xpkg")),
+        "the sealed delta was not used"
+    );
+}

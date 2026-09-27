@@ -2,6 +2,7 @@ package io.xpack.internal;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.ProtectionSpec;
 import io.xpack.config.PromptSpec;
 import io.xpack.config.UpdateSpec;
 import java.util.ArrayList;
@@ -49,6 +50,7 @@ public final class ManifestWriter {
     private DesktopSpec desktop;
     private String command;
     private boolean singleInstance;
+    private ProtectionSpec protection;
 
     public ManifestWriter id(String value) {
         this.id = value;
@@ -134,6 +136,12 @@ public final class ManifestWriter {
     /** Whether only one copy runs at a time; {@code null} is no. */
     public ManifestWriter singleInstance(Boolean value) {
         this.singleInstance = Boolean.TRUE.equals(value);
+        return this;
+    }
+
+    /** Whether the installer, and the packages, are locked with a password. */
+    public ManifestWriter protection(ProtectionSpec value) {
+        this.protection = value;
         return this;
     }
 
@@ -272,7 +280,18 @@ public final class ManifestWriter {
                 .putIfAny("command", new Json.Obj().put("name", command))
                 .putIfAny("instance",
                         new Json.Obj().put("single", singleInstance ? Boolean.TRUE : null))
+                .putIfAny("protection", protectionObject())
                 .toString();
+    }
+
+    private Json.Obj protectionObject() {
+        Json.Obj object = new Json.Obj();
+        if (protection != null && !protection.isEmpty()) {
+            object.put("installer", protection.getInstaller())
+                    .put("packages", protection.getPackages())
+                    .put("passwordEnv", blankToNull(protection.getPasswordEnv()));
+        }
+        return object;
     }
 
     private static void require(String value, String what) {

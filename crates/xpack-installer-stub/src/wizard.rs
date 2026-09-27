@@ -26,8 +26,10 @@ pub(crate) fn run(args: &Args, log: Option<std::path::PathBuf>) -> Option<ExitCo
     // it; the console says so.
     crate::locate().ok()?;
 
-    let payload = match crate::load() {
+    let mut cancelled = false;
+    let payload = match crate::load(&mut |payload| ask_until_unlocked(payload, &mut cancelled)) {
         Ok(payload) => payload,
+        Err(_) if cancelled => return Some(ExitCode::from(exit::CANCELLED)),
         Err(error) => {
             // Shown instead of the wizard, so nothing unverified is ever on
             // screen. The words for a security failure are fixed; anything
@@ -113,6 +115,34 @@ fn exit_code(conclusion: Conclusion) -> u8 {
         Conclusion::Failed(FailureKind::Integrity) => exit::INTEGRITY,
         Conclusion::Failed(FailureKind::Busy) => exit::BUSY,
         Conclusion::Failed(FailureKind::Other) => exit::FAILED,
+    }
+}
+
+/// Asks for the password until the locked package opens, or the person
+/// cancels.
+///
+/// Before anything else: until it opens, nothing of the application has been
+/// verified, so the question names it only as the plan does.
+fn ask_until_unlocked(
+    payload: &mut xpack_installer::Payload,
+    cancelled: &mut bool,
+) -> xpack_core::Result<()> {
+    let title = format!("{} {}", payload.plan().application_name, payload.plan().version);
+    let question = "This installer is locked. Enter the password you were given to continue.";
+    let mut note = None;
+    loop {
+        let Some(password) = window::ask_password(&title, question, note) else {
+            *cancelled = true;
+            return Err(xpack_core::Error::invalid("installer", "no password was given"));
+        };
+        let password = zeroize::Zeroizing::new(password);
+        match payload.unlock(&password) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_integrity_failure() => {
+                note = Some("That password did not open it. Try again.");
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

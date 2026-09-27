@@ -94,10 +94,17 @@ fn opens_a_window(build: Build, args: &console::Args) -> bool {
 ///
 /// Nothing is shown and nothing is installed from a payload that has not
 /// passed through here.
-fn load() -> xpack_core::Result<VerifiedPayload> {
+fn load(
+    unlock: &mut dyn FnMut(&mut Payload) -> xpack_core::Result<()>,
+) -> xpack_core::Result<VerifiedPayload> {
     let (executable, source) = locate()?;
     let bytes = bundle::read(&executable, &source)?;
-    Payload::unpack(&bytes)?.verify()
+    let mut payload = Payload::unpack(&bytes)?;
+    // Locked: nothing is verified, shown or installed until it is opened.
+    if payload.is_sealed()? {
+        unlock(&mut payload)?;
+    }
+    payload.verify()
 }
 
 /// Finds where this installer's payload is, without reading it.

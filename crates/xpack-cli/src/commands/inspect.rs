@@ -17,6 +17,10 @@ pub(crate) struct Args {
     /// Emit the manifest as JSON.
     #[arg(long)]
     json: bool,
+
+    /// The password, when the package is sealed.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// Runs `xpack inspect`.
@@ -25,7 +29,8 @@ pub(crate) struct Args {
 /// — it is how an operator decides whether to trust it — so the output says so
 /// rather than letting a reader assume otherwise.
 pub(crate) fn run(args: &Args) -> Result<ExitCode> {
-    let mut reader = PackageReader::open(&args.package)?;
+    let opened = super::sealing::open(&args.package, &args.password)?;
+    let mut reader = PackageReader::open(&opened.path)?;
     let manifest = reader.peek_manifest_unverified()?;
 
     if args.json {

@@ -17,13 +17,18 @@ pub(crate) struct Args {
     /// Public key file, or a 64-character hex key.
     #[arg(long, value_name = "KEY")]
     key: String,
+
+    /// The password, when the package is sealed.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// Runs `xpack verify`.
 pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     let key = super::public_key(&args.key)?;
+    let opened = super::sealing::open(&args.package, &args.password)?;
     let mut verified =
-        PackageReader::open(&args.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+        PackageReader::open(&opened.path)?.verify_with_keys(std::slice::from_ref(&key))?;
 
     // The signature proves the manifest; this proves the payload matches it.
     // Without it a package whose contents were replaced still reports as

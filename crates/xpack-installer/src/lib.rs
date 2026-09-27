@@ -195,11 +195,15 @@ pub struct Outcome {
 ///
 /// Nothing can be installed from this: see [`Payload::verify`].
 pub struct Payload {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     plan: InstallPlan,
     package: PathBuf,
     binaries: Vec<PathBuf>,
     licence: Option<String>,
+    /// The package opened with the password, when it is sealed and has been.
+    opened: Option<PathBuf>,
+    /// The key it was opened with, for the installation to keep.
+    seal_key: Option<std::sync::Arc<xpack_security::seal::SealKey>>,
 }
 
 impl Payload {
@@ -274,7 +278,7 @@ impl Payload {
         })?;
 
         binaries.sort();
-        Ok(Self { _directory: directory, plan, package, binaries, licence })
+        Ok(Self { directory, plan, package, binaries, licence, opened: None, seal_key: None })
     }
 
     /// Checks the package before anything is shown or installed.
@@ -291,8 +295,15 @@ impl Payload {
     /// installer, and nothing is installed from it.
     pub fn verify(self) -> Result<VerifiedPayload> {
         let key = PublicKey::parse_hex(&self.plan.signing_key)?;
+        let package = match &self.opened {
+            Some(opened) => opened.clone(),
+            None if self.is_sealed()? => {
+                return Err(Error::invalid("installer", "it is locked with a password"));
+            }
+            None => self.package.clone(),
+        };
         let mut verified =
-            PackageReader::open(&self.package)?.verify_with_keys(std::slice::from_ref(&key))?;
+            PackageReader::open(&package)?.verify_with_keys(std::slice::from_ref(&key))?;
         verified.ensure_installable_on(Platform::host()?)?;
         let manifest = verified.manifest().clone();
 
@@ -302,8 +313,58 @@ impl Payload {
                 self.plan.application_id, manifest.application.id
             )));
         }
+        // A locked installer names the application, from its plan, before the
+        // password opens the signed package: what it named must be what it
+        // installs.
+        if manifest.application.name != self.plan.application_name
+            || manifest.application.version.to_string() != self.plan.version
+        {
+            return Err(Error::Integrity(format!(
+                "the installer names {} {} but its signed package is {} {}",
+                self.plan.application_name,
+                self.plan.version,
+                manifest.application.name,
+                manifest.application.version
+            )));
+        }
         let icon = read_icon(&mut verified)?;
         Ok(VerifiedPayload { payload: self, key, manifest, icon })
+    }
+
+    /// Whether the application inside is locked with a password, which
+    /// [`Self::unlock`] must be given before anything can be verified,
+    /// shown or installed.
+    ///
+    /// Read from the package's own first bytes, not from the plan, so there
+    /// is no second record of it to disagree with the file.
+    pub fn is_sealed(&self) -> Result<bool> {
+        xpack_security::seal::is_sealed(&self.package)
+    }
+
+    /// Opens the locked package with `password`.
+    ///
+    /// Takes about a second: the password is turned into a key slowly on
+    /// purpose. A wrong password opens nothing and says so; so does a package
+    /// changed after it was sealed.
+    pub fn unlock(&mut self, password: &str) -> Result<()> {
+        let key = xpack_security::seal::SealKey::derive(password, &self.plan.application_id)?;
+        self.unlock_with_key(key)
+    }
+
+    /// Opens the locked package with the key a password gave, rather than
+    /// the password: what an installer running again with administrator
+    /// rights is handed, so the password itself never leaves the first one.
+    pub fn unlock_with_key(&mut self, key: xpack_security::seal::SealKey) -> Result<()> {
+        let opened = self.directory.path().join("application.opened.xpkg");
+        xpack_install::open_if_sealed(
+            &self.package,
+            &opened,
+            &self.plan.application_id,
+            Some(&key),
+        )?;
+        self.opened = Some(opened);
+        self.seal_key = Some(std::sync::Arc::new(key));
+        Ok(())
     }
 
     /// Finds a runtime binary in the payload by its stem.
@@ -384,6 +445,12 @@ impl VerifiedPayload {
         self.payload.licence.as_deref()
     }
 
+    /// The key the package was opened with, when it was sealed: for an
+    /// installer running again with administrator rights to be handed.
+    pub fn seal_key(&self) -> Option<&xpack_security::seal::SealKey> {
+        self.payload.seal_key.as_deref()
+    }
+
     /// The application's icon, read from the verified package.
     pub fn icon(&self) -> Option<&Icon> {
         self.icon.as_ref()
@@ -459,10 +526,24 @@ impl VerifiedPayload {
         // write before it is checked, so what is checked is what is unpacked:
         // the unpacked payload sits in a directory the person who started the
         // installer can reach.
+        //
+        // A sealed package is copied in sealed and opened there, never from
+        // the copy the person installing opened in their own directory.
         let package = if everyone {
-            xpack_install::integration::machine::bring_in(&self.payload.package, &paths)?
+            let copy =
+                xpack_install::integration::machine::bring_in(&self.payload.package, &paths)?;
+            match &self.payload.seal_key {
+                Some(key) => {
+                    let opened = copy.with_extension("opened");
+                    let result =
+                        xpack_install::open_if_sealed(&copy, &opened, &application.id, Some(key));
+                    let _ = std::fs::remove_file(&copy);
+                    result?
+                }
+                None => copy,
+            }
         } else {
-            self.payload.package.clone()
+            self.payload.opened.clone().unwrap_or_else(|| self.payload.package.clone())
         };
         let result = self.install_locked(request, &paths, &lock, &package, progress);
         if everyone {
@@ -501,6 +582,13 @@ impl VerifiedPayload {
             command: request.command,
             command_roots: None,
             scope: request.scope,
+            // Kept for background updates, which an installation for everyone
+            // does not have.
+            seal_key: if request.scope == xpack_core::InstallScope::User {
+                payload.seal_key.clone()
+            } else {
+                None
+            },
         };
 
         let installed =

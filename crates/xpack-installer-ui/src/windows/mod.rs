@@ -87,13 +87,94 @@ pub(super) fn alert(title: &str, body: &str) -> bool {
     true
 }
 
+/// Asks for a password in a small window whose field shows none of what is
+/// typed.
+pub(super) fn ask_password(title: &str, question: &str, note: Option<&str>) -> Option<String> {
+    if !start() {
+        return None;
+    }
+    let mut window = nwg::Window::default();
+    let mut label = nwg::Label::default();
+    let mut warning = nwg::Label::default();
+    let mut field = nwg::TextInput::default();
+    let mut ok = nwg::Button::default();
+    let mut cancel = nwg::Button::default();
+    nwg::Window::builder()
+        .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
+        .size((440, 200))
+        .center(true)
+        .title(title)
+        .build(&mut window)
+        .ok()?;
+    nwg::Label::builder()
+        .text(question)
+        .position((20, 18))
+        .size((400, 40))
+        .parent(&window)
+        .build(&mut label)
+        .ok()?;
+    nwg::Label::builder()
+        .text(note.unwrap_or(""))
+        .position((20, 58))
+        .size((400, 20))
+        .parent(&window)
+        .build(&mut warning)
+        .ok()?;
+    nwg::TextInput::builder()
+        .password(Some('\u{25cf}'))
+        .position((20, 84))
+        .size((400, 24))
+        .focus(true)
+        .parent(&window)
+        .build(&mut field)
+        .ok()?;
+    nwg::Button::builder()
+        .text("Continue")
+        .position((230, 140))
+        .size((90, 28))
+        .parent(&window)
+        .build(&mut ok)
+        .ok()?;
+    nwg::Button::builder()
+        .text("Cancel")
+        .position((330, 140))
+        .size((90, 28))
+        .parent(&window)
+        .build(&mut cancel)
+        .ok()?;
+
+    let answer: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let field = Rc::new(field);
+    let handler = {
+        let answer = Rc::clone(&answer);
+        let (ok, cancel, window_handle) = (ok.handle, cancel.handle, window.handle);
+        let field = Rc::clone(&field);
+        nwg::full_bind_event_handler(&window.handle, move |event, _data, handle| match event {
+            nwg::Event::OnButtonClick if handle == ok => {
+                *answer.borrow_mut() = Some(field.text());
+                nwg::stop_thread_dispatch();
+            }
+            nwg::Event::OnButtonClick if handle == cancel => nwg::stop_thread_dispatch(),
+            nwg::Event::OnWindowClose if handle == window_handle => nwg::stop_thread_dispatch(),
+            _ => {}
+        })
+    };
+    nwg::dispatch_thread_events();
+    nwg::unbind_event_handler(&handler);
+    window.set_visible(false);
+    answer.borrow_mut().take()
+}
+
 /// Prepares the toolkit. `false` when no window can be shown.
 ///
 /// DPI awareness is not set here. It is declared in the manifest written into
 /// the installer when it is branded, which is where Windows wants it and needs
 /// no unsafe call; the toolkit then scales every position it is given.
 fn start() -> bool {
-    nwg::init().is_ok()
+    // Once per process: a locked installer asks for its password before the
+    // wizard opens, and both need the toolkit.
+    static STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| nwg::init().is_ok())
 }
 
 /// Everything the running wizard owns.

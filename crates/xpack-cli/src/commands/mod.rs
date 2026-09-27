@@ -14,6 +14,7 @@ pub(crate) mod prune;
 pub(crate) mod recover;
 pub(crate) mod rollback;
 pub(crate) mod run;
+pub(crate) mod sealing;
 pub(crate) mod uninstall;
 pub(crate) mod update;
 pub(crate) mod verify;
