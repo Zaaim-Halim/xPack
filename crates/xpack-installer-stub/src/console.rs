@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use xpack_install::Existing;
 use xpack_installer::{Request, RootSource, exit};
+use xpack_installer_ui::AllUsers;
 
 // A plain comment, not a doc comment: clap turns doc comments into the help
 // a user reads. The bool count trips a lint meant for domain types, where
@@ -59,6 +60,19 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) no_path: bool,
 
+    /// Install for everyone on this computer, where the installer offers it.
+    ///
+    /// Needs administrator rights: run it with `sudo` on macOS and Linux, or
+    /// from an elevated terminal on Windows. It goes where other programs do,
+    /// named after the application, and `--root` does not apply.
+    #[arg(long, conflicts_with_all = ["only_me", "root"])]
+    pub(crate) all_users: bool,
+
+    /// Install for the person running this only, where the installer offers
+    /// the choice.
+    #[arg(long)]
+    pub(crate) only_me: bool,
+
     /// Describe what would be installed, without installing it.
     ///
     /// Exits with the code the installation itself would, so a script can ask
@@ -86,6 +100,11 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     let payload = crate::load()?;
     let application = &payload.manifest().application;
     xpack_core::outln!("{} {}", application.name, application.version);
+
+    let ui = payload.ui();
+    if scope(ui.all_users, ui.all_users_default, args)? == xpack_core::InstallScope::Machine {
+        return run_for_everyone(args, &payload);
+    }
 
     let resolved = payload.resolve_root(args.root.as_deref())?;
     let root = resolved.root;
@@ -127,14 +146,79 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
         return Ok(ExitCode::from(dry_run_code(&existing)));
     }
 
-    let request = Request {
+    let request = request(args, root, xpack_core::InstallScope::User);
+    let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
+    report(&outcome, payload.manifest());
+    Ok(ExitCode::from(exit::INSTALLED))
+}
+
+/// The request the options describe.
+fn request(args: &Args, root: std::path::PathBuf, scope: xpack_core::InstallScope) -> Request {
+    Request {
         root,
         desktop_entry: if args.no_shortcut { Some(false) } else { None },
         desktop_shortcut: !args.no_desktop_shortcut,
         command: if args.no_path { Some(false) } else { None },
-    };
-    let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
+        scope,
+    }
+}
 
+/// Who to install for: what the publisher allows, then what was asked.
+fn scope(
+    allowed: AllUsers,
+    everyone_by_default: bool,
+    args: &Args,
+) -> xpack_core::Result<xpack_core::InstallScope> {
+    use xpack_core::InstallScope::{Machine, User};
+    match allowed {
+        AllUsers::Never if args.all_users => Err(xpack_core::Error::invalid(
+            "--all-users",
+            "this application is installed for one person at a time",
+        )),
+        AllUsers::Always if args.only_me => Err(xpack_core::Error::invalid(
+            "--only-me",
+            "this application is installed for everyone on the computer",
+        )),
+        AllUsers::Never => Ok(User),
+        AllUsers::Always => Ok(Machine),
+        AllUsers::Offer if args.all_users => Ok(Machine),
+        AllUsers::Offer if args.only_me => Ok(User),
+        AllUsers::Offer => Ok(if everyone_by_default { Machine } else { User }),
+    }
+}
+
+/// Installs for everyone on the computer, which needs administrator rights.
+fn run_for_everyone(
+    args: &Args,
+    payload: &xpack_installer::VerifiedPayload,
+) -> xpack_core::Result<ExitCode> {
+    let application = &payload.manifest().application;
+    let directory =
+        xpack_install::integration::machine_application_dir(&application.id, &application.name)?;
+    if args.dry_run {
+        xpack_core::outln!("would install into {} for everyone", directory.display());
+        xpack_core::outln!("signed by       {}", short_key(&payload.plan().signing_key));
+        return Ok(ExitCode::from(exit::INSTALLED));
+    }
+    if !xpack_platform::is_elevated() {
+        let how = if cfg!(windows) {
+            "run it again from a terminal opened with \"Run as administrator\""
+        } else {
+            "run it again with sudo"
+        };
+        return Err(xpack_core::Error::invalid(
+            "installation",
+            format!("installing for everyone needs administrator rights: {how}"),
+        ));
+    }
+    let request = request(args, directory, xpack_core::InstallScope::Machine);
+    let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
+    report(&outcome, payload.manifest());
+    Ok(ExitCode::from(exit::INSTALLED))
+}
+
+/// Says what was installed and how to start it.
+fn report(outcome: &xpack_installer::Outcome, manifest: &xpack_core::Manifest) {
     xpack_core::outln!();
     xpack_core::outln!("Installed into {}", outcome.root.display());
     for outcome in [&outcome.desktop, &outcome.desktop_shortcut] {
@@ -146,9 +230,7 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     }
     xpack_core::outln!();
     xpack_core::outln!("Run it with:   {}", outcome.launcher.display());
-    report_command(&outcome, payload.manifest());
-
-    Ok(ExitCode::from(exit::INSTALLED))
+    report_command(outcome, manifest);
 }
 
 /// Says how to start the application from a terminal, or why that was not set
@@ -212,9 +294,37 @@ fn short_key(hex: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
+    use xpack_core::InstallScope::{Machine, User};
 
-    use super::Args;
+    use super::{AllUsers, Args, scope};
+
+    fn args(flags: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("installer").chain(flags.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn who_it_installs_for_follows_the_publisher_then_the_person() {
+        assert_eq!(scope(AllUsers::Never, false, &args(&[])).unwrap(), User);
+        assert_eq!(scope(AllUsers::Always, false, &args(&[])).unwrap(), Machine);
+        assert_eq!(scope(AllUsers::Offer, false, &args(&[])).unwrap(), User);
+        assert_eq!(scope(AllUsers::Offer, true, &args(&[])).unwrap(), Machine);
+        assert_eq!(scope(AllUsers::Offer, true, &args(&["--only-me"])).unwrap(), User);
+        assert_eq!(scope(AllUsers::Offer, false, &args(&["--all-users"])).unwrap(), Machine);
+    }
+
+    #[test]
+    fn asking_for_what_the_publisher_does_not_allow_is_refused() {
+        assert!(scope(AllUsers::Never, false, &args(&["--all-users"])).is_err());
+        assert!(scope(AllUsers::Always, false, &args(&["--only-me"])).is_err());
+    }
+
+    #[test]
+    fn everyone_and_a_chosen_folder_do_not_go_together() {
+        let both = ["installer", "--all-users", "--root", "/somewhere"];
+        assert!(Args::try_parse_from(both).is_err());
+        assert!(Args::try_parse_from(["installer", "--all-users", "--only-me"]).is_err());
+    }
 
     #[test]
     fn the_help_a_user_reads_is_written_for_them() {

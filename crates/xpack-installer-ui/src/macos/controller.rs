@@ -100,6 +100,12 @@ define_class!(
             with_app(|app| app.toggle(|wizard| wizard.set_desktop_shortcut(on)));
         }
 
+        #[unsafe(method(toggleEveryone:))]
+        fn toggle_everyone(&self, sender: Option<&AnyObject>) {
+            let on = is_on(sender);
+            with_app(|app| app.toggle(|wizard| wizard.set_everyone(on)));
+        }
+
         #[unsafe(method(toggleCommand:))]
         fn toggle_command(&self, sender: Option<&AnyObject>) {
             let on = is_on(sender);

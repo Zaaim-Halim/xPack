@@ -99,6 +99,15 @@ pub struct InstallOptions {
     /// real installation wants. Tests supply their own, for the reason given
     /// on [`desktop_roots`](Self::desktop_roots).
     pub command_roots: Option<crate::integration::command::CommandRoots>,
+    /// Who the installation is for: this user, or every user of the machine.
+    ///
+    /// Settled by the first install and recorded; a later one with the other
+    /// scope is refused, because the two live in different places and are
+    /// looked after differently. A machine-wide installation is made by a
+    /// process with administrator rights, which the caller is responsible for
+    /// being, having checked the directory with
+    /// [`crate::integration::machine::ensure_safe_root`].
+    pub scope: xpack_core::InstallScope,
 }
 
 /// What installing a launcher did.
@@ -322,8 +331,14 @@ impl<'lock> Installer<'lock> {
         let first_installation = state.versions.is_empty();
 
         // Before anything is written, so a refusal leaves no trace.
+        Self::ensure_same_scope(&state, first_installation, options.scope)?;
+        state.scope = options.scope;
         Self::apply_choices(&state, paths, options)?;
-        Self::ensure_launcher_reads(&state, paths, &manifest)?;
+        if options.scope == xpack_core::InstallScope::User {
+            // A machine-wide install replaces the launcher, so whatever is
+            // there now does not have to read this package.
+            Self::ensure_launcher_reads(&state, paths, &manifest)?;
+        }
 
         // The command the version being replaced put in place, so one this
         // package renames or drops is taken away rather than left behind.
@@ -410,28 +425,7 @@ impl<'lock> Installer<'lock> {
 
         // Before activation, so that a version becoming current always has an
         // entry point by the time anything could try to start it.
-        let launcher = match &options.launcher {
-            Some(source) => Some(self.install_launcher(source)?),
-            None => None,
-        };
-        let gui_launcher = match &options.gui_launcher {
-            Some(source) => Some(self.install_gui_launcher(source)?),
-            None => None,
-        };
-        let updater = match &options.updater {
-            Some(source) => Some(self.install_updater(source)?),
-            None => None,
-        };
-        let uninstaller = match &options.uninstaller {
-            Some(source) => Some(self.install_uninstaller(source)?),
-            None => None,
-        };
-        let notifier = match &options.notifier {
-            Some(source) if Self::notifier_is_wanted(&manifest) => {
-                Some(self.install_notifier(source)?)
-            }
-            _ => None,
-        };
+        let placed = self.place_binaries(options, &manifest)?;
 
         // After the binaries, because the entry points at one of them, and a
         // shortcut to a launcher that is not there yet would be broken for as
@@ -455,6 +449,13 @@ impl<'lock> Installer<'lock> {
             // the downgrade rule; a repair must be allowed to restore it.
             let already_current = self.load_state()?.current_version.as_ref() == Some(&version);
             self.activate(&version, options.allow_downgrade || (is_repair && already_current))?;
+            // Nothing can watch a machine-wide version start on its behalf: the
+            // launcher runs as a user, who cannot write here. So it is
+            // committed now, and the version before it is kept for an
+            // administrator to roll back to.
+            if options.scope == xpack_core::InstallScope::Machine {
+                self.commit_health()?;
+            }
             true
         } else {
             false
@@ -463,11 +464,11 @@ impl<'lock> Installer<'lock> {
         Ok(Installed {
             version,
             activated,
-            launcher,
-            gui_launcher,
-            updater,
-            uninstaller,
-            notifier,
+            launcher: placed.launcher,
+            gui_launcher: placed.gui_launcher,
+            updater: placed.updater,
+            uninstaller: placed.uninstaller,
+            notifier: placed.notifier,
             desktop,
             desktop_shortcut,
             command,
@@ -765,6 +766,67 @@ impl<'lock> Installer<'lock> {
         Ok(removed)
     }
 
+    /// Places the xPack programs the caller supplied.
+    ///
+    /// A machine-wide installation has no background updates, so no updater
+    /// and no update notice go in it.
+    fn place_binaries(
+        &self,
+        options: &InstallOptions,
+        manifest: &xpack_core::Manifest,
+    ) -> Result<Placed> {
+        let shared = options.scope == xpack_core::InstallScope::Machine;
+        let place = |source: &Option<PathBuf>, how: fn(&Self, &Path) -> Result<LauncherOutcome>| {
+            source.as_deref().map(|source| how(self, source)).transpose()
+        };
+        Ok(Placed {
+            launcher: place(&options.launcher, Self::install_launcher)?,
+            gui_launcher: place(&options.gui_launcher, Self::install_gui_launcher)?,
+            updater: if shared { None } else { place(&options.updater, Self::install_updater)? },
+            uninstaller: place(&options.uninstaller, Self::install_uninstaller)?,
+            notifier: if shared || !Self::notifier_is_wanted(manifest) {
+                None
+            } else {
+                place(&options.notifier, Self::install_notifier)?
+            },
+        })
+    }
+
+    /// Refuses installing for one scope into an installation made for the
+    /// other.
+    fn ensure_same_scope(
+        state: &xpack_core::InstallState,
+        first_installation: bool,
+        scope: xpack_core::InstallScope,
+    ) -> Result<()> {
+        if first_installation || state.scope == scope {
+            return Ok(());
+        }
+        Err(Error::invalid(
+            "installation",
+            format!(
+                "this installation is for {}, and this install is for {}; uninstall it first",
+                describe_scope(state.scope),
+                describe_scope(scope)
+            ),
+        ))
+    }
+
+    /// Who this installation is for, as recorded.
+    fn scope(&self) -> xpack_core::InstallScope {
+        self.load_state().map_or(xpack_core::InstallScope::User, |state| state.scope)
+    }
+
+    /// Whether xPack's own programs are replaced when installed again.
+    ///
+    /// In a machine-wide installation, which only an administrator writes to:
+    /// an old launcher would otherwise stay for good, and the file can be
+    /// replaced safely even while it runs (see [`Self::install_binary`]). In
+    /// one user's installation they are placed only when absent.
+    fn replaces_binaries(&self) -> bool {
+        self.scope() == xpack_core::InstallScope::Machine
+    }
+
     /// Refuses a package the launcher already in the installation cannot read.
     ///
     /// Nothing replaces a launcher that is already there, neither an update
@@ -823,6 +885,7 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().launcher_file_named(&self.binary_names()),
             "launcher",
+            self.replaces_binaries(),
         )?;
         if outcome == LauncherOutcome::Installed {
             let mut state = self.load_state()?;
@@ -892,9 +955,11 @@ impl<'lock> Installer<'lock> {
         // next update and an entry pointing into one goes stale.
         entry.icon = crate::integration::place_icon(paths, manifest, version);
 
-        let outcome = match roots {
-            Some(roots) => crate::integration::install_into(&entry, roots),
-            None => crate::integration::install(&entry),
+        let outcome = match roots.cloned().or_else(|| crate::integration::roots_for(self.scope())) {
+            Some(roots) => crate::integration::install_into(&entry, &roots),
+            None => crate::integration::Outcome::Failed(
+                "could not find where the menu entry goes".to_string(),
+            ),
         };
         outcome.log("install");
         let written = outcome.is_done().then_some(entry);
@@ -919,8 +984,9 @@ impl<'lock> Installer<'lock> {
         let Some(entry) = entry else {
             return Outcome::NotRequested;
         };
-        let Some(roots) = roots.cloned().or_else(crate::integration::host_roots) else {
-            return Outcome::Failed("no home directory for the current user".to_string());
+        let Some(roots) = roots.cloned().or_else(|| crate::integration::roots_for(self.scope()))
+        else {
+            return Outcome::Failed("could not find where the desktop is".to_string());
         };
         let paths = self.lock.paths();
         let outcome = if create {
@@ -944,8 +1010,9 @@ impl<'lock> Installer<'lock> {
     ) -> crate::integration::Outcome {
         use crate::integration::{Outcome, command};
 
-        let Some(roots) = roots.cloned().or_else(command::CommandRoots::host) else {
-            return Outcome::Failed("no home directory for the current user".to_string());
+        let Some(roots) = roots.cloned().or_else(|| command::CommandRoots::for_scope(self.scope()))
+        else {
+            return Outcome::Failed("could not find where commands go".to_string());
         };
         let paths = self.lock.paths();
         let wanted = command::Command::all_from_manifest(manifest, paths, &self.binary_names());
@@ -974,6 +1041,17 @@ impl<'lock> Installer<'lock> {
                 wanted[0].launcher.display()
             ));
         }
+        // A command every user runs goes only where nobody but an
+        // administrator can change it. `/usr/local/bin` often belongs to
+        // whoever installed Homebrew, who could then replace what every other
+        // user runs.
+        // On Windows the command is a copy inside the installation itself.
+        if cfg!(unix)
+            && roots.scope == xpack_core::InstallScope::Machine
+            && let Err(error) = crate::integration::machine::ensure_safe_root(&roots.bin)
+        {
+            return Outcome::Failed(format!("the command was not added: {error}"));
+        }
         let outcome = command::install_all(&wanted, &roots);
         outcome.log("command");
         outcome
@@ -989,6 +1067,7 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().gui_launcher_file_named(&self.binary_names()),
             "windowed launcher",
+            self.replaces_binaries(),
         )
     }
 
@@ -1003,6 +1082,7 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().updater_file_named(&self.binary_names()),
             "updater",
+            self.replaces_binaries(),
         )
     }
 
@@ -1042,6 +1122,7 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().notifier_file_named(&self.binary_names()),
             "notifier",
+            self.replaces_binaries(),
         )
     }
 
@@ -1051,6 +1132,7 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().uninstaller_file_named(&self.binary_names()),
             "uninstaller",
+            self.replaces_binaries(),
         )
     }
 
@@ -1077,10 +1159,24 @@ impl<'lock> Installer<'lock> {
     ///
     /// Takes no `self`: the destination is already resolved by the caller, and
     /// the installation lock is held by whoever called into the installer.
-    fn install_binary(source: &Path, destination: &Path, what: &str) -> Result<LauncherOutcome> {
-        if destination.exists() {
+    ///
+    /// With `replace`, one that is there is replaced instead. The new file is
+    /// written beside it, made executable, and renamed over it, so there is no
+    /// moment with a missing or unrunnable program. On Windows, which refuses
+    /// to replace a program that is running, the old one is renamed aside
+    /// first, which it allows, and removed at a later install.
+    fn install_binary(
+        source: &Path,
+        destination: &Path,
+        what: &str,
+        replace: bool,
+    ) -> Result<LauncherOutcome> {
+        if destination.exists() && !replace {
             tracing::debug!(path = %destination.display(), what, "already present");
             return Ok(LauncherOutcome::AlreadyPresent);
+        }
+        if destination.exists() {
+            return Self::replace_binary(source, destination, what);
         }
 
         let bytes = std::fs::read(source).map_err(|e| Error::io(source, e))?;
@@ -1103,6 +1199,38 @@ impl<'lock> Installer<'lock> {
         }
 
         tracing::info!(path = %destination.display(), what, "installed");
+        Ok(LauncherOutcome::Installed)
+    }
+
+    fn replace_binary(source: &Path, destination: &Path, what: &str) -> Result<LauncherOutcome> {
+        let bytes = std::fs::read(source).map_err(|e| Error::io(source, e))?;
+        if bytes.is_empty() {
+            return Err(Error::invalid(
+                what,
+                format!("{} is empty and cannot be an executable", source.display()),
+            ));
+        }
+        let name =
+            destination.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        remove_set_aside(destination, &name);
+
+        let incoming = destination.with_file_name(format!(".{name}.xpack-new"));
+        std::fs::write(&incoming, &bytes).map_err(|e| Error::io(&incoming, e))?;
+        if let Err(e) = set_executable(&incoming) {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(e);
+        }
+        if cfg!(windows) {
+            let aside = destination.with_file_name(format!(
+                "{name}.xpack-old-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::rename(destination, &aside).map_err(|e| Error::io(destination, e))?;
+        }
+        std::fs::rename(&incoming, destination).map_err(|e| Error::io(destination, e))?;
+        tracing::info!(path = %destination.display(), what, "replaced");
         Ok(LauncherOutcome::Installed)
     }
 
@@ -1181,6 +1309,39 @@ fn write_version_metadata(staging: &std::path::Path, package: &dyn InstallSource
         format!("{}\n", package.signature().to_hex()).as_bytes(),
     )?;
     Ok(())
+}
+
+/// What placing xPack's own programs did, one entry per program.
+struct Placed {
+    launcher: Option<LauncherOutcome>,
+    gui_launcher: Option<LauncherOutcome>,
+    updater: Option<LauncherOutcome>,
+    uninstaller: Option<LauncherOutcome>,
+    notifier: Option<LauncherOutcome>,
+}
+
+fn describe_scope(scope: xpack_core::InstallScope) -> &'static str {
+    match scope {
+        xpack_core::InstallScope::User => "one user",
+        xpack_core::InstallScope::Machine => "every user",
+    }
+}
+
+/// Removes copies of `name` an earlier replacement set aside, where nothing
+/// runs them any more. One still running stays until a later install.
+fn remove_set_aside(destination: &Path, name: &str) {
+    let Some(dir) = destination.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}.xpack-old-");
+    for entry in entries.filter_map(std::result::Result::ok) {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Marks a file executable by its owner, and readable and executable by all.
@@ -1312,6 +1473,9 @@ pub fn uninstall_into(
     // Read before state is cleared, because clearing it is what would make
     // the named executables unfindable.
     let binary_names = state.binary_names();
+    // And where its entries are: a machine-wide installation's are every
+    // user's, never the ones of whoever is removing it.
+    let scope = state.scope;
     state.current_version = None;
     state.previous_version = None;
     state.versions.clear();
@@ -1354,10 +1518,13 @@ pub fn uninstall_into(
     // the moment the lock is free and recreates the entry we are removing.
     let desktop = match &desktop_entry {
         Some(entry) => {
-            let outcome = match desktop_roots {
-                Some(roots) => crate::integration::remove_from(entry, roots),
-                None => crate::integration::remove(entry),
-            };
+            let outcome =
+                match desktop_roots.cloned().or_else(|| crate::integration::roots_for(scope)) {
+                    Some(roots) => crate::integration::remove_from(entry, &roots),
+                    None => crate::integration::Outcome::Failed(
+                        "could not find where the menu entry is".to_string(),
+                    ),
+                };
             outcome.log("uninstall");
             outcome
         }
@@ -1366,16 +1533,19 @@ pub fn uninstall_into(
     // By its record, which is in the state directory removed below.
     let desktop_shortcut = crate::integration::desktop_shortcut::remove(&paths);
     desktop_shortcut.log("uninstall");
-    let command = match (commands.is_empty(), command_roots.cloned().or_else(CommandRoots::host)) {
+    let command = match (
+        commands.is_empty(),
+        command_roots.cloned().or_else(|| CommandRoots::for_scope(scope)),
+    ) {
         (true, _) => crate::integration::Outcome::NothingToDo,
         (false, Some(roots)) => {
             let outcome = crate::integration::command::remove_all(&commands, &roots);
             outcome.log("uninstall");
             outcome
         }
-        (false, None) => crate::integration::Outcome::Failed(
-            "no home directory for the current user".to_string(),
-        ),
+        (false, None) => {
+            crate::integration::Outcome::Failed("could not find where commands are".to_string())
+        }
     };
 
     // Releases the lock and closes the handle to the file inside `state/`.

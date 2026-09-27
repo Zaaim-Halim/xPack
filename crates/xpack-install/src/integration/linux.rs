@@ -225,6 +225,7 @@ mod tests {
             data: base.join("data"),
             home: base.join("home"),
             desktop: Some(base.join("desktop")),
+            scope: xpack_core::InstallScope::User,
         }
     }
 

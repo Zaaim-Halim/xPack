@@ -140,12 +140,22 @@ pub struct Request {
     /// Whether to add the command the package asks for. `None` leaves it to
     /// the package. See [`InstallOptions::command`].
     pub command: Option<bool>,
+    /// Who it is installed for. For everyone, `root` is not used: the
+    /// installation goes where other programs do, named after the
+    /// application, and this process must have administrator rights.
+    pub scope: xpack_core::InstallScope,
 }
 
 impl Request {
     /// Install into `root`, choosing nothing else.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, desktop_entry: None, desktop_shortcut: true, command: None }
+        Self {
+            root,
+            desktop_entry: None,
+            desktop_shortcut: true,
+            command: None,
+            scope: xpack_core::InstallScope::User,
+        }
     }
 }
 
@@ -436,18 +446,45 @@ impl VerifiedPayload {
         request: &Request,
         progress: &dyn ProgressReporter,
     ) -> Result<Outcome> {
-        let paths = self.paths(&request.root)?;
+        let everyone = request.scope == xpack_core::InstallScope::Machine;
+        let application = &self.manifest.application;
+        let paths = if everyone {
+            xpack_install::integration::machine::prepare(&application.id, &application.name)?
+        } else {
+            self.paths(&request.root)?
+        };
         let lock = InstallLock::acquire(&paths)?;
 
+        // For everyone, the package is copied where only an administrator can
+        // write before it is checked, so what is checked is what is unpacked:
+        // the unpacked payload sits in a directory the person who started the
+        // installer can reach.
+        let package = if everyone {
+            xpack_install::integration::machine::bring_in(&self.payload.package, &paths)?
+        } else {
+            self.payload.package.clone()
+        };
+        let result = self.install_locked(request, &paths, &lock, &package, progress);
+        if everyone {
+            let _ = std::fs::remove_file(&package);
+        }
+        result
+    }
+
+    fn install_locked(
+        &self,
+        request: &Request,
+        paths: &InstallPaths,
+        lock: &InstallLock,
+        package: &Path,
+        progress: &dyn ProgressReporter,
+    ) -> Result<Outcome> {
         // Verified again, under the lock, by the path every install takes.
         // The early check decided what could be shown; this one is what the
         // installation is built from, and it pins the publisher's key so
         // every later update is held to it too.
-        let mut verified = open_and_verify(
-            &self.payload.package,
-            &lock,
-            &TrustDecision::Explicit(self.key.clone()),
-        )?;
+        let mut verified =
+            open_and_verify(package, lock, &TrustDecision::Explicit(self.key.clone()))?;
 
         let payload = &self.payload;
         let options = InstallOptions {
@@ -463,10 +500,11 @@ impl VerifiedPayload {
             desktop_shortcut: request.desktop_shortcut,
             command: request.command,
             command_roots: None,
+            scope: request.scope,
         };
 
         let installed =
-            Installer::new(&lock).install_with_progress(&mut verified, &options, progress)?;
+            Installer::new(lock).install_with_progress(&mut verified, &options, progress)?;
 
         // Read after the install, because that is when an installation is
         // given the names its executables carry. Reporting the path this
@@ -479,11 +517,11 @@ impl VerifiedPayload {
             root: paths.root().to_path_buf(),
             version: installed.version,
             activated: installed.activated,
-            launcher: launcher_to_report(&paths, &names),
+            launcher: launcher_to_report(paths, &names),
             desktop: installed.desktop,
             desktop_shortcut: installed.desktop_shortcut,
             command_names: added_commands(&installed.command),
-            command_off_path: command_off_path(&installed.command),
+            command_off_path: command_off_path(&installed.command, request.scope),
             command: installed.command,
         })
     }
@@ -506,11 +544,14 @@ fn added_commands(outcome: &xpack_install::DesktopOutcome) -> Vec<String> {
 }
 
 /// The directory a new command went into, if a terminal would not look there.
-fn command_off_path(outcome: &xpack_install::DesktopOutcome) -> Option<PathBuf> {
+fn command_off_path(
+    outcome: &xpack_install::DesktopOutcome,
+    scope: xpack_core::InstallScope,
+) -> Option<PathBuf> {
     if cfg!(windows) || !outcome.is_done() {
         return None;
     }
-    let bin = xpack_install::integration::command::CommandRoots::host()?.bin;
+    let bin = xpack_install::integration::command::CommandRoots::for_scope(scope)?.bin;
     (!is_on_path(&bin, std::env::var_os("PATH").as_deref())).then_some(bin)
 }
 

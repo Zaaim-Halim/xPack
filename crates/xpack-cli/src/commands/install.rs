@@ -49,6 +49,16 @@ pub(crate) struct Args {
     /// Install without a launcher, leaving the application with no entry point.
     #[arg(long, conflicts_with = "launcher")]
     no_launcher: bool,
+
+    /// Install for every user of this machine, which needs administrator
+    /// rights (`sudo`, or an elevated terminal on Windows).
+    ///
+    /// It goes where other programs do, named after the application, and is
+    /// updated by installing again: it has no background updates. `--root`
+    /// and `XPACK_INSTALL_ROOT` do not apply, and the signing key must be
+    /// given with `--trust` or already be pinned.
+    #[arg(long, conflicts_with = "trust_on_first_use")]
+    pub(crate) all_users: bool,
 }
 
 impl Args {
@@ -73,58 +83,34 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // The application id decides which installation this belongs to, so it has
     // to be read before the package can be verified against that
     // installation's pinned keys.
-    let application_id = {
+    let (application_id, name) = {
         let mut reader = PackageReader::open(&args.package)?;
-        reader.peek_manifest_unverified()?.application.id
+        let manifest = reader.peek_manifest_unverified()?;
+        (manifest.application.id, manifest.application.name)
     };
 
-    let lock = context.lock(&application_id)?;
-
-    let decision = match (&args.trust, args.trust_on_first_use) {
-        (Some(key), _) => TrustDecision::Explicit(super::public_key(key)?),
-        (None, true) => TrustDecision::OnFirstUse,
-        (None, false) => TrustDecision::UsePinned,
-    };
-
-    let mut verified = open_and_verify(&args.package, &lock, &decision)?;
-    let signed_by = verified.signing_key().fingerprint();
-
-    let launcher = resolve_launcher(args)?;
-    // The updater follows the launcher: an installation with an entry point
-    // but no way to learn about updates is only half of what was asked for.
-    // Only placed where it means something. On Unix the windowed build is an
-    // exact duplicate of the console one, and installing it would double the
-    // launcher bytes in every installation to no effect.
-    let gui_launcher = if args.no_launcher || !xpack_core::HAS_WINDOWED_LAUNCHER {
-        None
+    // For every user: the checks an elevated install makes before it writes,
+    // and the package copied where the user cannot change it, which is the
+    // file verified and unpacked from here on.
+    let (lock, package, scope) = if args.all_users {
+        if context.root.is_some() {
+            return Err(xpack_core::Error::invalid(
+                "--all-users",
+                "an installation for every user goes where other programs do; --root does not apply",
+            ));
+        }
+        let paths = xpack_install::integration::machine::prepare(&application_id, &name)?;
+        let lock = xpack_platform::InstallLock::acquire(&paths)?;
+        let copy = xpack_install::integration::machine::bring_in(&args.package, &paths)?;
+        (lock, copy, xpack_core::InstallScope::Machine)
     } else {
-        super::default_gui_launcher()
+        (context.lock(&application_id)?, args.package.clone(), xpack_core::InstallScope::User)
     };
-    let updater = if args.no_launcher { None } else { super::default_updater() };
-    let uninstaller = if args.no_launcher { None } else { super::default_uninstaller() };
-    // Offered unconditionally; the installer places it only for a package that
-    // asked to prompt its users.
-    let notifier = if args.no_launcher { None } else { super::default_notifier() };
-    let options = InstallOptions {
-        allow_downgrade: args.allow_downgrade,
-        activate: !args.no_activate,
-        launcher,
-        gui_launcher,
-        updater,
-        uninstaller,
-        notifier,
-        // The user's own directories: this is a real installation.
-        desktop_roots: None,
-        // The manifest's request, or a choice recorded at an earlier install.
-        desktop_entry: None,
-        // A shortcut on the desktop is a choice the installers offer; a
-        // developer installing a package from a terminal is not asked.
-        desktop_shortcut: false,
-        // The same for the command, in the user's own `~/.local/bin` and `PATH`.
-        command: None,
-        command_roots: None,
-    };
-    let installed = Installer::new(&lock).install(&mut verified, &options)?;
+    let installed = install_from(args, &lock, &package, scope);
+    if args.all_users {
+        let _ = std::fs::remove_file(&package);
+    }
+    let (installed, decision, signed_by) = installed?;
 
     if !installed.recovery.is_empty() {
         xpack_core::errln!("note: recovered from an interrupted operation before installing");
@@ -160,6 +146,62 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     }
 
     super::success()
+}
+
+/// Verifies `package` against the installation's keys and installs it.
+fn install_from(
+    args: &Args,
+    lock: &xpack_platform::InstallLock,
+    package: &std::path::Path,
+    scope: xpack_core::InstallScope,
+) -> Result<(xpack_install::Installed, TrustDecision, String)> {
+    let decision = match (&args.trust, args.trust_on_first_use) {
+        (Some(key), _) => TrustDecision::Explicit(super::public_key(key)?),
+        (None, true) => TrustDecision::OnFirstUse,
+        (None, false) => TrustDecision::UsePinned,
+    };
+
+    let mut verified = open_and_verify(package, lock, &decision)?;
+    let signed_by = verified.signing_key().fingerprint();
+
+    let launcher = resolve_launcher(args)?;
+    // The updater follows the launcher: an installation with an entry point
+    // but no way to learn about updates is only half of what was asked for.
+    // Only placed where it means something. On Unix the windowed build is an
+    // exact duplicate of the console one, and installing it would double the
+    // launcher bytes in every installation to no effect.
+    let gui_launcher = if args.no_launcher || !xpack_core::HAS_WINDOWED_LAUNCHER {
+        None
+    } else {
+        super::default_gui_launcher()
+    };
+    let updater = if args.no_launcher { None } else { super::default_updater() };
+    let uninstaller = if args.no_launcher { None } else { super::default_uninstaller() };
+    // Offered unconditionally; the installer places it only for a package that
+    // asked to prompt its users.
+    let notifier = if args.no_launcher { None } else { super::default_notifier() };
+    let options = InstallOptions {
+        allow_downgrade: args.allow_downgrade,
+        activate: !args.no_activate,
+        launcher,
+        gui_launcher,
+        updater,
+        uninstaller,
+        notifier,
+        // The installation's own: this user's, or every user's.
+        desktop_roots: None,
+        // The manifest's request, or a choice recorded at an earlier install.
+        desktop_entry: None,
+        // A shortcut on the desktop is a choice the installers offer; a
+        // developer installing a package from a terminal is not asked.
+        desktop_shortcut: false,
+        // The same for the command, in the user's own `~/.local/bin` and `PATH`.
+        command: None,
+        command_roots: None,
+        scope,
+    };
+    let installed = Installer::new(lock).install(&mut verified, &options)?;
+    Ok((installed, decision, signed_by))
 }
 
 /// Decides which launcher binary, if any, to place in the installation.

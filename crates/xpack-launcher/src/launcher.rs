@@ -86,6 +86,15 @@ pub struct Outcome {
     pub restart_requested: bool,
 }
 
+/// What the steps before a launch decided.
+enum Prepared {
+    /// Start this version, with this manifest, on probation or not.
+    Ready(Version, Box<Manifest>, bool),
+    /// Nothing to start: the version used its attempts, and this is what
+    /// happened instead.
+    Finished(Outcome),
+}
+
 /// Starts an installed application.
 #[derive(Debug)]
 pub struct Launcher {
@@ -99,7 +108,13 @@ impl Launcher {
     /// Builds a launcher for an explicit installation directory.
     pub fn for_application_dir(dir: impl Into<PathBuf>) -> Self {
         Self {
-            paths: InstallPaths::from_application_dir(dir),
+            // An administrator starting it writes into the installation,
+            // never where a user's environment points.
+            paths: if xpack_platform::is_elevated() {
+                InstallPaths::open(dir).for_administrator()
+            } else {
+                InstallPaths::open(dir)
+            },
             offer_restart: true,
             windowed: false,
             holds_instance: false,
@@ -191,73 +206,13 @@ impl Launcher {
         // the application runs. Holding it for the lifetime of a user's
         // program would block every other xpack operation for as long as they
         // kept it open.
-        let (version, manifest, probation) = {
-            let lock = self.lock()?;
-            let installer = Installer::new(&lock);
-            installer.recover()?;
-
-            let application = self.application_id()?;
-            let state = lock.load_or_new_state(&application)?;
-
-            // A version staged by the background updater becomes active here
-            // and nowhere else. Activation starts a probation, and a probation
-            // only means something while something watches the version start,
-            // which is exactly what this process is about to do. Activating
-            // from the updater instead would start a clock nobody is holding.
-            let state = match &state.update {
-                UpdatePhase::Staged { version } if installer.is_usable(version) => {
-                    let staged = version.clone();
-                    match installer.activate(&staged, false) {
-                        Ok(()) => {
-                            tracing::info!(version = %staged, "activating a staged version");
-                            lock.load_or_new_state(&application)?
-                        }
-                        // A staged version that cannot be activated is not a
-                        // reason to refuse to start: the version already
-                        // running is fine, and it is better to open the
-                        // application and try again next time than to leave a
-                        // user with nothing.
-                        Err(error) => {
-                            tracing::warn!(version = %staged, %error, "could not activate the staged version");
-                            state
-                        }
-                    }
-                }
-                _ => state,
-            };
-
-            let version = state.active()?.clone();
-            if !installer.is_usable(&version) {
-                return Err(Error::invalid(
-                    "installation",
-                    format!(
-                        "{version} is active but its files are missing; reinstall it to repair"
-                    ),
-                ));
+        let (version, manifest, probation) = if self.paths.is_shared() {
+            self.prepare_shared()?
+        } else {
+            match self.prepare()? {
+                Prepared::Ready(version, manifest, probation) => (version, *manifest, probation),
+                Prepared::Finished(outcome) => return Ok(outcome),
             }
-
-            ensure_not_older_than_required(&state, &version)?;
-
-            let probation = state.update.is_probation();
-            if probation {
-                // Recorded before the launch, so a crash that stops this
-                // process from ever returning is still counted. A counter
-                // incremented afterwards never sees the failure that mattered.
-                let phase = installer.begin_attempt()?;
-                if phase.attempts_exhausted() {
-                    tracing::error!(%version, "version has used its startup attempts");
-                    let rolled_back = installer.record_failure("exhausted its startup attempts")?;
-                    return Ok(Outcome {
-                        version,
-                        startup: Some(StartupResult::FailedToStart { code: None }),
-                        rolled_back_to: rolled_back,
-                        exit_code: None,
-                        restart_requested: false,
-                    });
-                }
-            }
-
-            (version.clone(), self.read_manifest(&version)?, probation)
         };
 
         // Removed before the launch, never after: a file left by a previous
@@ -322,6 +277,101 @@ impl Launcher {
             exit_code,
             restart_requested: watch.finished(),
         })
+    }
+
+    /// Recovers, activates a staged version and begins its probation, under
+    /// the installation lock: what a start of this user's own installation
+    /// does before the application runs.
+    fn prepare(&self) -> Result<Prepared> {
+        let lock = self.lock()?;
+        let installer = Installer::new(&lock);
+        installer.recover()?;
+
+        let application = self.application_id()?;
+        let state = lock.load_or_new_state(&application)?;
+
+        // A version staged by the background updater becomes active here
+        // and nowhere else. Activation starts a probation, and a probation
+        // only means something while something watches the version start,
+        // which is exactly what this process is about to do. Activating
+        // from the updater instead would start a clock nobody is holding.
+        let state = match &state.update {
+            UpdatePhase::Staged { version } if installer.is_usable(version) => {
+                let staged = version.clone();
+                match installer.activate(&staged, false) {
+                    Ok(()) => {
+                        tracing::info!(version = %staged, "activating a staged version");
+                        lock.load_or_new_state(&application)?
+                    }
+                    // A staged version that cannot be activated is not a
+                    // reason to refuse to start: the version already
+                    // running is fine, and it is better to open the
+                    // application and try again next time than to leave a
+                    // user with nothing.
+                    Err(error) => {
+                        tracing::warn!(version = %staged, %error, "could not activate the staged version");
+                        state
+                    }
+                }
+            }
+            _ => state,
+        };
+
+        let version = state.active()?.clone();
+        if !installer.is_usable(&version) {
+            return Err(Error::invalid(
+                "installation",
+                format!("{version} is active but its files are missing; reinstall it to repair"),
+            ));
+        }
+
+        ensure_not_older_than_required(&state, &version)?;
+
+        let probation = state.update.is_probation();
+        if probation {
+            // Recorded before the launch, so a crash that stops this
+            // process from ever returning is still counted. A counter
+            // incremented afterwards never sees the failure that mattered.
+            let phase = installer.begin_attempt()?;
+            if phase.attempts_exhausted() {
+                tracing::error!(%version, "version has used its startup attempts");
+                let rolled_back = installer.record_failure("exhausted its startup attempts")?;
+                return Ok(Prepared::Finished(Outcome {
+                    version,
+                    startup: Some(StartupResult::FailedToStart { code: None }),
+                    rolled_back_to: rolled_back,
+                    exit_code: None,
+                    restart_requested: false,
+                }));
+            }
+        }
+
+        Ok(Prepared::Ready(version.clone(), Box::new(self.read_manifest(&version)?), probation))
+    }
+
+    /// What a start of every user's installation does instead: reads it, and
+    /// writes nothing to it, because this user cannot.
+    ///
+    /// No lock, which is a file in the installation it would have to open for
+    /// writing. No recovery, activation or probation: only an administrator
+    /// installing changes it, and does those as it installs. State is replaced
+    /// whole on every write, so reading it without the lock can be stale but
+    /// never torn.
+    fn prepare_shared(&self) -> Result<(Version, Manifest, bool)> {
+        let state =
+            xpack_core::store::load::<xpack_core::InstallState>(&self.paths.state_file())?.value;
+        let version = state.active()?.clone();
+        if !self.paths.has_version_files(&version) {
+            return Err(Error::invalid(
+                "installation",
+                format!("{version} is active but its files are missing; reinstall it to repair"),
+            ));
+        }
+        ensure_not_older_than_required(&state, &version)?;
+        // Where this user's startup report and logs go, made here because
+        // nothing else has made it for them yet.
+        xpack_core::atomic::create_dir_all(&self.paths.per_user_dir())?;
+        Ok((version.clone(), self.read_manifest(&version)?, false))
     }
 
     /// Starts periodic update checks for the application just launched.
@@ -1103,7 +1153,8 @@ fn record_announcement(paths: &InstallPaths, version: &Version) -> Result<()> {
 /// that it can be tested directly. The thread it gates wakes once a minute,
 /// which is far too slow to observe in a test.
 fn periodic_checks_wanted(paths: &InstallPaths, update: &UpdateSpec, wait: bool) -> bool {
-    wait && update.check_while_running
+    wait && !paths.is_shared()
+        && update.check_while_running
         && update.url.is_some()
         && xpack_core::automatic_checks(paths).allowed()
 }

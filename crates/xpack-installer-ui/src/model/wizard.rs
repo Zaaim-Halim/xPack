@@ -12,7 +12,7 @@ use xpack_core::ProgressEvent;
 use xpack_install::Existing;
 
 use super::page::{Page, PageSet};
-use super::plan::UiPlan;
+use super::plan::{AllUsers, UiPlan};
 use super::progress::Progress;
 use super::status::{InstallKind, Severity, Status};
 use super::text::{Facts, Flavour, Key, Texts};
@@ -191,6 +191,7 @@ enum Phase {
 #[derive(Debug, Clone)]
 struct Selections {
     accepted: bool,
+    everyone: bool,
     shortcut: bool,
     desktop_shortcut: bool,
     command: bool,
@@ -208,6 +209,7 @@ pub struct Wizard {
     shortcut_requested: bool,
     command_offer: Option<CommandOffer>,
     launch_on_finish: bool,
+    all_users: AllUsers,
     root: PathBuf,
     root_fixed: bool,
     inspection: Option<Inspection>,
@@ -233,11 +235,19 @@ impl Wizard {
             shortcut_requested: spec.shortcut_requested,
             command_offer: spec.command,
             launch_on_finish: spec.plan.launch_on_finish,
+            all_users: spec.plan.all_users,
             root: spec.root,
             root_fixed: spec.root_fixed,
             inspection: None,
             selections: Selections {
                 accepted: false,
+                everyone: match spec.plan.all_users {
+                    AllUsers::Never => false,
+                    AllUsers::Always => true,
+                    // Not beside an installation this person already has:
+                    // a second one for everyone would fight it over the menu.
+                    AllUsers::Offer => spec.plan.all_users_default && !spec.root_fixed,
+                },
                 shortcut: spec.plan.shortcut_default,
                 // Ticked for every application; the person installing can
                 // untick it.
@@ -284,9 +294,67 @@ impl Wizard {
         &self.root
     }
 
-    /// Whether the location can be changed.
+    /// Whether the location can be changed. Not for everyone on the
+    /// computer, which goes where other programs do.
     pub fn root_editable(&self) -> bool {
-        !self.root_fixed && self.is_choosing()
+        !self.root_fixed && !self.selections.everyone && self.is_choosing()
+    }
+
+    /// The "everyone on this computer" box: offered only where the publisher
+    /// allows the choice, and not beside an installation this person
+    /// already has.
+    pub fn everyone_visibility(&self) -> Visibility {
+        if self.all_users == AllUsers::Offer && !self.root_fixed {
+            Visibility::enabled_if(self.is_choosing())
+        } else {
+            Visibility::Hidden
+        }
+    }
+
+    /// Whether the installation is for everyone on the computer.
+    pub fn everyone(&self) -> bool {
+        self.selections.everyone
+    }
+
+    /// The "everyone" box's label, when it is drawn.
+    pub fn everyone_label(&self) -> Option<String> {
+        (self.everyone_visibility() != Visibility::Hidden)
+            .then(|| self.texts.line(Key::LocationEveryone))
+    }
+
+    /// The "everyone" box. Ignored where it is not offered. The previous
+    /// verdict is dropped, because the answer is about another directory.
+    pub fn set_everyone(&mut self, wanted: bool) {
+        if self.everyone_visibility() == Visibility::Enabled && wanted != self.selections.everyone {
+            self.selections.everyone = wanted;
+            self.inspection = None;
+        }
+    }
+
+    /// Whether the installation for everyone waits to be inspected.
+    pub fn pending_everyone_inspection(&self) -> bool {
+        self.is_choosing() && self.selections.everyone && self.inspection.is_none()
+    }
+
+    /// The answer to inspecting the installation for everyone; `None` when
+    /// the engine does not offer one after all, which falls back to the
+    /// person installing only.
+    pub fn inspected_everyone(&mut self, inspection: Option<Inspection>) {
+        if !self.pending_everyone_inspection() {
+            return;
+        }
+        match inspection {
+            Some(inspection) => self.inspection = Some(inspection),
+            None => self.selections.everyone = false,
+        }
+    }
+
+    /// The directory to start the application from after installing.
+    fn installed_directory(&self) -> PathBuf {
+        match (self.selections.everyone, self.target()) {
+            (true, Some(target)) => target.to_path_buf(),
+            _ => self.root.clone(),
+        }
     }
 
     /// Where the application will live, once inspected.
@@ -442,7 +510,7 @@ impl Wizard {
                     primary_label: texts.line(label),
                     cancel: Visibility::Enabled,
                     browse: if self.page == Page::Location {
-                        Visibility::shown_if(!self.root_fixed)
+                        Visibility::shown_if(!self.root_fixed && !self.selections.everyone)
                     } else {
                         Visibility::Hidden
                     },
@@ -569,7 +637,11 @@ impl Wizard {
 
     /// The root waiting to be inspected, if one is.
     pub fn pending_inspection(&self) -> Option<&Path> {
-        if self.is_choosing() && self.inspection.is_none() { Some(&self.root) } else { None }
+        if self.is_choosing() && self.inspection.is_none() && !self.selections.everyone {
+            Some(&self.root)
+        } else {
+            None
+        }
     }
 
     /// The answer to an inspection of `root`.
@@ -577,7 +649,7 @@ impl Wizard {
     /// Ignored when the root has changed since it was asked for: an answer
     /// that arrives late describes a folder nobody is looking at any more.
     pub fn inspected(&mut self, root: &Path, inspection: Inspection) {
-        if self.is_choosing() && root == self.root {
+        if self.is_choosing() && root == self.root && !self.selections.everyone {
             self.inspection = Some(inspection);
         }
     }
@@ -597,7 +669,7 @@ impl Wizard {
             return None;
         }
         self.phase = Phase::Ended(Conclusion::AlreadyInstalled);
-        Some(self.root.clone())
+        Some(self.installed_directory())
     }
 
     /// Something the engine reported while installing.
@@ -661,7 +733,8 @@ impl Wizard {
         let (conclusion, launch) = match result {
             Ok(_) => (
                 Conclusion::Installed,
-                (self.launch_on_finish && self.selections.launch).then(|| self.root.clone()),
+                (self.launch_on_finish && self.selections.launch)
+                    .then(|| self.installed_directory()),
             ),
             Err(failure) => (Conclusion::Failed(failure.kind), None),
         };
@@ -687,6 +760,7 @@ impl Wizard {
             desktop_shortcut: self.desktop_shortcut_visibility() == Visibility::Enabled
                 && self.desktop_shortcut(),
             command: command_declined.then_some(false),
+            everyone: self.selections.everyone,
         }
     }
 
@@ -731,7 +805,12 @@ impl Wizard {
             };
             rows.push((texts.line(Key::ReadyCommandLabel), value));
         }
-        rows.push((texts.line(Key::ReadyAccountLabel), texts.line(Key::ReadyAccountValue)));
+        let account = if self.selections.everyone {
+            Key::ReadyAccountEveryone
+        } else {
+            Key::ReadyAccountValue
+        };
+        rows.push((texts.line(Key::ReadyAccountLabel), texts.line(account)));
         rows
     }
 
@@ -936,6 +1015,97 @@ mod tests {
         wizard.set_accepted(true);
         wizard.advance();
         assert_eq!(wizard.page(), Page::Location);
+    }
+
+    fn allowing(all_users: AllUsers, by_default: bool) -> WizardSpec {
+        WizardSpec {
+            plan: UiPlan { all_users, all_users_default: by_default, ..UiPlan::default() },
+            ..spec()
+        }
+    }
+
+    fn everyone_inspection() -> Inspection {
+        Inspection { target: PathBuf::from("/opt/app"), verdict: Ok(Existing::Nothing) }
+    }
+
+    #[test]
+    fn ticking_everyone_inspects_the_shared_directory_and_locks_the_folder() {
+        let mut wizard = wizard_with(allowing(AllUsers::Offer, false), Ok(Existing::Nothing));
+        advance_to(&mut wizard, Page::Location);
+        assert_eq!(wizard.everyone_visibility(), Visibility::Enabled);
+
+        wizard.set_everyone(true);
+
+        assert!(wizard.pending_everyone_inspection());
+        assert_eq!(wizard.pending_inspection(), None, "asked about the person's own folder");
+        assert_eq!(wizard.buttons().primary, Visibility::Disabled, "allowed without a verdict");
+        wizard.inspected_everyone(Some(everyone_inspection()));
+        assert_eq!(wizard.target(), Some(Path::new("/opt/app")));
+        assert!(!wizard.root_editable());
+        assert_eq!(wizard.buttons().browse, Visibility::Hidden);
+        assert!(
+            !wizard.set_root(PathBuf::from("/elsewhere")),
+            "the folder is not theirs to choose"
+        );
+
+        let summary = wizard.summary();
+        assert!(summary.iter().any(|(_, value)| value.contains("Everyone")), "{summary:?}");
+        let choices = start_install(&mut wizard);
+        assert!(choices.everyone);
+    }
+
+    #[test]
+    fn unticking_everyone_goes_back_to_the_persons_own_folder() {
+        let mut wizard = Wizard::new(allowing(AllUsers::Offer, true));
+        // Ticked from the start, so the first question is about everyone.
+        assert!(wizard.pending_everyone_inspection());
+        wizard.inspected_everyone(Some(everyone_inspection()));
+        advance_to(&mut wizard, Page::Location);
+
+        wizard.set_everyone(false);
+
+        assert_eq!(wizard.pending_inspection(), Some(Path::new("/home/u/apps")));
+        assert!(!start_install_after_inspection(&mut wizard).everyone);
+    }
+
+    fn start_install_after_inspection(wizard: &mut Wizard) -> Choices {
+        let root = wizard.pending_inspection().unwrap().to_path_buf();
+        wizard.inspected(&root, inspection(Ok(Existing::Nothing)));
+        start_install(wizard)
+    }
+
+    #[test]
+    fn everyone_is_not_offered_unless_the_publisher_allows_the_choice() {
+        for (allowed, expected) in [(AllUsers::Never, false), (AllUsers::Always, true)] {
+            let mut wizard = if expected {
+                let mut wizard = Wizard::new(allowing(allowed, false));
+                wizard.inspected_everyone(Some(everyone_inspection()));
+                wizard
+            } else {
+                wizard_with(allowing(allowed, false), Ok(Existing::Nothing))
+            };
+            advance_to(&mut wizard, Page::Location);
+            assert_eq!(wizard.everyone_visibility(), Visibility::Hidden, "{allowed:?}");
+            wizard.set_everyone(!expected);
+            assert_eq!(wizard.everyone(), expected, "{allowed:?}: the box changed it");
+            assert_eq!(start_install(&mut wizard).everyone, expected, "{allowed:?}");
+        }
+    }
+
+    #[test]
+    fn everyone_is_not_offered_beside_an_installation_the_person_already_has() {
+        let fixed = WizardSpec { root_fixed: true, ..allowing(AllUsers::Offer, true) };
+        let wizard = wizard_with(fixed, Ok(Existing::Nothing));
+        assert_eq!(wizard.everyone_visibility(), Visibility::Hidden);
+        assert!(!wizard.everyone(), "ticked by default beside the person's own copy");
+    }
+
+    #[test]
+    fn an_engine_that_cannot_install_for_everyone_falls_back_to_the_person() {
+        let mut wizard = Wizard::new(allowing(AllUsers::Offer, true));
+        wizard.inspected_everyone(None);
+        assert!(!wizard.everyone());
+        assert!(wizard.pending_inspection().is_some(), "their own folder is asked about next");
     }
 
     #[test]
@@ -1429,6 +1599,7 @@ mod tests {
                 desktop_entry: None,
                 desktop_shortcut: true,
                 command: None,
+                everyone: false,
             }
         );
     }

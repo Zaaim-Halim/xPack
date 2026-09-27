@@ -162,21 +162,32 @@ impl App {
         let width = box_width();
         let mut y = box_height() - INSET;
 
-        y -= 36.0;
-        let note = wrapping(mtm, &texts.line(Key::LocationPerUser), INSET, y, width, 36.0);
-        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        inner.addSubview(&note);
+        let everyone = self.session.wizard().everyone();
+        if let Some(text) = self.session.wizard().everyone_label() {
+            y -= 26.0;
+            let for_everyone =
+                checkbox(&text, everyone, &self.controller, sel!(toggleEveryone:), mtm);
+            for_everyone.setFrame(rect(INSET, y, width, 22.0));
+            inner.addSubview(&for_everyone);
+        }
+        if !everyone {
+            y -= 36.0;
+            let note = wrapping(mtm, &texts.line(Key::LocationPerUser), INSET, y, width, 36.0);
+            note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            inner.addSubview(&note);
+        }
 
         y -= 26.0;
         inner.addSubview(&label(mtm, &texts.line(Key::LocationField), INSET, y, width, 18.0));
         y -= 28.0;
         let field_width = width - 90.0;
-        let field = text_field(
-            &self.session.wizard().root().display().to_string(),
-            &self.controller,
-            sel!(rootEdited:),
-            mtm,
-        );
+        // For everyone, the directory it goes in: not the person's to choose.
+        let shown = if everyone {
+            self.session.wizard().target().map(|t| t.display().to_string()).unwrap_or_default()
+        } else {
+            self.session.wizard().root().display().to_string()
+        };
+        let field = text_field(&shown, &self.controller, sel!(rootEdited:), mtm);
         field.setFrame(rect(INSET, y, field_width, 24.0));
         field.setEditable(self.session.wizard().root_editable());
         inner.addSubview(&field);

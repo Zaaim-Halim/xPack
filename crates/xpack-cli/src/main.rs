@@ -99,6 +99,10 @@ impl Command {
             | Self::Installer(_)
             | Self::Inspect(_)
             | Self::Verify(_) => None,
+            // Not for everyone: the per-user root, or one named in the
+            // environment, is no place for an administrator's process to
+            // create directories before it has refused that root.
+            Self::Install(a) if a.all_users => None,
             Self::Install(a) => a.application_id(),
             Self::List(a) => Some(a.application.clone()),
             Self::Run(a) => Some(a.application.clone()),

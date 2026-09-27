@@ -35,6 +35,17 @@ public class InstallerUiSpec {
     /** Whether the last page offers to open the application. */
     private Boolean launchOnFinish;
 
+    /**
+     * Who the application may be installed for: {@code never} (the person
+     * installing only, the default), {@code offer} (their choice) or
+     * {@code always} (everyone on the computer). Installing for everyone
+     * needs administrator rights, which the installer asks for.
+     */
+    private String allUsers;
+
+    /** Whether "everyone on this computer" starts ticked, with {@code offer}. */
+    private Boolean allUsersDefault;
+
     public List<String> getPages() {
         return pages;
     }
@@ -83,12 +94,30 @@ public class InstallerUiSpec {
         this.launchOnFinish = launchOnFinish;
     }
 
+    public String getAllUsers() {
+        return allUsers;
+    }
+
+    public void setAllUsers(String allUsers) {
+        this.allUsers = allUsers;
+    }
+
+    public Boolean getAllUsersDefault() {
+        return allUsersDefault;
+    }
+
+    public void setAllUsersDefault(Boolean allUsersDefault) {
+        this.allUsersDefault = allUsersDefault;
+    }
+
     public boolean isEmpty() {
         return (pages == null || pages.isEmpty())
                 && license == null
                 && (text == null || text.isEmpty())
                 && shortcutDefault == null
                 && pathDefault == null
-                && launchOnFinish == null;
+                && launchOnFinish == null
+                && (allUsers == null || allUsers.isBlank())
+                && allUsersDefault == null;
     }
 }

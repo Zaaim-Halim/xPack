@@ -150,6 +150,7 @@ pub enum Key {
     LocationDesktopShortcut,
     LocationCommand,
     LocationCommandTaken,
+    LocationEveryone,
 
     StatusChecking,
     StatusNew,
@@ -182,6 +183,7 @@ pub enum Key {
     ReadyCommandNo,
     ReadyAccountLabel,
     ReadyAccountValue,
+    ReadyAccountEveryone,
     ReadyHint,
 
     InstallingTitle,
@@ -221,7 +223,7 @@ pub enum Key {
 impl Key {
     /// Every key, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 87] = {
+    pub(crate) const ALL: [Self; 89] = {
         use Key::*;
         [
             WindowTitle,
@@ -252,6 +254,7 @@ impl Key {
             LocationDesktopShortcut,
             LocationCommand,
             LocationCommandTaken,
+            LocationEveryone,
             StatusChecking,
             StatusNew,
             StatusUpgrade,
@@ -282,6 +285,7 @@ impl Key {
             ReadyCommandNo,
             ReadyAccountLabel,
             ReadyAccountValue,
+            ReadyAccountEveryone,
             ReadyHint,
             InstallingTitle,
             InstallingSubtitle,
@@ -374,6 +378,9 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::LocationCommandTaken => {
             Some("Already used by another program, so not added: {command}.")
         }
+        Key::LocationEveryone => {
+            Some("Install for everyone on this computer (needs administrator rights)")
+        }
 
         Key::StatusChecking => Some("Checking this folder…"),
         Key::StatusNew => Some("{name} {new} will be installed here."),
@@ -413,6 +420,7 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::ReadyAccountValue => {
             either("Current user only, no administrator rights", "Current user only")
         }
+        Key::ReadyAccountEveryone => Some("Everyone on this computer, with administrator rights"),
         Key::ReadyHint => either(
             "Review your choices. Click Install to continue, or Back to change them.",
             "Click Install to begin, or Go Back to change your choices.",

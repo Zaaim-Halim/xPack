@@ -206,7 +206,12 @@ fn run_as(windowed: bool) -> ExitCode {
     // Started before the application, so a slow network never delays opening
     // it, and deliberately not waited on. Whatever it finds takes effect the
     // next time the application starts.
-    crate::spawn_updater(launcher.paths());
+    //
+    // Not for every user's installation, which an administrator updates by
+    // installing again: a user's updater could write nothing to it.
+    if !launcher.paths().is_shared() {
+        crate::spawn_updater(launcher.paths());
+    }
 
     match launch_with_one_restart(&launcher, &arguments, instance) {
         Ok(outcome) => {

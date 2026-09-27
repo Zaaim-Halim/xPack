@@ -34,6 +34,6 @@ pub use paths::{
 pub use platform::{Arch, Os, Platform};
 pub use policy::{AutomaticChecks, NO_UPDATE_ENV, UpdatePolicy, automatic_checks};
 pub use progress::{JsonProgress, NoProgress, ProgressEvent, ProgressReporter, STREAM_SCHEMA};
-pub use state::{InstallState, UpdatePhase, VersionRecord, VersionStatus};
+pub use state::{InstallScope, InstallState, UpdatePhase, VersionRecord, VersionStatus};
 pub use store::Loaded;
 pub use version::Version;

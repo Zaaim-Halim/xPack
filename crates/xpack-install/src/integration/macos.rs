@@ -50,6 +50,19 @@ use super::{Entry, Outcome, Roots, remove_paths};
 pub(super) fn install(entry: &Entry, roots: &Roots) -> Outcome {
     let bundle = bundle_path(entry, roots);
 
+    // `/Applications` holds real applications, one of which may have this
+    // name. A bundle for everyone is written only where there is none, or
+    // where the one there is xPack's own for this installation.
+    if roots.scope == xpack_core::InstallScope::Machine
+        && bundle.exists()
+        && bundle_launcher(&bundle).as_deref() != Some(entry.target.as_path())
+    {
+        return Outcome::Failed(format!(
+            "{} is another application's; it was left as it is",
+            bundle.display()
+        ));
+    }
+
     let executable_name = bundle_executable_name(&entry.name);
     let contents = bundle.join("Contents");
     let macos_dir = contents.join("MacOS");
@@ -364,6 +377,7 @@ mod tests {
             data: base.join("data"),
             home: base.join("home"),
             desktop: Some(base.join("desktop")),
+            scope: xpack_core::InstallScope::User,
         }
     }
 
@@ -502,6 +516,29 @@ mod tests {
         std::fs::create_dir_all(&macos).unwrap();
         std::fs::write(macos.join("Other"), "#!/bin/sh\nexec /somewhere/else\n").unwrap();
         assert_eq!(bundle_launcher(&dir.path().join("Other.app")), None, "a script not ours");
+    }
+
+    #[test]
+    fn a_bundle_for_everyone_never_replaces_another_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = Roots { scope: xpack_core::InstallScope::Machine, ..roots(dir.path()) };
+        let entry = entry();
+        let bundle = bundle_path(&entry, &roots);
+        let theirs = bundle.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("Example App"), "a real application").unwrap();
+
+        let outcome = install(&entry, &roots);
+
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(theirs.join("Example App")).unwrap(),
+            "a real application"
+        );
+        // Its own bundle, from an earlier install, is refreshed as before.
+        let _ = std::fs::remove_dir_all(&bundle);
+        assert!(install(&entry, &roots).is_done());
+        assert!(install(&entry, &roots).is_done(), "its own bundle was refused");
     }
 
     #[test]

@@ -28,12 +28,22 @@
 use std::path::PathBuf;
 
 use winreg::RegKey;
-use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
+use xpack_core::InstallScope;
 
 use super::{Entry, Outcome, Roots, lnk, remove_paths};
 
 /// The parent of every per-user uninstall entry.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+
+/// The registry hive a scope's uninstall entry lives in: this user's, or the
+/// machine's, which puts it in every user's installed-apps list.
+fn hive(scope: InstallScope) -> RegKey {
+    RegKey::predef(match scope {
+        InstallScope::User => HKEY_CURRENT_USER,
+        InstallScope::Machine => HKEY_LOCAL_MACHINE,
+    })
+}
 
 /// Writes the shortcut and the uninstall entry.
 pub(super) fn install(entry: &Entry, roots: &Roots) -> Outcome {
@@ -56,7 +66,7 @@ pub(super) fn install(entry: &Entry, roots: &Roots) -> Outcome {
     // Best effort, and deliberately after the shortcut: a missing entry in the
     // installed-apps list is a smaller loss than no way to start the program,
     // so the shortcut is never held up by the registry.
-    if let Err(error) = write_uninstall_entry(entry) {
+    if let Err(error) = write_uninstall_entry(entry, roots.scope) {
         tracing::warn!(%error, "could not register the application for removal");
     }
 
@@ -65,7 +75,7 @@ pub(super) fn install(entry: &Entry, roots: &Roots) -> Outcome {
 
 /// Removes the shortcut and the uninstall entry.
 pub(super) fn remove(entry: &Entry, roots: &Roots) -> Outcome {
-    if let Err(error) = delete_uninstall_entry(entry) {
+    if let Err(error) = delete_uninstall_entry(entry, roots.scope) {
         tracing::warn!(%error, "could not remove the uninstall registration");
     }
 
@@ -101,17 +111,18 @@ pub(super) fn shortcut_file_name(name: &str) -> String {
     xpack_core::safe_file_name(name)
 }
 
-/// The installation directory this user's Add/Remove Programs entry records.
-pub(super) fn recorded_root(application_id: &str) -> Option<PathBuf> {
-    let root = RegKey::predef(HKEY_CURRENT_USER);
+/// The installation directory the Add/Remove Programs entry for `scope`
+/// records.
+pub(super) fn recorded_root(application_id: &str, scope: InstallScope) -> Option<PathBuf> {
+    let root = hive(scope);
     let key = root.open_subkey(format!(r"{UNINSTALL_KEY}\{application_id}")).ok()?;
     let location: String = key.get_value("InstallLocation").ok()?;
     Some(PathBuf::from(location))
 }
 
-/// Writes the per-user Add/Remove Programs entry.
-fn write_uninstall_entry(entry: &Entry) -> std::io::Result<()> {
-    let root = RegKey::predef(HKEY_CURRENT_USER);
+/// Writes the Add/Remove Programs entry for `scope`.
+fn write_uninstall_entry(entry: &Entry, scope: InstallScope) -> std::io::Result<()> {
+    let root = hive(scope);
     let path = format!(r"{UNINSTALL_KEY}\{}", entry.application_id);
     let (key, _) = root.create_subkey_with_flags(&path, KEY_WRITE)?;
 
@@ -144,12 +155,12 @@ fn write_uninstall_entry(entry: &Entry) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Deletes the per-user Add/Remove Programs entry.
+/// Deletes the Add/Remove Programs entry for `scope`.
 ///
 /// A key that is already gone is not an error: an uninstall run twice, or one
 /// following a partial earlier attempt, must still report success.
-fn delete_uninstall_entry(entry: &Entry) -> std::io::Result<()> {
-    let root = RegKey::predef(HKEY_CURRENT_USER);
+fn delete_uninstall_entry(entry: &Entry, scope: InstallScope) -> std::io::Result<()> {
+    let root = hive(scope);
     let path = format!(r"{UNINSTALL_KEY}\{}", entry.application_id);
     match root.delete_subkey_all(&path) {
         Ok(()) => Ok(()),

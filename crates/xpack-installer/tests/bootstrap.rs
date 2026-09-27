@@ -480,8 +480,13 @@ fn the_wizard_installs_and_launches_through_the_same_call() {
     assert!(Engine::launch(&verified, &root).is_err());
 
     // No shortcut on the desktop of whoever runs the tests.
-    let choices =
-        Choices { root: root.clone(), desktop_entry: None, desktop_shortcut: false, command: None };
+    let choices = Choices {
+        root: root.clone(),
+        desktop_entry: None,
+        desktop_shortcut: false,
+        command: None,
+        everyone: false,
+    };
     let installed = Engine::install(&verified, &choices, &xpack_core::NoProgress).unwrap();
     assert_eq!(installed.directory, root.join("com.example.demo"));
     assert_eq!(installed.version, Version::parse("1.0.0").unwrap());

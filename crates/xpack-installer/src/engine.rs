@@ -23,12 +23,33 @@ impl Engine for VerifiedPayload {
         Inspection { target, verdict }
     }
 
+    fn inspect_everyone(&self) -> Option<Inspection> {
+        if self.ui().all_users == xpack_installer_ui::AllUsers::Never {
+            return None;
+        }
+        let application = &self.manifest().application;
+        let target =
+            xpack_install::integration::machine_application_dir(&application.id, &application.name)
+                .ok()?;
+        let paths = xpack_core::InstallPaths::named(&target, &application.id).ok()?;
+        let verdict = Ok(xpack_install::inspect(&paths, &application.version));
+        Some(Inspection { target, verdict })
+    }
+
     fn install(&self, choices: &Choices, progress: &dyn ProgressReporter) -> Result<Installed> {
+        if choices.everyone && !xpack_platform::is_elevated() {
+            return self.install_elevated(choices);
+        }
         let request = Request {
             root: choices.root.clone(),
             desktop_entry: choices.desktop_entry,
             desktop_shortcut: choices.desktop_shortcut,
             command: choices.command,
+            scope: if choices.everyone {
+                xpack_core::InstallScope::Machine
+            } else {
+                xpack_core::InstallScope::User
+            },
         };
         let outcome = self.install_into(&request, progress)?;
         Ok(Installed {
@@ -41,7 +62,14 @@ impl Engine for VerifiedPayload {
     }
 
     fn launch(&self, root: &Path) -> Result<()> {
-        let paths = self.paths(root)?;
+        // An installation for everyone is reported as its own directory,
+        // named after the application; one for the person installing, as the
+        // root it was made in.
+        let paths = if root.join("state").join("state.json").is_file() {
+            xpack_core::InstallPaths::open(root)
+        } else {
+            self.paths(root)?
+        };
         // Read without the lock, as looking always is: the names only decide
         // which file to start, and the state is replaced atomically.
         let names = InstallState::load(&paths.state_file())
@@ -70,6 +98,64 @@ impl Engine for VerifiedPayload {
 }
 
 impl VerifiedPayload {
+    /// Installs for everyone by running this installer again with
+    /// administrator rights, asked for the way the platform asks, and waits.
+    ///
+    /// The installer run that way is this very file, told what the person
+    /// chose on its command line, installing silently. What it did is then
+    /// read from the installation rather than taken on its word.
+    fn install_elevated(&self, choices: &Choices) -> Result<Installed> {
+        let program = std::env::current_exe()
+            .map_err(|e| Error::invalid("installer", format!("cannot locate itself: {e}")))?;
+        let mut arguments: Vec<std::ffi::OsString> = vec!["--silent".into(), "--all-users".into()];
+        if choices.desktop_entry == Some(false) {
+            arguments.push("--no-shortcut".into());
+        }
+        if !choices.desktop_shortcut {
+            arguments.push("--no-desktop-shortcut".into());
+        }
+        if choices.command == Some(false) {
+            arguments.push("--no-path".into());
+        }
+
+        match xpack_platform::run_elevated(&program, &arguments)? {
+            xpack_platform::Elevated::Declined => Err(Error::invalid(
+                "installation",
+                "administrator rights were not given, so nothing was installed",
+            )),
+            xpack_platform::Elevated::Exited(0) => self.installed_for_everyone(),
+            xpack_platform::Elevated::Exited(code) => Err(Error::invalid(
+                "installation",
+                format!("installing for everyone failed (exit code {code})"),
+            )),
+        }
+    }
+
+    /// What an installation for everyone holds now, read from it.
+    fn installed_for_everyone(&self) -> Result<Installed> {
+        let application = &self.manifest().application;
+        let directory = xpack_install::integration::machine_application_dir(
+            &application.id,
+            &application.name,
+        )?;
+        let paths = xpack_core::InstallPaths::open(&directory);
+        let state = InstallState::load(&paths.state_file())?.value;
+        if state.current_version.as_ref() != Some(&application.version) {
+            return Err(Error::invalid(
+                "installation",
+                format!("{} was not installed for everyone", application.version),
+            ));
+        }
+        Ok(Installed {
+            directory,
+            version: application.version.clone(),
+            shortcut_added: self.manifest().desktop.shortcut
+                && !paths.desktop_preference_file().is_file(),
+            command: self.manifest().command.as_ref().map(|command| command.name.clone()),
+            command_off_path: None,
+        })
+    }
+
     /// Why `root` cannot be installed into at all, before looking inside it.
     ///
     /// Nothing is created to find out. Whether a directory can really be

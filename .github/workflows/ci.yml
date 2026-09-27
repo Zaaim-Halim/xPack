@@ -62,6 +62,24 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets
+        env:
+          # The Windows runner is expected to be elevated, which is what lets
+          # the tests of installing for every user run there; this makes them
+          # fail rather than skip if it is not.
+          XPACK_TEST_REQUIRE_ELEVATED: ${{ runner.os == 'Windows' && '1' || '' }}
+
+      # Installing for every user needs administrator rights, so those tests
+      # skip in the run above on macOS and Linux and run here as root. The
+      # test binary is built as the runner's user and only run with sudo, so
+      # nothing in `target/` ends up belonging to root. The Windows runner is
+      # already elevated, so the run above covers it there.
+      - name: Test installing for every user, as root
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          binary=$(cargo test -p xpack-cli --test all_users --no-run --message-format=json \
+            | jq -r 'select(.target.name == "all_users" and .executable != null) | .executable')
+          sudo XPACK_TEST_REQUIRE_ELEVATED=1 "$binary" --nocapture --test-threads=1
 
       # `--all-targets` skips doctests, and the logging crate's usage examples
       # are doctests. Running them separately keeps the documentation honest.

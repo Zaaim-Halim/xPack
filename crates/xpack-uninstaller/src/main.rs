@@ -49,6 +49,15 @@ fn main() -> ExitCode {
     // Logging into the installation only makes sense before it is removed, and
     // only from the process that is not about to delete the log directory out
     // from under itself.
+    // Every user's installation is an administrator's to remove. Started
+    // without the rights, as Windows' installed-apps list and a terminal
+    // start it, this asks for them the way the platform does and runs again
+    // with them.
+    if paths.is_shared() && !xpack_platform::is_elevated() {
+        return elevate(&paths);
+    }
+    let paths = if xpack_platform::is_elevated() { paths.for_administrator() } else { paths };
+
     if !args.relocated {
         xpack_log::init(&xpack_log::Config {
             console: xpack_log::Console::Silent,
@@ -76,6 +85,35 @@ fn main() -> ExitCode {
 }
 
 /// Copies this binary out of the installation and lets the copy finish the job.
+/// Runs this uninstaller again with administrator rights, and passes on how
+/// that went.
+fn elevate(paths: &InstallPaths) -> ExitCode {
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            xpack_core::errln!("xpack-uninstaller: cannot locate this binary: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let arguments =
+        ["--yes".into(), "--application-dir".into(), paths.root().as_os_str().to_owned()];
+    match xpack_platform::run_elevated(&executable, &arguments) {
+        Ok(xpack_platform::Elevated::Exited(0)) => ExitCode::SUCCESS,
+        Ok(xpack_platform::Elevated::Exited(_)) => ExitCode::FAILURE,
+        Ok(xpack_platform::Elevated::Declined) => {
+            xpack_core::errln!(
+                "xpack-uninstaller: this application is installed for everyone on the computer, \
+                 and removing it needs administrator rights"
+            );
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            xpack_core::errln!("xpack-uninstaller: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn hand_over(executable: &std::path::Path, to: &std::path::Path, paths: &InstallPaths) -> ExitCode {
     if let Err(error) = relocate(executable, to) {
         xpack_core::errln!("xpack-uninstaller: could not prepare removal: {error}");
@@ -151,7 +189,7 @@ fn remove(paths: &InstallPaths, relocated: bool, executable: &std::path::Path) -
 /// The installation to act on.
 fn resolve(args: &Args) -> xpack_core::Result<InstallPaths> {
     match &args.application_dir {
-        Some(dir) => Ok(InstallPaths::from_application_dir(dir)),
+        Some(dir) => Ok(InstallPaths::open(dir)),
         None => InstallPaths::discover(),
     }
 }

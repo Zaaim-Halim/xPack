@@ -26,6 +26,10 @@ use super::page::{Page, PageSet};
 use super::text::{self, TextOverride};
 
 /// The wizard settings a publisher supplies.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is a setting of its own in a JSON document, written independently"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UiPlan {
@@ -69,6 +73,39 @@ pub struct UiPlan {
     /// does.
     #[serde(default)]
     pub launch_on_finish: bool,
+
+    /// Who the application may be installed for.
+    ///
+    /// Left out, the person installing only, as every installer before this
+    /// setting did. Installing for everyone needs administrator rights, which
+    /// the installer asks for when that is chosen; a setting here can offer
+    /// it, never grant it.
+    #[serde(default, skip_serializing_if = "AllUsers::is_never")]
+    pub all_users: AllUsers,
+
+    /// Whether "everyone on this computer" starts ticked, where it is offered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_users_default: bool,
+}
+
+/// Who an application may be installed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AllUsers {
+    /// The person installing only.
+    #[default]
+    Never,
+    /// Their choice, starting from `allUsersDefault`.
+    Offer,
+    /// Everyone on the computer, always.
+    Always,
+}
+
+impl AllUsers {
+    #[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if passes one")]
+    fn is_never(&self) -> bool {
+        *self == Self::Never
+    }
 }
 
 impl Default for UiPlan {
@@ -81,6 +118,8 @@ impl Default for UiPlan {
             shortcut_default: true,
             path_default: true,
             launch_on_finish: false,
+            all_users: AllUsers::Never,
+            all_users_default: false,
         }
     }
 }
@@ -111,6 +150,11 @@ impl UiPlan {
         }
         for (key, value) in &self.text {
             text::validate_override(*key, value)?;
+        }
+        if self.all_users_default && self.all_users != AllUsers::Offer {
+            return Err(invalid(
+                "allUsersDefault only means something with allUsers: \"offer\"".to_string(),
+            ));
         }
         Ok(())
     }

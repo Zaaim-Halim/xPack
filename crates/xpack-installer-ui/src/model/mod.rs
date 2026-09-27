@@ -14,7 +14,7 @@ pub mod text;
 pub mod wizard;
 
 pub use page::{Page, PageSet};
-pub use plan::UiPlan;
+pub use plan::{AllUsers, UiPlan};
 pub use progress::{Counts, Progress};
 pub use status::{InstallKind, Severity, Status};
 pub use text::{Facts, Flavour, Key, TextOverride, Texts};

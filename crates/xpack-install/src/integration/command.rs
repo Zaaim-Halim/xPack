@@ -41,6 +41,11 @@ use super::Outcome;
 /// The registry key, under `HKEY_CURRENT_USER`, that holds the user's `PATH`.
 pub const USER_ENVIRONMENT_KEY: &str = "Environment";
 
+/// The registry key, under `HKEY_LOCAL_MACHINE`, that holds every user's
+/// `PATH`.
+pub const MACHINE_ENVIRONMENT_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
 /// Where a command is put, for the current user.
 ///
 /// A value rather than looked up inside, for the reason [`super::Roots`] is:
@@ -51,9 +56,12 @@ pub const USER_ENVIRONMENT_KEY: &str = "Environment";
 pub struct CommandRoots {
     /// Where the script goes on macOS and Linux: `~/.local/bin`.
     pub bin: PathBuf,
-    /// The registry key under `HKEY_CURRENT_USER` whose `Path` value is
-    /// edited on Windows: [`USER_ENVIRONMENT_KEY`] for real.
+    /// The registry key whose `Path` value is edited on Windows:
+    /// [`USER_ENVIRONMENT_KEY`] for real, under the hive [`Self::scope`] picks.
     pub environment_key: String,
+    /// Whose command this is: one user's, in their own `bin` and `PATH`, or
+    /// every user's.
+    pub scope: xpack_core::InstallScope,
 }
 
 impl CommandRoots {
@@ -63,7 +71,27 @@ impl CommandRoots {
         Some(Self {
             bin: dirs.home_dir().join(".local").join("bin"),
             environment_key: USER_ENVIRONMENT_KEY.to_string(),
+            scope: xpack_core::InstallScope::User,
         })
+    }
+
+    /// Every user's: `/usr/local/bin` on macOS and Linux, the machine's `PATH`
+    /// on Windows. Fixed, never taken from the environment: an elevated
+    /// installer writes here.
+    pub fn machine() -> Self {
+        Self {
+            bin: PathBuf::from("/usr/local/bin"),
+            environment_key: MACHINE_ENVIRONMENT_KEY.to_string(),
+            scope: xpack_core::InstallScope::Machine,
+        }
+    }
+
+    /// The command locations for `scope`.
+    pub fn for_scope(scope: xpack_core::InstallScope) -> Option<Self> {
+        match scope {
+            xpack_core::InstallScope::User => Self::host(),
+            xpack_core::InstallScope::Machine => Some(Self::machine()),
+        }
     }
 }
 
@@ -346,7 +374,7 @@ fn same_entry(entry: &str, dir: &str) -> bool {
 #[cfg(windows)]
 mod imp {
     use winreg::RegKey;
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, RegType};
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, RegType};
     use winreg::types::FromRegValue;
 
     use super::{Command, CommandRoots, Outcome, path_with, path_without};
@@ -364,7 +392,7 @@ mod imp {
             return Outcome::Failed(format!("{}: {error}", copy.display()));
         }
         let dir = command.command_dir.to_string_lossy();
-        match edit_path(&roots.environment_key, |value| path_with(value, &dir)) {
+        match edit_path(roots, |value| path_with(value, &dir)) {
             Ok(changed) => {
                 if changed {
                     xpack_platform::announce_environment_change();
@@ -390,7 +418,7 @@ mod imp {
         }
 
         let dir = command.command_dir.to_string_lossy();
-        let changed = match edit_path(&roots.environment_key, |value| path_without(value, &dir)) {
+        let changed = match edit_path(roots, |value| path_without(value, &dir)) {
             Ok(changed) => changed,
             Err(error) => return Outcome::Failed(format!("the user's PATH: {error}")),
         };
@@ -410,11 +438,15 @@ mod imp {
     /// not what any Windows version writes, and replacing it would lose
     /// whatever someone put there.
     pub(super) fn edit_path(
-        key: &str,
+        roots: &CommandRoots,
         edit: impl Fn(&str) -> Option<String>,
     ) -> std::io::Result<bool> {
-        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
-            .create_subkey_with_flags(key, KEY_READ | KEY_WRITE)?;
+        let hive = match roots.scope {
+            xpack_core::InstallScope::User => HKEY_CURRENT_USER,
+            xpack_core::InstallScope::Machine => HKEY_LOCAL_MACHINE,
+        };
+        let (key, _) = RegKey::predef(hive)
+            .create_subkey_with_flags(&roots.environment_key, KEY_READ | KEY_WRITE)?;
         let (current, kind) = match key.get_raw_value("Path") {
             Ok(raw) => {
                 let kind = raw.vtype.clone();

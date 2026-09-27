@@ -6,6 +6,13 @@
 //! the update path never has to prompt, and an unprivileged attacker gains
 //! nothing by racing a privileged installer.
 //!
+//! An installation for every user of the machine gives some of that up, by
+//! choice of whoever installs it: it is written with administrator rights,
+//! into a directory named after the application where other programs go. What
+//! replaces the per-user guarantee is that nothing a user runs writes to it:
+//! each user's own files go to [`machine_user_dir`], and it is updated only by
+//! installing again. See `InstallScope` in the state module.
+//!
 //! ```text
 //! <root>/<application-id>/
 //! ├── config/trust.json     pinned signing keys for this installation
@@ -28,6 +35,15 @@ use crate::version::Version;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPaths {
     root: PathBuf,
+    /// The application's id, when the directory is not named after it: a
+    /// machine-wide installation is named after the application's display
+    /// name, as other programs in `Program Files` or `/opt` are.
+    id: Option<String>,
+    /// Where this user's own files for a machine-wide installation go.
+    ///
+    /// `None` for an installation of one user's, which keeps them in its own
+    /// state directory as it always has.
+    user_dir: Option<PathBuf>,
 }
 
 impl InstallPaths {
@@ -37,7 +53,7 @@ impl InstallPaths {
     /// it, because this constructor is also reachable from CLI arguments.
     pub fn new(install_root: &Path, application_id: &str) -> Result<Self> {
         validate_application_id(application_id)?;
-        Ok(Self { root: install_root.join(application_id) })
+        Ok(Self { root: install_root.join(application_id), id: None, user_dir: None })
     }
 
     /// Builds the layout under the platform's default per-user data directory.
@@ -47,7 +63,84 @@ impl InstallPaths {
 
     /// Wraps an already-resolved application directory.
     pub fn from_application_dir(dir: impl Into<PathBuf>) -> Self {
-        Self { root: dir.into() }
+        Self { root: dir.into(), id: None, user_dir: None }
+    }
+
+    /// An installation in `dir` whose directory is named for people rather
+    /// than after `application_id`.
+    pub fn named(dir: impl Into<PathBuf>, application_id: &str) -> Result<Self> {
+        validate_application_id(application_id)?;
+        Ok(Self { root: dir.into(), id: Some(application_id.to_string()), user_dir: None })
+    }
+
+    /// The installation in `dir`, as its own state describes it.
+    ///
+    /// What every installed binary uses to find its installation. It reads
+    /// the state to learn the application's id, which a machine-wide
+    /// installation's directory is not named after, and where this user's own
+    /// files go when the installation is every user's and so not theirs to
+    /// write. A directory with no readable state is taken as it is: whatever
+    /// runs next reports what is missing.
+    pub fn open(dir: impl Into<PathBuf>) -> Self {
+        let paths = Self::from_application_dir(dir);
+        let Ok(state) =
+            crate::store::load::<crate::state::InstallState>(&paths.state_file()).map(|l| l.value)
+        else {
+            return paths;
+        };
+        let paths = if paths.application_id() == Some(state.application_id.as_str()) {
+            paths
+        } else {
+            match Self::named(paths.root.clone(), &state.application_id) {
+                Ok(named) => named,
+                Err(_) => return paths,
+            }
+        };
+        if state.scope == crate::state::InstallScope::Machine
+            && let Ok(dir) = machine_user_dir(&state.application_id)
+        {
+            return paths.with_user_dir(dir);
+        }
+        paths
+    }
+
+    /// The same installation, with this user's own files kept in `dir`.
+    ///
+    /// For a machine-wide installation, which a user cannot write to: see
+    /// [`machine_user_dir`].
+    #[must_use]
+    pub fn with_user_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.user_dir = Some(dir.into());
+        self
+    }
+
+    /// The same installation, for a process with administrator rights: its
+    /// files go in the installation itself, which it can write, never in a
+    /// user's directory.
+    ///
+    /// An elevated process started for a user inherits their environment
+    /// under `sudo` and UAC alike, so a per-user directory it worked out would
+    /// be wherever that user's variables said. Nothing an administrator's
+    /// process writes may be steered that way.
+    #[must_use]
+    pub fn for_administrator(mut self) -> Self {
+        self.user_dir = None;
+        self
+    }
+
+    /// Whether this is every user's installation, which this user reads and
+    /// never writes: one whose user files are kept elsewhere.
+    pub fn is_shared(&self) -> bool {
+        self.user_dir.is_some()
+    }
+
+    /// Where this user's own files for the installation go: logs, startup
+    /// reports and the instance lock.
+    ///
+    /// The installation's state directory, except for a machine-wide
+    /// installation, which a user cannot write to.
+    pub fn per_user_dir(&self) -> PathBuf {
+        self.user_dir.clone().unwrap_or_else(|| self.state_dir())
     }
 
     /// The application's root directory.
@@ -57,9 +150,10 @@ impl InstallPaths {
 
     /// The application id this layout belongs to.
     ///
-    /// Taken from the final path component, which is how the layout is built.
+    /// Taken from the final path component, which is how the layout is built,
+    /// unless the installation is [named](Self::named) for people.
     pub fn application_id(&self) -> Option<&str> {
-        self.root.file_name().and_then(|n| n.to_str())
+        self.id.as_deref().or_else(|| self.root.file_name().and_then(|n| n.to_str()))
     }
 
     /// Directory holding every installed version.
@@ -162,10 +256,9 @@ impl InstallPaths {
     /// system releases it when that launcher ends, however it ends, so a crash
     /// never leaves the user unable to start the application again.
     ///
-    /// Per user: an installation is per user today, so its own state directory
-    /// is.
+    /// Per user: see [`Self::per_user_dir`].
     pub fn instance_lock_file(&self) -> PathBuf {
-        self.state_dir().join("instance.lock")
+        self.per_user_dir().join("instance.lock")
     }
 
     /// What the launcher holding [`Self::instance_lock_file`] records about
@@ -174,19 +267,19 @@ impl InstallPaths {
     /// A separate file, because the lock file itself is never written: another
     /// process may hold it.
     pub fn instance_record_file(&self) -> PathBuf {
-        self.state_dir().join("instance.json")
+        self.per_user_dir().join("instance.json")
     }
 
     /// Where a second start leaves its arguments for the running copy.
     ///
     /// Given to the application in [`INSTANCE_INBOX_ENV`].
     pub fn instance_inbox_dir(&self) -> PathBuf {
-        self.state_dir().join("inbox")
+        self.per_user_dir().join("inbox")
     }
 
     /// Directory for component logs.
     pub fn logs_dir(&self) -> PathBuf {
-        self.state_dir().join("logs")
+        self.per_user_dir().join("logs")
     }
 
     /// Directory for installation configuration.
@@ -252,12 +345,12 @@ impl InstallPaths {
     /// what an unusual deployment can fall back on.
     pub fn discover() -> Result<Self> {
         if let Some(dir) = std::env::var_os(APPLICATION_DIR_ENV) {
-            return Ok(Self::from_application_dir(PathBuf::from(dir)));
+            return Ok(Self::open(PathBuf::from(dir)));
         }
         let executable = std::env::current_exe().map_err(|e| {
             Error::invalid("installation", format!("cannot locate this binary: {e}"))
         })?;
-        Ok(Self::from_application_dir(Self::application_dir_of(&executable)?))
+        Ok(Self::open(Self::application_dir_of(&executable)?))
     }
 
     /// The installation an executable at `executable` belongs to.
@@ -376,7 +469,7 @@ impl InstallPaths {
     /// Per version, so a report from an older one can never be mistaken for a
     /// report from the version currently being judged.
     pub fn health_file(&self, version: &Version) -> PathBuf {
-        self.state_dir().join(format!("started-{}.ok", version.to_directory_name()))
+        self.per_user_dir().join(format!("started-{}.ok", version.to_directory_name()))
     }
 
     /// The uninstaller binary for this installation.
@@ -519,6 +612,30 @@ pub const COMMAND_DIR: &str = "bin";
 pub fn default_install_root() -> Result<PathBuf> {
     install_root_from(std::env::var_os(INSTALL_ROOT_ENV).as_deref())
 }
+
+/// Where this user's own files for a machine-wide installation of
+/// `application_id` go: `xpack-user/<id>` beside the per-user installations.
+///
+/// Beside, not inside, so it never meets a per-user installation of the same
+/// application. [`USER_DIR_ENV`] overrides the parent, which is what tests
+/// use. A process with administrator rights must not use this at all: see
+/// [`InstallPaths::for_administrator`].
+pub fn machine_user_dir(application_id: &str) -> Result<PathBuf> {
+    validate_application_id(application_id)?;
+    let parent = match std::env::var_os(USER_DIR_ENV) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => directories::BaseDirs::new()
+            .ok_or_else(|| {
+                Error::Unsupported("locating a home directory for the current user".to_string())
+            })?
+            .data_local_dir()
+            .join("xpack-user"),
+    };
+    Ok(parent.join(application_id))
+}
+
+/// Relocates [`machine_user_dir`].
+pub const USER_DIR_ENV: &str = "XPACK_USER_DIR";
 
 /// Name of the environment variable that relocates installations.
 pub const INSTALL_ROOT_ENV: &str = "XPACK_INSTALL_ROOT";
@@ -792,6 +909,39 @@ mod tests {
         std::fs::create_dir_all(paths.state_dir()).unwrap();
         std::fs::write(paths.state_file(), b"{}").unwrap();
         assert!(paths.is_installed());
+    }
+
+    #[test]
+    fn a_users_own_files_move_out_of_a_machine_wide_installation() {
+        let shared = InstallPaths::from_application_dir("/opt/xpack/com.example.app");
+        let mine =
+            shared.clone().with_user_dir("/home/ada/.local/share/xpack-user/com.example.app");
+        let version = Version::parse("1.0.0").unwrap();
+
+        for path in [
+            mine.logs_dir(),
+            mine.health_file(&version),
+            mine.instance_lock_file(),
+            mine.instance_record_file(),
+            mine.instance_inbox_dir(),
+        ] {
+            assert!(!path.starts_with(mine.root()), "{} is in the installation", path.display());
+        }
+        // What the installation itself holds stays where it is.
+        assert_eq!(mine.state_file(), shared.state_file());
+        assert_eq!(mine.lock_file(), shared.lock_file());
+        assert_eq!(mine.version_dir(&version), shared.version_dir(&version));
+        // And a per-user installation keeps everything in its own state.
+        assert_eq!(shared.per_user_dir(), shared.state_dir());
+    }
+
+    #[test]
+    fn an_administrators_process_writes_into_the_installation_not_a_users_directory() {
+        let mine = InstallPaths::from_application_dir("/opt/example")
+            .with_user_dir("/home/ada/.local/share/xpack-user/com.example.app");
+        let admin = mine.for_administrator();
+        assert!(admin.logs_dir().starts_with("/opt/example"), "{}", admin.logs_dir().display());
+        assert!(!admin.is_shared());
     }
 
     #[test]

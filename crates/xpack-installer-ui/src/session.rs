@@ -169,6 +169,11 @@ impl Session {
 
     /// Asks the engine about the root, when the model is waiting to know.
     fn inspect_if_needed(&mut self) -> bool {
+        if self.wizard.pending_everyone_inspection() {
+            let inspection = self.engine.inspect_everyone();
+            self.wizard.inspected_everyone(inspection);
+            return true;
+        }
         let Some(root) = self.wizard.pending_inspection().map(std::path::Path::to_path_buf) else {
             return false;
         };

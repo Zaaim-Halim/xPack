@@ -214,6 +214,8 @@ and so does the block: leave it out for the recommended wizard.
 | `text` | English defaults | Only `welcome` and `finish`, using `{name}` and `{version}` |
 | `shortcutDefault` | `true` | Whether the Start Menu / Applications box starts ticked |
 | `pathDefault` | `true` | Whether the command-line box starts ticked, when `<command>` is set |
+| `allUsers` | `never` | `offer` lets the person install for everyone on the computer; `always` does so. Needs administrator rights, which the installer asks for |
+| `allUsersDefault` | `false` | Whether "everyone on this computer" starts ticked, with `offer` |
 | `launchOnFinish` | `false` | Whether the last page offers to open the application |
 
 The name, publisher and icon are not settings: they come from the signed

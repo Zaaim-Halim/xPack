@@ -174,6 +174,10 @@ impl App {
                 let on = is_checked(&self.controls.command);
                 self.session.change(|wizard| wizard.set_command(on))
             }
+            Action::Everyone => {
+                let on = is_checked(&self.controls.everyone);
+                self.session.change(|wizard| wizard.set_everyone(on))
+            }
             Action::Launch => {
                 let on = is_checked(&self.controls.launch);
                 self.session.change(|wizard| wizard.set_launch(on))

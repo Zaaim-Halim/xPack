@@ -364,10 +364,62 @@ MyApp-1.3.0-windows-x64-Setup.exe --silent
 | `--no-desktop-shortcut` | Skip the shortcut on the desktop, which is otherwise added beside the entry (first install only). |
 | `--no-path` | Skip the command the application asks for, so a terminal cannot start it by name (first install only). |
 | `--log <FILE>` | Also write a log of the run. |
+| `--all-users` | Install for everyone on the computer, where the installer offers it. Needs administrator rights. |
+| `--only-me` | Install for the person running it only, where the installer offers the choice. |
 
 On Windows, `xpack installer` produces a windowed installer by default. A shell
 does not wait for a windowed program, so build installers that only scripts
 run with `--console`.
+
+### Installing for everyone on the computer
+
+By default an application is installed for the person installing it, in their
+own account, with no administrator rights. **To let it be installed for every
+user of the computer**, say so in the wizard settings:
+
+```json
+{ "allUsers": "offer", "allUsersDefault": false }
+```
+
+`"never"` (the default) keeps it for one person, `"offer"` puts an "Install for
+everyone on this computer" box on the location page, starting from
+`allUsersDefault`, and `"always"` installs for everyone. In the wizard,
+choosing everyone asks for administrator rights the way the system does: the
+UAC prompt on Windows, the administrator password on macOS. Linux has no
+wizard: there, and from any terminal, the installer's `--all-users` needs
+`sudo` or an elevated prompt, and `xpack install --all-users` installs a
+package the same way.
+
+| | Installed in | Menu entry | Command |
+| --- | --- | --- | --- |
+| Windows | `Program Files\<Name>` | every user's Start Menu | every user's `PATH` |
+| macOS | `/Library/Application Support/<Name>` | `/Applications` | `/usr/local/bin` |
+| Linux | `/opt/<name>` | `/usr/share/applications` | `/usr/local/bin` |
+
+What changes for an installation every user shares:
+
+- **Updates come from an administrator installing the new version.** Users
+  cannot write to it, so there are no background updates and no update notice.
+  A new version is active as soon as it is installed, with no probation: no
+  user's start can roll it back, since none can write to the installation. The
+  version before it stays on disk.
+- **Each user's own files stay in their account**: logs, the startup report and
+  the single-instance files (`XPACK_HEALTH_FILE` and `XPACK_INSTANCE_INBOX` name
+  them there).
+- **The installation is refused** unless every directory above it belongs to
+  the system and nobody else can write to it, and a command is not added to a
+  `/usr/local/bin` another user owns (as Homebrew sometimes leaves it). The
+  package is copied where only an administrator can write before it is checked,
+  and installed from that copy. `--trust-on-first-use` and `--root` do not
+  apply.
+- **Its own uninstaller asks for administrator rights** when a user starts it,
+  including from Windows' installed-apps list (with `pkexec` on Linux).
+- An installation for one person and one for everyone of the same application
+  live in different places, so a person can have both, each with its own menu
+  entry. The wizard does not offer "everyone" to someone who already has their
+  own copy; from a terminal nothing stops it. Uninstall one first.
+- A directory or `/Applications` bundle of the same name that belongs to
+  another program is never written to: the install stops and says so.
 
 ## Rust
 
@@ -437,7 +489,10 @@ application xPack is validated against.
   later update must be signed by it. An installer carries the key it expects,
   so even the first install cannot be substituted.
 - **No downgrades.** An update server cannot push an older, vulnerable version.
-- **Nothing runs elevated.** Installations are per user.
+- **Nothing runs elevated** unless the application is [installed for
+  everyone](#installing-for-everyone-on-the-computer), which asks for
+  administrator rights once, to install; the application itself always runs
+  as the user.
 - **Sign your installers.** Code-sign and notarise installer files after
   `xpack installer` — appending the payload invalidates an earlier signature.
 

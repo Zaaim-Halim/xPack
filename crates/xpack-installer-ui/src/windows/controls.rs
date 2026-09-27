@@ -48,6 +48,7 @@ pub(super) enum Action {
     Shortcut,
     DesktopShortcut,
     Command,
+    Everyone,
     Launch,
 }
 
@@ -76,6 +77,7 @@ pub(super) struct Controls {
     pub(super) shortcut: nwg::CheckBox,
     pub(super) desktop_shortcut: nwg::CheckBox,
     pub(super) command: nwg::CheckBox,
+    pub(super) everyone: nwg::CheckBox,
     pub(super) launch: nwg::CheckBox,
     progress: nwg::ProgressBar,
     back: nwg::Button,
@@ -149,9 +151,14 @@ impl Controls {
         ] {
             nwg::Button::builder().font(Some(&c.normal)).parent(window).build(button)?;
         }
-        for checkbox in
-            [&mut c.accept, &mut c.shortcut, &mut c.desktop_shortcut, &mut c.command, &mut c.launch]
-        {
+        for checkbox in [
+            &mut c.accept,
+            &mut c.shortcut,
+            &mut c.desktop_shortcut,
+            &mut c.command,
+            &mut c.everyone,
+            &mut c.launch,
+        ] {
             nwg::CheckBox::builder().font(Some(&c.normal)).parent(window).build(checkbox)?;
         }
         Ok(c)
@@ -170,6 +177,7 @@ impl Controls {
             (&self.shortcut.handle, Action::Shortcut),
             (&self.desktop_shortcut.handle, Action::DesktopShortcut),
             (&self.command.handle, Action::Command),
+            (&self.everyone.handle, Action::Everyone),
             (&self.launch.handle, Action::Launch),
         ]
         .into_iter()
@@ -285,14 +293,27 @@ impl Controls {
     fn location(&self, wizard: &Wizard) {
         let texts = wizard.texts();
         let mut y = BODY_Y;
-        text(&self.lines[0], &texts.line(Key::LocationPerUser), BODY_X, y, BODY_WIDTH, 36);
-        y += 44;
+        let everyone = wizard.everyone();
+        if let Some(label) = wizard.everyone_label() {
+            check(&self.everyone, &label, everyone, BODY_X, y);
+            y += 28;
+        }
+        if !everyone {
+            text(&self.lines[0], &texts.line(Key::LocationPerUser), BODY_X, y, BODY_WIDTH, 36);
+            y += 44;
+        }
         text(&self.lines[1], &texts.line(Key::LocationField), BODY_X, y, BODY_WIDTH, 20);
         y += 22;
 
         let field_width = BODY_WIDTH - 100;
-        if self.root.text() != wizard.root().display().to_string() {
-            self.root.set_text(&wizard.root().display().to_string());
+        // For everyone, the directory it goes in: not the person's to choose.
+        let shown = if everyone {
+            wizard.target().map(|t| t.display().to_string()).unwrap_or_default()
+        } else {
+            wizard.root().display().to_string()
+        };
+        if self.root.text() != shown {
+            self.root.set_text(&shown);
         }
         self.root.set_readonly(!wizard.root_editable());
         place(&self.root, BODY_X, y, field_width, 23);
@@ -479,9 +500,14 @@ impl Controls {
         {
             button.set_visible(false);
         }
-        for checkbox in
-            [&self.accept, &self.shortcut, &self.desktop_shortcut, &self.command, &self.launch]
-        {
+        for checkbox in [
+            &self.accept,
+            &self.shortcut,
+            &self.desktop_shortcut,
+            &self.command,
+            &self.everyone,
+            &self.launch,
+        ] {
             checkbox.set_visible(false);
         }
     }

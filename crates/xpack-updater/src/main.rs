@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
 
     let paths = match &args.application_dir {
-        Some(dir) => InstallPaths::from_application_dir(dir),
+        Some(dir) => InstallPaths::open(dir),
         None => match InstallPaths::discover() {
             Ok(paths) => paths,
             Err(error) => {
@@ -86,6 +86,18 @@ fn main() -> ExitCode {
             }
         },
     };
+
+    // Every user's installation is updated by an administrator installing
+    // again. A user's updater could write nothing to it, and says so rather
+    // than failing halfway.
+    if paths.is_shared() && !xpack_platform::is_elevated() {
+        xpack_core::errln!(
+            "xpack-updater: this application is installed for every user; an administrator \
+             updates it by installing the new version"
+        );
+        return ExitCode::from(exit::FAILED);
+    }
+    let paths = if xpack_platform::is_elevated() { paths.for_administrator() } else { paths };
 
     // Silent console on purpose. This process has no terminal of its own, and
     // anything it printed would land in whatever the launcher was attached to

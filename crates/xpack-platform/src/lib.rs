@@ -23,6 +23,7 @@
 pub mod environment;
 pub mod link;
 pub mod lock;
+pub mod privilege;
 pub mod process;
 pub mod sharing;
 pub mod space;
@@ -32,6 +33,7 @@ pub mod windows_manifest;
 pub use environment::announce_environment_change;
 pub use link::{LinkOutcome, update_current_link};
 pub use lock::{DownloadLease, InstallLock, InstanceLock};
+pub use privilege::{Elevated, is_elevated, restrict_new_files, run_elevated};
 pub use process::{LaunchRequest, launch, request_close, resolve_executable, without_a_console};
 pub use space::{available_space, ensure_space};
 pub use window::bring_to_front;

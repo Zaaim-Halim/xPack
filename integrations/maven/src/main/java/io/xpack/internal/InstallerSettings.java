@@ -33,7 +33,11 @@ public final class InstallerSettings {
                 .putIfAny("text", spec.getText())
                 .put("shortcutDefault", spec.getShortcutDefault())
                 .put("pathDefault", spec.getPathDefault())
-                .put("launchOnFinish", spec.getLaunchOnFinish());
+                .put("launchOnFinish", spec.getLaunchOnFinish())
+                .put("allUsers", spec.getAllUsers() == null || spec.getAllUsers().isBlank()
+                        ? null
+                        : spec.getAllUsers().trim())
+                .put("allUsersDefault", spec.getAllUsersDefault());
         return document.toString();
     }
 

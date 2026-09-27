@@ -15,15 +15,20 @@ tracing.workspace = true
 
 # Free disk space, through a safe interface. Already in the dependency tree.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 
-# Two Win32 calls: telling running programs that the user's environment
-# changed (see `environment.rs`), and asking a volume how much room it has
-# (see `space.rs`).
+# The Win32 calls this crate makes: telling running programs that the user's
+# environment changed (`environment.rs`), asking a volume how much room it has
+# (`space.rs`), bringing a window to the front (`window.rs`), and whether this
+# process has administrator rights and asking for them (`privilege.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -500,6 +500,9 @@ impl<'a> Updater<'a> {
             // honoured, and the user's real `~/.local/bin` and `PATH`.
             command: None,
             command_roots: None,
+            // What the installation already is: an update never changes who
+            // it is for.
+            scope: lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope),
         };
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
 

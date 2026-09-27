@@ -182,10 +182,12 @@ pub(crate) fn desktop_roots(base: &Path) -> xpack_install::integration::Roots {
         data: base.join("data"),
         home: base.join("home"),
         desktop: Some(base.join("desktop")),
+        scope: xpack_core::InstallScope::User,
     }
 }
 
 /// A temporary installation root plus its layout.
+#[allow(dead_code)]
 pub(crate) fn install_paths(root: &Path) -> InstallPaths {
     InstallPaths::new(root, "com.example.app").unwrap()
 }

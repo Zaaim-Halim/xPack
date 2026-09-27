@@ -203,6 +203,31 @@ impl VersionRecord {
     }
 }
 
+/// Who an installation is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallScope {
+    /// The user who installed it, in their own directories. Every
+    /// installation made before this was recorded is one.
+    #[default]
+    User,
+    /// Every user of the machine, in directories only an administrator can
+    /// write to.
+    ///
+    /// Nothing that runs as a user writes to it: the launcher reads the
+    /// installation and keeps what it writes (logs, startup reports, the
+    /// instance lock) in the user's own directories, and there are no
+    /// background updates. An administrator updates it by installing again.
+    Machine,
+}
+
+impl InstallScope {
+    /// Whether this is the scope an installation has unless it says so.
+    pub fn is_user(&self) -> bool {
+        *self == Self::User
+    }
+}
+
 /// The newest package format a launcher placed before the record existed can
 /// read: what xPack 0.3.0 to 0.5.0 shipped.
 pub const LAUNCHER_FORMAT_BEFORE_RECORD: u32 = 3;
@@ -304,6 +329,11 @@ pub struct InstallState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_format_version: Option<u32>,
 
+    /// Who this installation is for. Absent is one user, which is what every
+    /// installation made before this was recorded is.
+    #[serde(default, skip_serializing_if = "InstallScope::is_user")]
+    pub scope: InstallScope,
+
     /// Stable random identifier deciding this installation's staged-rollout
     /// cohort.
     ///
@@ -348,6 +378,7 @@ impl InstallState {
             binary_base_name: None,
             announced_update: None,
             launcher_format_version: None,
+            scope: InstallScope::User,
             rollout_id: None,
         }
     }

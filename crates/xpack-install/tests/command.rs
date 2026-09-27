@@ -33,6 +33,7 @@ impl World {
         let roots = CommandRoots {
             bin: dir.path().join("home/.local/bin"),
             environment_key: format!(r"Software\xpack-tests\{unique}"),
+            scope: xpack_core::InstallScope::User,
         };
         // Records its arguments, so a test can see them arrive.
         let launcher = dir.path().join("launcher");

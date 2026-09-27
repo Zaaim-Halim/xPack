@@ -20,6 +20,16 @@ pub trait Engine: Send + Sync + 'static {
     /// still choosing, and a folder they merely looked at must not gain files.
     fn inspect(&self, root: &Path) -> Inspection;
 
+    /// Where installing for everyone on the computer would go, and what is
+    /// there now; `None` where this installer does not offer it.
+    ///
+    /// The directory is not the person's to choose: it is where other
+    /// programs go, named after the application. Changes nothing, as
+    /// [`Self::inspect`] does not.
+    fn inspect_everyone(&self) -> Option<Inspection> {
+        None
+    }
+
     /// Installs, reporting progress as it goes.
     ///
     /// Called at most once, on a worker thread. It cannot be interrupted,
@@ -71,6 +81,10 @@ pub struct Choices {
     pub desktop_shortcut: bool,
     /// `Some(false)` when they declined the command, on the same terms.
     pub command: Option<bool>,
+    /// Install for everyone on the computer, rather than the person
+    /// installing: `root` is then ignored, and the installer asks for
+    /// administrator rights if it does not have them.
+    pub everyone: bool,
 }
 
 /// What a successful installation produced.

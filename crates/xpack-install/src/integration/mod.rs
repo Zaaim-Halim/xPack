@@ -49,6 +49,7 @@ use xpack_core::{DesktopSpec, InstallPaths, Manifest, Version};
 
 #[cfg(target_os = "linux")]
 mod linux;
+pub mod machine;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -295,6 +296,9 @@ pub struct Roots {
     /// directory: Windows may keep it in a synced folder, and its name on
     /// Linux follows the session's language.
     pub desktop: Option<PathBuf>,
+    /// Whose entries these are: one user's, or every user's. On Windows it
+    /// also picks the registry hive the uninstall entry goes in.
+    pub scope: xpack_core::InstallScope,
 }
 
 /// Resolves the directories this user's desktop entries belong in.
@@ -305,7 +309,32 @@ pub fn host_roots() -> Option<Roots> {
         data: dirs.data_dir().to_path_buf(),
         desktop: desktop_shortcut::desktop_dir(&home),
         home,
+        scope: xpack_core::InstallScope::User,
     })
+}
+
+/// The directories every user's desktop entries belong in.
+///
+/// Fixed system locations, never taken from the environment or a home
+/// directory: this is read by an elevated installer, and a variable the user
+/// set must not decide where it writes. On Windows they come from the machine's
+/// own registry hive, which only an administrator can change.
+pub fn machine_roots() -> Option<Roots> {
+    machine::roots()
+}
+
+/// The directory a machine-wide installation of an application is in, or
+/// goes in: see [`machine::application_dir`].
+pub fn machine_application_dir(application_id: &str, name: &str) -> xpack_core::Result<PathBuf> {
+    machine::application_dir(application_id, name)
+}
+
+/// The desktop entries for `scope`: this user's, or every user's.
+pub fn roots_for(scope: xpack_core::InstallScope) -> Option<Roots> {
+    match scope {
+        xpack_core::InstallScope::User => host_roots(),
+        xpack_core::InstallScope::Machine => machine_roots(),
+    }
 }
 
 /// Creates the desktop entry this platform uses.
@@ -388,8 +417,8 @@ fn recorded_application_dir(application_id: &str, _name: &str, roots: &Roots) ->
 ///
 /// Read from the registry, which has no directory to redirect in a test.
 #[cfg(windows)]
-fn recorded_application_dir(application_id: &str, _name: &str, _roots: &Roots) -> Option<PathBuf> {
-    windows::recorded_root(application_id)
+fn recorded_application_dir(application_id: &str, _name: &str, roots: &Roots) -> Option<PathBuf> {
+    windows::recorded_root(application_id, roots.scope)
 }
 
 /// Removes the entry from under an explicit set of directories.

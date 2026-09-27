@@ -21,6 +21,8 @@ class InstallerSettingsTest {
         spec.setShortcutDefault(false);
         spec.setPathDefault(false);
         spec.setLaunchOnFinish(true);
+        spec.setAllUsers("offer");
+        spec.setAllUsersDefault(true);
 
         Map<String, Object> settings = Json.parseObject(InstallerSettings.toJson(spec));
 
@@ -29,6 +31,17 @@ class InstallerSettingsTest {
         assertEquals(false, settings.get("shortcutDefault"));
         assertEquals(false, settings.get("pathDefault"));
         assertEquals(true, settings.get("launchOnFinish"));
+        assertEquals("offer", settings.get("allUsers"));
+        assertEquals(true, settings.get("allUsersDefault"));
+    }
+
+    @Test
+    void who_it_installs_for_is_left_out_unless_set() {
+        InstallerUiSpec spec = new InstallerUiSpec();
+        spec.setAllUsers("  ");
+        assertTrue(spec.isEmpty());
+        Map<String, Object> settings = Json.parseObject(InstallerSettings.toJson(spec));
+        assertFalse(settings.containsKey("allUsers"));
     }
 
     @Test
