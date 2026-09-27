@@ -59,6 +59,13 @@ fn launch_with_one_restart(
 
     tracing::info!("the user agreed to restart; starting the updated version");
 
+    // Opened through its macOS bundle, the application is started again by
+    // opening the bundle, so it keeps the bundle's name and icon; the new
+    // launch does the restarting and this one is done.
+    if crate::reopen::through_bundle(launcher.paths(), arguments) {
+        return Ok(outcome);
+    }
+
     // The second launch offers no further restart. This process performs one,
     // so a prompt during that second run would ask the application to close
     // and leave nothing to bring it back — the user's application would simply
@@ -115,6 +122,16 @@ fn run_as(windowed: bool) -> ExitCode {
         file: Some(launcher.paths()),
         format: xpack_log::Format::Text,
     });
+
+    // The launch another launcher opened the bundle for, to restart the
+    // application. It offers no restart of its own, as a restart in place
+    // would not: one per start.
+    let launcher = if crate::reopen::is_a_restart(launcher.paths()) {
+        tracing::info!("started again after the user agreed to restart");
+        launcher.without_restart_offers()
+    } else {
+        launcher
+    };
 
     // One of the application's extra commands runs its own program, and
     // nothing else of an ordinary start applies to it.

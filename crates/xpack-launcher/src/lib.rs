@@ -62,6 +62,7 @@
 //! which means one prebuilt launcher binary works for every application.
 
 pub mod launcher;
+mod reopen;
 pub mod run;
 
 pub use launcher::{

@@ -351,6 +351,27 @@ pub fn recorded_installation_for_user(application_id: &str, name: &str) -> Optio
     recorded_installation(application_id, name, &host_roots()?)
 }
 
+/// Set by the macOS bundle's script to the bundle's own path, for the launcher
+/// it starts.
+///
+/// A launcher restarting the application after an update opens this bundle
+/// again: macOS gives the bundle's name and icon only to the first application
+/// that starts after the bundle is opened, and a second start from the same
+/// launcher would appear under its program's own name. Absent when the
+/// launcher was started any other way, and inherited by whatever the
+/// application starts, so it is only a lead: see `bundle_launcher`, on macOS.
+pub const BUNDLE_ENV: &str = "XPACK_BUNDLE";
+
+/// The launcher the macOS bundle at `bundle` starts, read back from the script
+/// xPack wrote into it.
+///
+/// `None` for a path that is not such a bundle. A launcher compares this with
+/// its own installation before trusting a bundle it was told about.
+#[cfg(target_os = "macos")]
+pub fn bundle_launcher(bundle: &Path) -> Option<PathBuf> {
+    macos::bundle_launcher(bundle)
+}
+
 /// The application's own directory, as this platform's entry records it.
 #[cfg(target_os = "macos")]
 fn recorded_application_dir(_application_id: &str, name: &str, roots: &Roots) -> Option<PathBuf> {
