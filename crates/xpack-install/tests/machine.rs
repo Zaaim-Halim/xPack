@@ -183,3 +183,32 @@ fn a_command_for_everyone_is_not_put_where_a_user_could_change_it() {
     assert!(reason.contains("does not belong to root"), "{reason}");
     assert!(!world.dir.path().join("bin").join("example").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn nothing_in_an_installation_for_everyone_is_left_writable_by_others() {
+    // The attack, whatever carries it: an installation directory that came
+    // into being writable by everyone. On a Linux machine whose /opt has a
+    // default access list, what is created there is, whatever the umask.
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    std::fs::create_dir_all(world.paths.root().join("versions")).unwrap();
+    for dir in [world.paths.root(), &world.paths.root().join("versions")] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+
+    world.install("1.0.0", &world.options(InstallScope::Machine)).unwrap();
+
+    let mut pending = vec![world.paths.root().to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        assert_eq!(mode & 0o022, 0, "{} is writable by others: {mode:o}", path.display());
+        if meta.is_dir() {
+            pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        }
+    }
+}

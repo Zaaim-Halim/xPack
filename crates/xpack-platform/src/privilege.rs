@@ -276,6 +276,26 @@ mod tests {
         assert_eq!(applescript_quote(r#"a "b" \c"#), r#""a \"b\" \\c""#);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn nothing_created_after_restricting_is_writable_by_others_whatever_the_umask_was() {
+        use std::os::unix::fs::PermissionsExt;
+        // The attack: an elevated installer started from a shell whose umask
+        // lets everyone write what it creates.
+        let before = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0));
+        restrict_new_files();
+        let dir = tempfile::tempdir().unwrap();
+        let created = dir.path().join("created");
+        std::fs::create_dir(&created).unwrap();
+        std::fs::write(created.join("file"), b"x").unwrap();
+        rustix::process::umask(before);
+
+        for path in [created.clone(), created.join("file")] {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o022, 0, "{} is {mode:o}", path.display());
+        }
+    }
+
     #[test]
     fn a_test_run_is_not_elevated_unless_it_really_is() {
         // Not an assertion either way: the suite may run as root in CI. It

@@ -452,6 +452,9 @@ impl<'lock> Installer<'lock> {
         // After the binaries too: the command runs the launcher.
         let command =
             self.update_commands(&manifest, &previous_commands, options.command_roots.as_ref());
+        if options.scope == xpack_core::InstallScope::Machine {
+            restrict_tree(paths.root())?;
+        }
 
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
@@ -1441,6 +1444,50 @@ pub fn open_if_sealed(
     })?;
     xpack_security::seal::open(package, into, key)?;
     Ok(into.to_path_buf())
+}
+
+/// Takes write permission away from everyone but the owner, on everything
+/// in an installation for every user.
+///
+/// The umask an elevated installer sets is not enough: on Linux, a directory
+/// with a default access list gives what is created inside it that list's
+/// permissions whatever the umask says, and a machine can come that way. So a
+/// machine-wide install ends by making sure, file by file. Taking the group
+/// bits away also caps what any access-list entry can grant. Links are left
+/// alone: their own mode means nothing, and their targets are either in here
+/// or not the installation's to change.
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "one signature on every platform; Windows takes the directory's access list"
+    )
+)]
+fn restrict_tree(root: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let meta = std::fs::symlink_metadata(&path).map_err(|e| Error::io(&path, e))?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o022 != 0 {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o022))
+                    .map_err(|e| Error::io(&path, e))?;
+            }
+            if meta.is_dir() {
+                for entry in std::fs::read_dir(&path).map_err(|e| Error::io(&path, e))? {
+                    pending.push(entry.map_err(|e| Error::io(&path, e))?.path());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    Ok(())
 }
 
 /// What placing xPack's own programs did, one entry per program.
