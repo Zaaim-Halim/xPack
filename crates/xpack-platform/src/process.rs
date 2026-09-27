@@ -352,6 +352,11 @@ pub fn launch_spec(
 pub fn request_close(pid: u32) -> Result<()> {
     let mut command = close_command(pid);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // The caller is often the windowed launcher, which has no console, and
+    // Windows would give `taskkill` a console window of its own: a black
+    // window flashing up over the application the user just agreed to
+    // restart. Nobody reads what it prints, so it never needs one.
+    without_a_console(&mut command);
 
     let status = command
         .status()
