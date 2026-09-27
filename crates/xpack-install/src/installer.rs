@@ -326,6 +326,7 @@ impl<'lock> Installer<'lock> {
         // package into another's directory would corrupt both.
         self.ensure_same_application(&manifest.application.id)?;
         package.ensure_installable_on(Platform::host()?)?;
+        self.ensure_same_platform(&manifest)?;
 
         Self::ensure_version_fits(paths, &manifest)?;
 
@@ -1283,6 +1284,51 @@ impl<'lock> Installer<'lock> {
             .application_id()
             .ok_or_else(|| Error::invalid("installation", "root has no application id"))?;
         self.lock.load_or_new_state(id)
+    }
+
+    /// Refuses a package for another platform than the installation's.
+    ///
+    /// An installation holds one platform's programs: its launcher, updater
+    /// and uninstaller are built for it. A version for another platform would
+    /// be installed beside them and then never updated, because the updater
+    /// refuses every package for a platform other than its own. It happens:
+    /// the Intel installer run on an Apple Silicon Mac runs under Rosetta,
+    /// believes the machine is Intel, and finds its package fits.
+    fn ensure_same_platform(&self, manifest: &xpack_core::Manifest) -> Result<()> {
+        let Ok(state) = self.load_state() else {
+            return Ok(());
+        };
+        let Some(active) = state.current_version.as_ref() else {
+            return Ok(());
+        };
+        let recorded = self.lock.paths().version_manifest_file(active);
+        let Ok(installed) = std::fs::read(&recorded)
+            .map_err(drop)
+            .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).map_err(drop))
+        else {
+            return Ok(());
+        };
+        if installed.platform == manifest.platform {
+            return Ok(());
+        }
+        let rosetta = if xpack_platform::translated_by_rosetta() {
+            format!(
+                " This installer is the {} one, running under Rosetta on a Mac the {} one is for; \
+                 use that one.",
+                manifest.platform, installed.platform
+            )
+        } else {
+            String::new()
+        };
+        Err(Error::invalid(
+            "install",
+            format!(
+                "this installation is for {}, and this package is for {}: installing it would \
+                 leave the installation unable to update. Uninstall it first to change \
+                 platform.{rosetta}",
+                installed.platform, manifest.platform
+            ),
+        ))
     }
 
     fn ensure_same_application(&self, package_id: &str) -> Result<()> {

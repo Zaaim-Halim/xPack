@@ -1814,6 +1814,7 @@ version = "0.5.0"
 dependencies = [
  "directories",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "winreg",

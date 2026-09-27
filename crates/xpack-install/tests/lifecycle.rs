@@ -1804,3 +1804,52 @@ fn a_file_already_on_the_desktop_under_the_shortcuts_name_is_never_touched() {
     xpack_install::uninstall_with_roots(lock, Some(&common::desktop_roots(dir.path()))).unwrap();
     assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own shortcut");
 }
+
+#[test]
+fn a_package_for_another_platform_than_the_installation_is_refused_and_changes_nothing() {
+    // E4: the Intel installer run under Rosetta on an Apple Silicon Mac that
+    // already has the Apple Silicon build. Its package fits what the process
+    // believes the machine is, and would be installed beside a launcher and
+    // an updater for the other architecture, which then never update it.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+    install(
+        &lock,
+        dir.path(),
+        &key,
+        "1.0.0",
+        &InstallOptions { activate: true, ..Default::default() },
+    )
+    .unwrap();
+
+    // The installation as the other architecture's installer made it.
+    let host = xpack_core::Platform::host().unwrap();
+    let other = if host.arch == xpack_core::Arch::X64 { "arm64" } else { "x64" };
+    let recorded = paths.version_manifest_file(&Version::parse("1.0.0").unwrap());
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&recorded).unwrap()).unwrap();
+    manifest["platform"]["arch"] = serde_json::json!(other);
+    std::fs::write(&recorded, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let before = std::fs::read(paths.state_file()).unwrap();
+
+    let err = install(
+        &lock,
+        dir.path(),
+        &key,
+        "1.1.0",
+        &InstallOptions { activate: true, ..Default::default() },
+    )
+    .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains(other) && message.contains("Uninstall"), "{message}");
+    // Built for Intel and run on Apple Silicon, this is the owner's case
+    // exactly, and the message must say which installer to use instead.
+    if xpack_platform::translated_by_rosetta() {
+        assert!(message.contains("Rosetta"), "{message}");
+    }
+    assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "the state changed");
+    assert!(!paths.version_dir(&Version::parse("1.1.0").unwrap()).exists());
+}
