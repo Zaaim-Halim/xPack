@@ -77,6 +77,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          # The Ubuntu runner leaves /opt writable by users other than root,
+          # which xPack rightly refuses for an installation every user runs.
+          # Made as it is on an ordinary Linux system; the runner is thrown
+          # away after the job.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ls -ld /opt
+            sudo chmod go-w /opt
+          fi
           binary=$(cargo test -p xpack-cli --test all_users --no-run --message-format=json \
             | jq -r 'select(.target.name == "all_users" and .executable != null) | .executable')
           sudo XPACK_TEST_REQUIRE_ELEVATED=1 "$binary" --nocapture --test-threads=1
