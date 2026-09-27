@@ -197,7 +197,11 @@ fn nothing_in_an_installation_for_everyone_is_left_writable_by_others() {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)).unwrap();
     }
 
+    // Two versions, so the second's activation writes state after the first
+    // install: nothing written last may escape either.
     world.install("1.0.0", &world.options(InstallScope::Machine)).unwrap();
+    std::fs::set_permissions(world.paths.root(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    world.install("1.1.0", &world.options(InstallScope::Machine)).unwrap();
 
     let mut pending = vec![world.paths.root().to_path_buf()];
     while let Some(path) = pending.pop() {

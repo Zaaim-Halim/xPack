@@ -88,7 +88,10 @@ fn trusting_whatever_key_signed_the_package_is_refused_for_everyone() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "{}", text(&out));
-    assert!(!machine_dir().exists());
+    // Refused before anything is read. Not checked by looking for the
+    // installation: where the suite runs elevated, the test that installs for
+    // everyone may be making it at this moment.
+    assert!(text(&out).contains("--trust-on-first-use"), "{}", text(&out));
 }
 
 #[test]

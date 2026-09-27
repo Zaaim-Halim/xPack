@@ -452,9 +452,6 @@ impl<'lock> Installer<'lock> {
         // After the binaries too: the command runs the launcher.
         let command =
             self.update_commands(&manifest, &previous_commands, options.command_roots.as_ref());
-        if options.scope == xpack_core::InstallScope::Machine {
-            restrict_tree(paths.root())?;
-        }
 
         let activated = if options.activate {
             progress.report(&ProgressEvent::Activating { version: version.clone() });
@@ -473,6 +470,12 @@ impl<'lock> Installer<'lock> {
         } else {
             false
         };
+
+        // Last, after everything this install writes, activation's state
+        // included: anything written after it would escape it.
+        if options.scope == xpack_core::InstallScope::Machine {
+            restrict_tree(paths.root())?;
+        }
 
         Ok(Installed {
             version,
