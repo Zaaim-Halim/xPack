@@ -61,6 +61,7 @@ fn template(platform: Platform) -> Manifest {
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     }
 }
 

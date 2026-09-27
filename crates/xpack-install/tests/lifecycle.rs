@@ -787,6 +787,98 @@ fn a_different_launcher_binary_still_does_not_replace_one_in_place() {
     assert_eq!(std::fs::read(paths.launcher_file()).unwrap(), b"the resident launcher");
 }
 
+/// Installs a package that asks for a single instance, which is format 4.
+fn install_format_4(
+    lock: &InstallLock,
+    dir: &std::path::Path,
+    key: &KeyPair,
+    version: &str,
+    options: &InstallOptions,
+) -> xpack_core::Result<xpack_install::Installed> {
+    let package = common::build_package_single_instance(dir, key, version);
+    let mut verified = open_and_verify(&package, lock, &TrustDecision::Explicit(key.public()))?;
+    Installer::new(lock).install(&mut verified, options)
+}
+
+#[test]
+fn a_placed_launcher_records_the_newest_format_it_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+
+    let options =
+        InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(
+        state.launcher_format_version,
+        Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION)
+    );
+}
+
+#[test]
+fn a_package_the_installed_launcher_cannot_read_is_refused_and_changes_nothing() {
+    // What an installer run over an older installation does: the launcher
+    // stays, and was placed before the record existed, so it reads format 3.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(fake_launcher(dir.path())),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+    let mut state = lock.load_state().unwrap().value;
+    state.launcher_format_version = None;
+    lock.save_state(&state).unwrap();
+    let before = std::fs::read(paths.state_file()).unwrap();
+
+    let err = install_format_4(&lock, dir.path(), &key, "1.1.0", &options).unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("format 4") && message.contains("format 3"), "{message}");
+    assert!(message.contains("Uninstall"), "says what to do: {message}");
+    assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "the state changed");
+    assert!(
+        !paths.version_dir(&Version::parse("1.1.0").unwrap()).exists(),
+        "the refused version was unpacked"
+    );
+}
+
+#[test]
+fn a_launcher_that_reads_the_format_lets_the_package_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(fake_launcher(dir.path())),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    install_format_4(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+}
+
+#[test]
+fn a_first_installation_gets_a_launcher_that_reads_its_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(fake_launcher(dir.path())),
+        ..Default::default()
+    };
+    install_format_4(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+}
+
 #[test]
 fn installing_without_a_launcher_leaves_the_root_without_one() {
     let dir = tempfile::tempdir().unwrap();

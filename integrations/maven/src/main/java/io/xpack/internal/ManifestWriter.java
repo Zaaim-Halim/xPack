@@ -48,6 +48,7 @@ public final class ManifestWriter {
     private HealthSpec health;
     private DesktopSpec desktop;
     private String command;
+    private boolean singleInstance;
 
     public ManifestWriter id(String value) {
         this.id = value;
@@ -127,6 +128,12 @@ public final class ManifestWriter {
 
     public ManifestWriter desktop(DesktopSpec value) {
         this.desktop = value;
+        return this;
+    }
+
+    /** Whether only one copy runs at a time; {@code null} is no. */
+    public ManifestWriter singleInstance(Boolean value) {
+        this.singleInstance = Boolean.TRUE.equals(value);
         return this;
     }
 
@@ -263,6 +270,8 @@ public final class ManifestWriter {
                 .putIfAny("health", healthObject)
                 .putIfAny("desktop", desktopObject)
                 .putIfAny("command", new Json.Obj().put("name", command))
+                .putIfAny("instance",
+                        new Json.Obj().put("single", singleInstance ? Boolean.TRUE : null))
                 .toString();
     }
 

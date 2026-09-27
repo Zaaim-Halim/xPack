@@ -323,6 +323,7 @@ impl<'lock> Installer<'lock> {
 
         // Before anything is written, so a refusal leaves no trace.
         Self::apply_choices(&state, paths, options)?;
+        Self::ensure_launcher_reads(&state, paths, &manifest)?;
 
         // The command the version being replaced put in place, so one this
         // package renames or drops is taken away rather than left behind.
@@ -764,6 +765,41 @@ impl<'lock> Installer<'lock> {
         Ok(removed)
     }
 
+    /// Refuses a package the launcher already in the installation cannot read.
+    ///
+    /// Nothing replaces a launcher that is already there, neither an update
+    /// nor a newer installer run over the installation. A version in a format
+    /// that launcher does not know would be installed and made active, and
+    /// then never start: the launcher refuses the manifest, and a shortcut
+    /// start has nowhere to say so. Refused here instead, before anything is
+    /// written, with what to do about it.
+    ///
+    /// An installation with no launcher yet gets one from this install, which
+    /// reads everything this build does.
+    fn ensure_launcher_reads(
+        state: &xpack_core::InstallState,
+        paths: &xpack_core::InstallPaths,
+        manifest: &xpack_core::Manifest,
+    ) -> Result<()> {
+        let names = state.binary_names();
+        let placed = paths.launcher_file_named(&names).exists()
+            || paths.gui_launcher_file_named(&names).exists();
+        let reads = state.launcher_reads();
+        let needs = manifest.format_version.0;
+        if !placed || needs <= reads {
+            return Ok(());
+        }
+        Err(Error::invalid(
+            "installation",
+            format!(
+                "{} {} is package format {needs}, and the launcher already installed reads \
+                 format {reads} at most. An installed launcher is never replaced, so this \
+                 version would install and then not start. Uninstall {} and install it again.",
+                manifest.application.name, manifest.application.version, manifest.application.name
+            ),
+        ))
+    }
+
     /// Places the launcher binary in the installation root.
     ///
     /// # Only when absent
@@ -778,12 +814,23 @@ impl<'lock> Installer<'lock> {
     ///
     /// Replacing a launcher is therefore a deliberate xPack upgrade and needs
     /// its own path, not a silent side effect of installing an application.
+    ///
+    /// A launcher placed now records the newest package format it reads, for
+    /// the format check to go by at every later install. One
+    /// already there is as old as it was, and its record is left alone.
     pub fn install_launcher(&self, source: &Path) -> Result<LauncherOutcome> {
-        Self::install_binary(
+        let outcome = Self::install_binary(
             source,
             &self.lock.paths().launcher_file_named(&self.binary_names()),
             "launcher",
-        )
+        )?;
+        if outcome == LauncherOutcome::Installed {
+            let mut state = self.load_state()?;
+            state.launcher_format_version =
+                Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION);
+            self.lock.save_state(&state)?;
+        }
+        Ok(outcome)
     }
 
     /// Creates or refreshes the desktop entry the manifest asked for.
@@ -1482,6 +1529,7 @@ mod tests {
             created_at: None,
             command: None,
             commands: Vec::new(),
+            instance: xpack_core::InstanceSpec::default(),
         }
     }
 

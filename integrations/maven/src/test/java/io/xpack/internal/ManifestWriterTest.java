@@ -99,6 +99,26 @@ class ManifestWriterTest {
         }
     }
 
+    /** Off, or never set, leaves it out: the file every earlier build wrote. */
+    @Test
+    void writes_no_instance_setting_unless_single_is_asked_for() {
+        for (Boolean off : new Boolean[] {null, false}) {
+            String json = minimal().singleInstance(off).toJson();
+            assertFalse(json.contains("\"instance\""), json);
+            assertEquals(minimal().toJson(), json);
+        }
+    }
+
+    @Test
+    void writes_a_single_instance_when_asked_for() {
+        Map<String, Object> manifest =
+                Json.parseObject(minimal().singleInstance(true).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> instance = (Map<String, Object>) manifest.get("instance");
+        assertEquals(Map.of("single", true), instance);
+    }
+
     @Test
     void omits_sections_that_were_never_configured() {
         String json = minimal().toJson();

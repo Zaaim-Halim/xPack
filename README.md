@@ -190,6 +190,7 @@ user's machine.
 | `update` | Where this platform's update index lives, and the channel to follow. `mandatory` stops older versions from starting. |
 | `health` | How long a new version has to prove it starts. With `requireStartupReport`, the application must write the file named in `XPACK_HEALTH_FILE`. |
 | `desktop` | A Start Menu entry, a `~/Applications` bundle or a `.desktop` file, and the icon: `.ico` or `.png` on Windows, `.icns` on macOS, `.png` or `.svg` on Linux. |
+| `instance` | `"single": true` keeps one copy running for each user. See [one running copy](#one-running-copy). |
 
 ### Command-line tools
 
@@ -243,6 +244,41 @@ owns is left out; the others are still added.
 format 2, which installations made with xPack 0.1.0 cannot install or update
 to; `commands` makes it format 3, which installations made with 0.2.0 or earlier
 cannot install or update to.
+
+### One running copy
+
+**To keep one copy of the application running for each user**:
+
+```json
+"instance": { "single": true }
+```
+
+A second start then starts nothing. It passes its arguments to the running
+copy, brings that copy to the front where the platform allows, and exits:
+
+- macOS brings it to the front itself when the application is opened again
+  from Finder or the Dock, and a start from the command opens the bundle to do
+  the same.
+- On Windows the launcher brings the application's window to the front.
+- Linux has no portable way to do it, so the application does it when it reads
+  the request.
+
+The running copy finds each request as a file in the directory named by
+`XPACK_INSTANCE_INBOX`: `<something>.json`, holding `{"arguments": [...]}`.
+Each file is complete when it appears. Read it, delete it, and treat it as the
+user asking for your window with those arguments, a file opened from the
+desktop, say. Requests left when the application closes are discarded at its
+next start. An application that ignores the directory still runs once; only
+the arguments are lost.
+
+The copy is held by the launcher, not the application, so a launch program
+that starts the real one and exits leaves no copy running as far as xPack can
+tell. A copy that crashes never keeps the next start out. The application's
+other `commands` are not limited.
+
+`instance` makes the package format 4. Installations made with xPack 0.5.0 or
+earlier cannot update to it, and an installer refuses to install it over one of
+them, because their launcher is kept and could not start it. Uninstall first.
 
 The platform defaults to the machine you build on; `xpack pack --platform
 windows-x64` builds for another.

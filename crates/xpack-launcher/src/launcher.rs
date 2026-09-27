@@ -92,6 +92,7 @@ pub struct Launcher {
     paths: InstallPaths,
     offer_restart: bool,
     windowed: bool,
+    holds_instance: bool,
 }
 
 impl Launcher {
@@ -101,7 +102,26 @@ impl Launcher {
             paths: InstallPaths::from_application_dir(dir),
             offer_restart: true,
             windowed: false,
+            holds_instance: false,
         }
+    }
+
+    /// A launcher that holds the instance lock, and so records the copy it
+    /// starts for a later start to hand over to.
+    #[must_use]
+    pub(crate) fn holding_instance(mut self) -> Self {
+        self.holds_instance = true;
+        self
+    }
+
+    /// The manifest of the version that is active now, read without the lock.
+    ///
+    /// For a start deciding whether to hand over to a running copy, which is
+    /// running this version: nothing is activated while it runs.
+    pub(crate) fn active_manifest(&self) -> Result<Manifest> {
+        let state =
+            xpack_core::store::load::<xpack_core::InstallState>(&self.paths.state_file())?.value;
+        self.read_manifest(state.active()?)
     }
 
     /// A launcher with no console of its own: the windowed build, which
@@ -256,7 +276,9 @@ impl Launcher {
                     self.paths.root().display().to_string(),
                 );
         request.without_console = self.windowed && !manifest.desktop.terminal;
+        let request = self.with_inbox(request, &manifest);
         let mut child = launch(&request)?;
+        self.record_instance(child.id());
 
         let watch = self.watch_for_updates(&manifest, child.id(), wait);
 
@@ -339,6 +361,26 @@ impl Launcher {
         }
 
         watch
+    }
+
+    /// Tells a single-instance application where later starts leave their
+    /// requests.
+    fn with_inbox(&self, request: LaunchRequest, manifest: &Manifest) -> LaunchRequest {
+        if !manifest.instance.single {
+            return request;
+        }
+        request.with_launcher_environment(
+            xpack_core::paths::INSTANCE_INBOX_ENV,
+            self.paths.instance_inbox_dir().display().to_string(),
+        )
+    }
+
+    /// Records the copy just started, when this launcher holds the instance
+    /// lock, for a later start to hand over to.
+    fn record_instance(&self, pid: u32) {
+        if self.holds_instance {
+            crate::instance::record(&self.paths, pid);
+        }
     }
 
     /// Writes the probation result and rolls back if it failed.

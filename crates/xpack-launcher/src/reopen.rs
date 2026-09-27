@@ -36,24 +36,38 @@ fn restarted_for(paths: &InstallPaths, value: Option<&OsStr>) -> bool {
     }
 }
 
-/// Opens the bundle this launcher was opened through, to start the
-/// application again. `true` when it did, and this launcher's part is over.
-///
-/// `false` leaves the restart to the caller, in place: not opened through a
-/// bundle, or `open` failed. An application that comes back under the wrong
-/// name is better than one that does not come back.
+/// The bundle this launcher was opened through, when it was one that starts
+/// this installation.
 #[cfg(target_os = "macos")]
-pub(crate) fn through_bundle(paths: &InstallPaths, arguments: &[String]) -> bool {
+pub(crate) fn opened_through(paths: &InstallPaths) -> Option<std::path::PathBuf> {
+    let told = std::env::var_os(xpack_install::integration::BUNDLE_ENV);
+    own_bundle(paths, told.as_deref())
+}
+
+/// Only a macOS launcher is opened through a bundle.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn opened_through(paths: &InstallPaths) -> Option<std::path::PathBuf> {
+    let _ = paths;
+    None
+}
+
+/// Opens `bundle` again, to start the application again. `true` when it did,
+/// and this launcher's part is over.
+///
+/// `false` leaves the restart to the caller, in place. An application that
+/// comes back under the wrong name is better than one that does not come back.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_again(
+    bundle: &std::path::Path,
+    paths: &InstallPaths,
+    arguments: &[String],
+) -> bool {
     use std::process::Stdio;
 
-    let told = std::env::var_os(xpack_install::integration::BUNDLE_ENV);
-    let (Some(bundle), Some(application)) =
-        (own_bundle(paths, told.as_deref()), paths.application_id())
-    else {
+    let Some(application) = paths.application_id() else {
         return false;
     };
-
-    let mut command = reopen_command(&bundle, application, arguments);
+    let mut command = reopen_command(bundle, application, arguments);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     match command.status() {
         Ok(status) if status.success() => {
@@ -71,10 +85,14 @@ pub(crate) fn through_bundle(paths: &InstallPaths, arguments: &[String]) -> bool
     }
 }
 
-/// Nowhere else does a restart need to go through anything but this process.
+/// Never reached: [`opened_through`] names no bundle here.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn through_bundle(paths: &InstallPaths, arguments: &[String]) -> bool {
-    let _ = (paths, arguments);
+pub(crate) fn open_again(
+    bundle: &std::path::Path,
+    paths: &InstallPaths,
+    arguments: &[String],
+) -> bool {
+    let _ = (bundle, paths, arguments);
     false
 }
 
@@ -85,7 +103,7 @@ pub(crate) fn through_bundle(paths: &InstallPaths, arguments: &[String]) -> bool
 /// other xPack applications' launchers, so what it names is checked rather
 /// than believed.
 #[cfg(target_os = "macos")]
-fn own_bundle(paths: &InstallPaths, told: Option<&OsStr>) -> Option<std::path::PathBuf> {
+pub(crate) fn own_bundle(paths: &InstallPaths, told: Option<&OsStr>) -> Option<std::path::PathBuf> {
     let bundle = std::fs::canonicalize(told?).ok()?;
     let launcher = xpack_install::integration::bundle_launcher(&bundle)?;
     let starts = std::fs::canonicalize(launcher.parent()?).ok()?;
@@ -190,7 +208,6 @@ mod tests {
                 None,
                 "a bundle that is not there"
             );
-            assert!(!through_bundle(&paths, &[]), "nothing to open, so restart in place");
         }
 
         #[test]

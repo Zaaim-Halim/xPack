@@ -50,6 +50,7 @@ fn build_installer(dir: &Path) -> PathBuf {
         created_at: None,
         command: Some(xpack_core::CommandSpec { name: "mytool".into() }),
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
     let package = dir.join("tool.xpkg");
     PackageBuilder::new(&source, manifest).build(&package, &key).unwrap();

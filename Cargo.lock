@@ -1718,6 +1718,8 @@ dependencies = [
 name = "xpack-launcher"
 version = "0.5.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "xpack-core",

@@ -352,3 +352,74 @@ fn waiting_for_the_lock_gives_up_at_the_timeout() {
     assert!(waited >= std::time::Duration::from_millis(300), "gave up after {waited:?}");
     assert!(waited < std::time::Duration::from_secs(5), "overran to {waited:?}");
 }
+
+// --- the instance lock ------------------------------------------------------
+
+/// Performs the child half of an instance probe: take the lock and keep it
+/// until killed.
+fn run_instance_holder_if_selected() -> bool {
+    if std::env::var(CHILD_ROLE).as_deref() != Ok("instance-holder") {
+        return false;
+    }
+    let root = std::env::var(CHILD_DIR).expect("child directory");
+    // Waited for, because the parent's probing holds it for moments at a time.
+    let lock = xpack_platform::InstanceLock::acquire_within(
+        &paths_in(Path::new(&root)),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(lock.is_some(), "the child never got the lock");
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    std::process::exit(0);
+}
+
+#[test]
+fn a_second_start_finds_the_instance_lock_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    let first = xpack_platform::InstanceLock::acquire(&paths).unwrap();
+    assert!(first.is_some(), "the lock should have been free");
+    assert!(xpack_platform::InstanceLock::acquire(&paths).unwrap().is_none());
+
+    drop(first);
+    assert!(xpack_platform::InstanceLock::acquire(&paths).unwrap().is_some(), "not released");
+}
+
+#[test]
+fn a_killed_instance_does_not_keep_the_next_start_out() {
+    // The case that matters: an application that crashed, or a launcher that
+    // was killed, must not lock the user out of their application.
+    if run_instance_holder_if_selected() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    let exe = std::env::current_exe().unwrap();
+    let mut holder = Command::new(exe)
+        .args([
+            "--exact",
+            "a_killed_instance_does_not_keep_the_next_start_out",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ROLE, "instance-holder")
+        .env(CHILD_DIR, dir.path())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while xpack_platform::InstanceLock::acquire(&paths).unwrap().is_some() {
+        assert!(std::time::Instant::now() < deadline, "the holder never took the lock");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    holder.kill().unwrap();
+    let _ = holder.wait();
+
+    let next =
+        xpack_platform::InstanceLock::acquire_within(&paths, std::time::Duration::from_secs(5))
+            .unwrap();
+    assert!(next.is_some(), "a killed holder kept the lock");
+}

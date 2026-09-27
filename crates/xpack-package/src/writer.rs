@@ -567,6 +567,7 @@ mod build_rule_tests {
             created_at: None,
             command: None,
             commands: Vec::new(),
+            instance: xpack_core::InstanceSpec::default(),
         };
         (dir, manifest)
     }

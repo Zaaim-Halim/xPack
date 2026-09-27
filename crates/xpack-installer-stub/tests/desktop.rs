@@ -50,6 +50,7 @@ fn build_installer(dir: &Path) -> PathBuf {
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
     let package = dir.join("desk.xpkg");
     PackageBuilder::new(&source, manifest).build(&package, &key).unwrap();

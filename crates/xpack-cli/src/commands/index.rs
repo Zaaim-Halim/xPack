@@ -537,6 +537,7 @@ mod tests {
             created_at: None,
             command: None,
             commands: Vec::new(),
+            instance: xpack_core::InstanceSpec::default(),
         };
         Described {
             file_name: "pkg.xpkg".into(),

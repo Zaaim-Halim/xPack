@@ -131,6 +131,21 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     @Parameter(property = "xpack.command")
     protected String command;
 
+    /**
+     * Only one copy of the application runs at a time, for each user.
+     *
+     * <p>A second start does not start another copy: it passes its arguments
+     * to the running one, brings that one to the front where the platform
+     * allows, and exits. The running copy finds the arguments as files in the
+     * directory named by {@code XPACK_INSTANCE_INBOX}. Off by default.
+     *
+     * <p>Packages that set it are format 4: installations made with xPack
+     * 0.5.0 or earlier cannot install or update to them, and an installer
+     * refuses to install one over such an installation.
+     */
+    @Parameter(property = "xpack.singleInstance")
+    protected Boolean singleInstance;
+
     // --------------------------------------------------------------- targets
 
     /** Platforms to build, as {@code <os>-<arch>}. Defaults to the host. */

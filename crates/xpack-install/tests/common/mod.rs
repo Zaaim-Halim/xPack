@@ -38,7 +38,7 @@ pub(crate) fn build_package_named(
     display_name: &str,
     desktop: &xpack_core::DesktopSpec,
 ) -> PathBuf {
-    build_package_full(dir, key, version, display_name, desktop, None, &[])
+    build_package_full(dir, key, version, display_name, desktop, None, &[], false)
 }
 
 /// Builds a package that names the command a terminal starts it by.
@@ -57,6 +57,7 @@ pub(crate) fn build_package_commanding(
         &xpack_core::DesktopSpec::default(),
         command,
         &[],
+        false,
     )
 }
 
@@ -78,9 +79,26 @@ pub(crate) fn build_package_with_commands(
         &xpack_core::DesktopSpec::default(),
         command,
         extras,
+        false,
     )
 }
 
+/// Builds a package that asks for a single instance, in the format that needs.
+#[allow(dead_code)]
+pub(crate) fn build_package_single_instance(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
+    build_package_full(
+        dir,
+        key,
+        version,
+        "Example",
+        &xpack_core::DesktopSpec::default(),
+        None,
+        &[],
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // A test fixture: every field a package test varies.
 fn build_package_full(
     dir: &Path,
     key: &KeyPair,
@@ -89,6 +107,7 @@ fn build_package_full(
     desktop: &xpack_core::DesktopSpec,
     command: Option<&str>,
     extras: &[&str],
+    single: bool,
 ) -> PathBuf {
     let payload = dir.join(format!("src-{version}"));
     fs::create_dir_all(payload.join("bin")).unwrap();
@@ -131,6 +150,7 @@ fn build_package_full(
                 executable: "bin/app".into(),
             })
             .collect(),
+        instance: xpack_core::InstanceSpec { single },
     };
     // The format a command needs; what `xpack pack` would declare.
     let manifest = Manifest { format_version: manifest.required_format_version(), ..manifest };

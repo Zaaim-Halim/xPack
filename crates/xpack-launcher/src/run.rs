@@ -31,7 +31,10 @@
 
 use std::process::ExitCode;
 
+use xpack_platform::InstanceLock;
+
 use crate::Launcher;
+use crate::instance::Start;
 
 /// Starts the application, and starts it once more if the user agreed to.
 ///
@@ -51,8 +54,15 @@ use crate::Launcher;
 fn launch_with_one_restart(
     launcher: &Launcher,
     arguments: &[String],
+    instance: Option<InstanceLock>,
 ) -> xpack_core::Result<crate::Outcome> {
-    let outcome = launcher.launch(arguments, true)?;
+    let outcome = launcher.launch(arguments, true);
+    // The copy has gone, however the launch ended: nothing should be handed
+    // over to its process id.
+    if instance.is_some() {
+        crate::instance::forget(launcher.paths());
+    }
+    let outcome = outcome?;
     if !outcome.restart_requested {
         return Ok(outcome);
     }
@@ -61,9 +71,18 @@ fn launch_with_one_restart(
 
     // Opened through its macOS bundle, the application is started again by
     // opening the bundle, so it keeps the bundle's name and icon; the new
-    // launch does the restarting and this one is done.
-    if crate::reopen::through_bundle(launcher.paths(), arguments) {
-        return Ok(outcome);
+    // launch does the restarting and this one is done. It takes the instance
+    // lock, so this one lets go first.
+    let mut instance = instance;
+    if let Some(bundle) = crate::reopen::opened_through(launcher.paths()) {
+        let held = instance.take().is_some();
+        if crate::reopen::open_again(&bundle, launcher.paths(), arguments) {
+            return Ok(outcome);
+        }
+        // Restarting in place after all: taken back if nobody else took it.
+        if held {
+            instance = InstanceLock::acquire(launcher.paths()).ok().flatten();
+        }
     }
 
     // The second launch offers no further restart. This process performs one,
@@ -73,7 +92,17 @@ fn launch_with_one_restart(
     // "at the next start", which by then is the truth.
     let again = Launcher::for_application_dir(launcher.paths().root()).without_restart_offers();
     let again = if launcher.is_windowed() { again.windowed() } else { again };
-    again.launch(arguments, true)
+    let again = if instance.is_some() { again.holding_instance() } else { again };
+    // The record names the copy that just closed until the next one is
+    // started and recorded.
+    if instance.is_some() {
+        crate::instance::forget(launcher.paths());
+    }
+    let outcome = again.launch(arguments, true);
+    if instance.is_some() {
+        crate::instance::forget(launcher.paths());
+    }
+    outcome
 }
 
 /// Runs a launcher binary from start to finish.
@@ -126,7 +155,8 @@ fn run_as(windowed: bool) -> ExitCode {
     // The launch another launcher opened the bundle for, to restart the
     // application. It offers no restart of its own, as a restart in place
     // would not: one per start.
-    let launcher = if crate::reopen::is_a_restart(launcher.paths()) {
+    let restarted = crate::reopen::is_a_restart(launcher.paths());
+    let launcher = if restarted {
         tracing::info!("started again after the user agreed to restart");
         launcher.without_restart_offers()
     } else {
@@ -158,12 +188,27 @@ fn run_as(windowed: bool) -> ExitCode {
         }
     }
 
+    // Before anything else a start does, so a start that hands over to a
+    // running copy starts nothing at all, not even an update check.
+    let instance = match crate::instance::begin(launcher.paths(), restarted) {
+        Start::First(lock) => Some(lock),
+        Start::Another => {
+            if let Some(manifest) = launcher.active_manifest().ok().filter(|m| m.instance.single) {
+                crate::instance::hand_over(launcher.paths(), &manifest, &arguments);
+                return ExitCode::SUCCESS;
+            }
+            None
+        }
+        Start::Unknown => None,
+    };
+    let launcher = if instance.is_some() { launcher.holding_instance() } else { launcher };
+
     // Started before the application, so a slow network never delays opening
     // it, and deliberately not waited on. Whatever it finds takes effect the
     // next time the application starts.
     crate::spawn_updater(launcher.paths());
 
-    match launch_with_one_restart(&launcher, &arguments) {
+    match launch_with_one_restart(&launcher, &arguments, instance) {
         Ok(outcome) => {
             if let Some(target) = &outcome.rolled_back_to {
                 // Logged as well as printed, because a windowed build has

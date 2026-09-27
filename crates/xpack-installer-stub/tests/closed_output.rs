@@ -55,6 +55,7 @@ fn build_package(dir: &Path, key: &KeyPair) -> PathBuf {
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
     let out = dir.join("app.xpkg");
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

@@ -41,7 +41,8 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | 1 | Everything else. |
 /// | 2 | `launch.keepWorkingDirectory`, [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values, and `command` |
 /// | 3 | `commands` |
-pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 3;
+/// | 4 | `instance` |
+pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 4;
 
 /// Stands for the installed version directory in launch arguments and
 /// environment values.
@@ -625,6 +626,30 @@ pub struct PayloadSpec {
     pub files: Vec<PayloadFile>,
 }
 
+/// How many copies of the application may run at once, for one user.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstanceSpec {
+    /// Only one copy runs at a time.
+    ///
+    /// A second start does not start another copy. It passes its arguments to
+    /// the running one, brings that one to the front where the platform lets
+    /// it, and exits. Off unless the packager turns it on: many applications
+    /// are meant to run twice, and a command-line tool almost always is.
+    #[serde(default)]
+    pub single: bool,
+}
+
+impl InstanceSpec {
+    /// Whether this asks for nothing, and so is left out of a manifest.
+    ///
+    /// Left out rather than written as `false`, so a package that does not use
+    /// it stays readable by releases that never heard of it.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// A complete, signed package manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -656,6 +681,11 @@ pub struct Manifest {
     /// Requires [`FormatVersion`] 3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<ExtraCommand>,
+    /// How many copies of the application may run at once.
+    ///
+    /// Requires [`FormatVersion`] 4 when it asks for anything.
+    #[serde(default, skip_serializing_if = "InstanceSpec::is_default")]
+    pub instance: InstanceSpec,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -716,7 +746,9 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if !self.commands.is_empty() {
+        if self.instance.single {
+            FormatVersion(4)
+        } else if !self.commands.is_empty() {
             FormatVersion(3)
         } else if self.launch.keep_working_directory
             || self.launch.uses_version_dir_placeholder()
@@ -1162,6 +1194,7 @@ mod tests {
             created_at: None,
             command: None,
             commands: Vec::new(),
+            instance: InstanceSpec::default(),
         }
     }
 
@@ -1601,6 +1634,39 @@ mod tests {
         let mut understated = manifest;
         understated.format_version = FormatVersion(2);
         assert!(understated.validate().unwrap_err().to_string().contains("need at least 3"));
+    }
+
+    #[test]
+    fn a_single_instance_survives_the_signed_bytes_and_needs_format_4() {
+        let mut manifest = sample();
+        manifest.instance.single = true;
+        assert_eq!(manifest.required_format_version(), FormatVersion(4));
+        manifest.format_version = manifest.required_format_version();
+        let bytes = manifest.to_signed_bytes().unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
+        assert!(json.contains("\"single\": true"), "{json}");
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+
+        // Declaring format 3 would tell a 0.5.0 launcher it can start this,
+        // and it would start a second copy without a word.
+        let mut understated = manifest;
+        understated.format_version = FormatVersion(3);
+        assert!(understated.validate().unwrap_err().to_string().contains("need at least 4"));
+    }
+
+    #[test]
+    fn a_package_that_asks_for_no_single_instance_does_not_mention_it() {
+        // Left out entirely, so releases that never heard of it still read it.
+        let json = String::from_utf8(sample().to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("instance"), "{json}");
+    }
+
+    #[test]
+    fn an_unknown_instance_setting_is_refused() {
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value["formatVersion"] = serde_json::json!(4);
+        value["instance"] = serde_json::json!({ "single": true, "perMachine": true });
+        assert!(Manifest::from_slice(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

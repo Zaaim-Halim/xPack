@@ -155,6 +155,35 @@ impl InstallPaths {
         self.state_dir().join("download.lock")
     }
 
+    /// The lock held for as long as the application runs, by the launcher
+    /// that started it.
+    ///
+    /// A start that finds it held knows a copy is running. The operating
+    /// system releases it when that launcher ends, however it ends, so a crash
+    /// never leaves the user unable to start the application again.
+    ///
+    /// Per user: an installation is per user today, so its own state directory
+    /// is.
+    pub fn instance_lock_file(&self) -> PathBuf {
+        self.state_dir().join("instance.lock")
+    }
+
+    /// What the launcher holding [`Self::instance_lock_file`] records about
+    /// the copy it started, for a second start to hand over to.
+    ///
+    /// A separate file, because the lock file itself is never written: another
+    /// process may hold it.
+    pub fn instance_record_file(&self) -> PathBuf {
+        self.state_dir().join("instance.json")
+    }
+
+    /// Where a second start leaves its arguments for the running copy.
+    ///
+    /// Given to the application in [`INSTANCE_INBOX_ENV`].
+    pub fn instance_inbox_dir(&self) -> PathBuf {
+        self.state_dir().join("inbox")
+    }
+
     /// Directory for component logs.
     pub fn logs_dir(&self) -> PathBuf {
         self.state_dir().join("logs")
@@ -508,6 +537,21 @@ pub const APPLICATION_DIR_ENV: &str = "XPACK_APPLICATION_DIR";
 /// on every platform — where a named pipe on Windows would need Win32 calls
 /// this workspace does not permit.
 pub const HEALTH_FILE_ENV: &str = "XPACK_HEALTH_FILE";
+
+/// Where a single-instance application finds what later starts asked of it.
+///
+/// Set only for an application whose package asks for a single instance. A
+/// second start writes one file per request into this directory, named
+/// `<something>.json` and holding `{"arguments": [...]}`, and exits. It is
+/// written under another name and renamed, so a `.json` file is always
+/// complete. The application reads and deletes each one, and treats it as the
+/// user asking for its window, with those arguments: a file opened from the
+/// desktop, say.
+///
+/// A directory of files rather than a socket, for the reason the startup
+/// report is a file: every language can do it with no library, on every
+/// platform.
+pub const INSTANCE_INBOX_ENV: &str = "XPACK_INSTANCE_INBOX";
 
 /// Tells a launcher which of an application's commands it was started as.
 ///

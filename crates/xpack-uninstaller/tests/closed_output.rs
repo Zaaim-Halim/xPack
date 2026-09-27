@@ -55,6 +55,7 @@ fn install(root: &Path) -> InstallPaths {
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
     let key = KeyPair::generate().unwrap();
     let package = root.join("app.xpkg");

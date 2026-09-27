@@ -71,6 +71,7 @@ fn build_package_with(
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
 
     let out = dir.join("app.xpkg");

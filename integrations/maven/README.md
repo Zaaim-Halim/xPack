@@ -273,6 +273,21 @@ program's `mytool`, and is removed on uninstall.
 Each of these makes the package format 2, which installations made with xPack
 0.1.0 cannot install or update to. Leave them off for a windowed application.
 
+## One running copy
+
+To keep one copy of the application running for each user:
+
+```xml
+<singleInstance>true</singleInstance>   <!-- or -Dxpack.singleInstance=true -->
+```
+
+A second start passes its arguments to the running copy and exits. The running
+copy finds them as `.json` files, `{"arguments": [...]}`, in the directory
+named by `XPACK_INSTANCE_INBOX`, which a `WatchService` can follow. See
+[One running copy](../../README.md#one-running-copy) for what each platform
+does and what it cannot. It makes the package format 4, which installations
+made with xPack 0.5.0 or earlier cannot install or update to.
+
 ## Quickstart
 
 Needs a JDK with `jlink`, the `xpack` binary on `PATH` (or `-Dxpack.home=`),

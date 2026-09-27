@@ -203,6 +203,10 @@ impl VersionRecord {
     }
 }
 
+/// The newest package format a launcher placed before the record existed can
+/// read: what xPack 0.3.0 to 0.5.0 shipped.
+pub const LAUNCHER_FORMAT_BEFORE_RECORD: u32 = 3;
+
 /// The complete persisted state of one installation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,6 +294,16 @@ pub struct InstallState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced_update: Option<Version>,
 
+    /// The newest package format the installed launcher can read.
+    ///
+    /// Recorded when a launcher is placed, because nothing replaces a launcher
+    /// once it is there: a version in a newer format installed beside an older
+    /// launcher would never start, with nothing on screen to say why. An
+    /// install is refused rather than leave an installation like that; see
+    /// [`Self::launcher_reads`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher_format_version: Option<u32>,
+
     /// Stable random identifier deciding this installation's staged-rollout
     /// cohort.
     ///
@@ -333,8 +347,19 @@ impl InstallState {
             update_check_delay: None,
             binary_base_name: None,
             announced_update: None,
+            launcher_format_version: None,
             rollout_id: None,
         }
+    }
+
+    /// The newest package format this installation's launcher can read.
+    ///
+    /// Without a record the launcher was placed by xPack 0.5.0 or earlier,
+    /// which read at most format 3. Those from 0.1 and 0.2 read less, and
+    /// nothing on disk says which one an installation has, so 3 is the answer
+    /// that refuses nothing any of them was already given.
+    pub fn launcher_reads(&self) -> u32 {
+        self.launcher_format_version.unwrap_or(LAUNCHER_FORMAT_BEFORE_RECORD)
     }
 
     /// The names this installation's executables carry.

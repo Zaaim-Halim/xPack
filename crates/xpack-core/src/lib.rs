@@ -22,8 +22,8 @@ pub mod version;
 pub use digest::{SHA256_LEN, Sha256Digest};
 pub use error::{Error, Result};
 pub use manifest::{
-    Application, CommandSpec, DesktopSpec, ExtraCommand, FormatVersion, HealthSpec, LaunchSpec,
-    MANIFEST_ENTRY, Manifest, PayloadFile, PayloadSpec, PromptSpec, SIGNATURE_ENTRY,
+    Application, CommandSpec, DesktopSpec, ExtraCommand, FormatVersion, HealthSpec, InstanceSpec,
+    LaunchSpec, MANIFEST_ENTRY, Manifest, PayloadFile, PayloadSpec, PromptSpec, SIGNATURE_ENTRY,
     UpdateSeverity, UpdateSpec, VERSION_DIR_PLACEHOLDER,
 };
 pub use naming::{BinaryNames, safe_file_name};

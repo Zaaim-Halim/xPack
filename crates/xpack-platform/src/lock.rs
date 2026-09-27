@@ -287,3 +287,73 @@ impl Drop for DownloadLease {
         let _ = self.file.unlock();
     }
 }
+
+/// Held for as long as the application runs, by the launcher that started it.
+///
+/// A launcher that cannot take it knows a copy of the application is already
+/// running for this user, and one whose package asks for a single instance
+/// hands over to that copy instead of starting another. The operating system
+/// releases it when the holder ends, however it ends, so a crash never leaves
+/// the user unable to start the application again.
+///
+/// Held by the launcher, not the application, because the launcher is the
+/// process xPack controls. A launcher that is killed while its application
+/// keeps running, or an application that detaches from the program the
+/// launcher started, leaves the lock free while a copy runs.
+#[derive(Debug)]
+pub struct InstanceLock {
+    /// Holding this handle holds the lock; dropping it releases.
+    file: File,
+}
+
+impl InstanceLock {
+    /// Takes the lock, or returns `None` when a running copy holds it.
+    pub fn acquire(paths: &InstallPaths) -> Result<Option<Self>> {
+        let file = Self::open(paths)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(Error::io(paths.instance_lock_file(), e)),
+        }
+    }
+
+    /// Takes the lock, waiting up to `timeout` for a holder that is ending.
+    ///
+    /// For the launch a restart opened: the launcher that asked for it lets go
+    /// just before, and may not quite have gone yet.
+    pub fn acquire_within(
+        paths: &InstallPaths,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Self>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(lock) = Self::acquire(paths)? {
+                return Ok(Some(lock));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Opens the lock file without truncating it, for the reasons the
+    /// installation lock documents.
+    fn open(paths: &InstallPaths) -> Result<File> {
+        let path = paths.instance_lock_file();
+        xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(&path)?)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| Error::io(&path, e))
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}

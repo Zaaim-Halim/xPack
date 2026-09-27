@@ -61,6 +61,7 @@
 //! executable is the installation root. Nothing is embedded at build time,
 //! which means one prebuilt launcher binary works for every application.
 
+mod instance;
 pub mod launcher;
 mod reopen;
 pub mod run;

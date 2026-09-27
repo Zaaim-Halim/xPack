@@ -57,6 +57,7 @@ fn install(dir: &Path, url: &str) -> InstallPaths {
         created_at: None,
         command: None,
         commands: Vec::new(),
+        instance: xpack_core::InstanceSpec::default(),
     };
     let key = KeyPair::generate().unwrap();
     let package = dir.join("demo.xpkg");

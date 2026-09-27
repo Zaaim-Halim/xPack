@@ -4,8 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use xpack_core::manifest::{
-    Application, CommandSpec, DesktopSpec, ExtraCommand, FormatVersion, HealthSpec, LaunchSpec,
-    PayloadSpec, UpdateSpec,
+    Application, CommandSpec, DesktopSpec, ExtraCommand, FormatVersion, HealthSpec, InstanceSpec,
+    LaunchSpec, PayloadSpec, UpdateSpec,
 };
 use xpack_core::{Manifest, Platform, Result, atomic};
 
@@ -40,6 +40,9 @@ pub(crate) struct ProjectConfig {
     /// Further commands, each starting another program the package ships.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) commands: Vec<ExtraCommand>,
+    /// How many copies of the application may run at once.
+    #[serde(default, skip_serializing_if = "InstanceSpec::is_default")]
+    pub(crate) instance: InstanceSpec,
 }
 
 impl ProjectConfig {
@@ -69,6 +72,7 @@ impl ProjectConfig {
             created_at: None,
             command: self.command.clone(),
             commands: self.commands.clone(),
+            instance: self.instance.clone(),
         };
         manifest.format_version = manifest.required_format_version();
         manifest
