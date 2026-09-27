@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "editpe",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "directories",
  "hex",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-install"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "directories",
  "serde",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-installer"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-installer-stub"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "tempfile",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-installer-ui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "native-windows-gui",
  "objc2",
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-launcher"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1894,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-log"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-notify"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "native-windows-gui",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-package"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-platform"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "reflink-copy",
  "rustix",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-security"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aead-stream",
  "argon2",
@@ -1962,7 +1962,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-uninstaller"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "tempfile",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-update"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "xpack-updater"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "serde_json",
