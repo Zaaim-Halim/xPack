@@ -109,8 +109,13 @@ impl Session {
     }
 
     /// A checkbox, or anything else that only changes the model.
+    ///
+    /// Who the installation is for changes which directory is looked at, so
+    /// the new one is inspected before the page is drawn again: the location
+    /// shown is never left empty waiting for the next button.
     pub(crate) fn change(&mut self, change: impl FnOnce(&mut Wizard)) -> Update {
         change(&mut self.wizard);
+        self.inspect_if_needed();
         Update::Page
     }
 
@@ -194,7 +199,7 @@ mod tests {
 
     use super::*;
     use crate::engine::{Choices, Inspection, Installed};
-    use crate::model::{Facts, Flavour, Page, UiPlan, WizardSpec};
+    use crate::model::{AllUsers, Facts, Flavour, Page, UiPlan, WizardSpec};
 
     /// An engine whose install succeeds and whose launch fails, recording both.
     struct Engine2 {
@@ -347,6 +352,80 @@ mod tests {
         let (mut session, _) = session(Existing::Nothing, true);
         assert_eq!(session.change(|wizard| wizard.set_launch(false)), Update::Page);
         assert!(!session.wizard().launch());
+    }
+
+    /// An engine that offers an installation for everyone, in `/everyone/App`.
+    struct Shared;
+
+    impl Engine for Shared {
+        fn inspect(&self, root: &Path) -> Inspection {
+            Inspection { target: root.join("app"), verdict: Ok(Existing::Nothing) }
+        }
+
+        fn inspect_everyone(&self) -> Option<Inspection> {
+            Some(Inspection {
+                target: PathBuf::from("/everyone/App"),
+                verdict: Ok(Existing::Nothing),
+            })
+        }
+
+        fn install(&self, _: &Choices, _: &dyn ProgressReporter) -> Result<Installed, Error> {
+            Err(Error::invalid("install", "not installed in this test"))
+        }
+
+        fn launch(&self, _: &Path) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    fn offering_everyone() -> Session {
+        let wizard = Wizard::new(WizardSpec {
+            flavour: Flavour::Windows,
+            facts: Facts {
+                name: "App".into(),
+                version: Version::parse("2.0.0").unwrap(),
+                publisher: None,
+                description: None,
+            },
+            plan: UiPlan { all_users: AllUsers::Offer, ..UiPlan::default() },
+            licence: None,
+            shortcut_requested: false,
+            command: None,
+            root: PathBuf::from("/r"),
+            root_fixed: false,
+            log: None,
+        });
+        let mut session = Session::new(wizard, Arc::new(Shared), Arc::new(|| {}));
+        while session.wizard().page() != Page::Location {
+            session.primary(&host(false));
+        }
+        session
+    }
+
+    #[test]
+    fn ticking_everyone_shows_where_it_goes_at_once() {
+        let mut session = offering_everyone();
+        assert_eq!(session.change(|wizard| wizard.set_everyone(true)), Update::Page);
+        assert!(session.wizard().everyone());
+        assert_eq!(session.wizard().target(), Some(Path::new("/everyone/App")));
+    }
+
+    #[test]
+    fn unticking_everyone_shows_the_persons_own_location_again_at_once() {
+        let mut session = offering_everyone();
+        session.change(|wizard| wizard.set_everyone(true));
+        session.change(|wizard| wizard.set_everyone(false));
+        assert_eq!(session.wizard().target(), Some(Path::new("/r/app")));
+        assert_eq!(session.wizard().root(), Path::new("/r"));
+    }
+
+    #[test]
+    fn the_location_for_everyone_is_never_taken_as_the_persons_root() {
+        let mut session = offering_everyone();
+        session.change(|wizard| wizard.set_everyone(true));
+        // What a front-end does on Back and Next: reads the field back.
+        assert_eq!(session.set_root(PathBuf::from("/everyone/App")), Update::Nothing);
+        assert_eq!(session.wizard().root(), Path::new("/r"));
     }
 
     #[test]
