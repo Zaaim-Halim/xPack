@@ -280,6 +280,31 @@ other `commands` are not limited.
 earlier cannot update to it, and an installer refuses to install it over one of
 them, because their launcher is kept and could not start it. Uninstall first.
 
+**An application that also answers on the command line** lists the arguments
+that are commands:
+
+```json
+"instance": { "single": true, "alongside": ["--version", "--status", "export"] }
+```
+
+Handed over, `myapp --status` would print nothing and report success, because
+the copy that would have answered it was never started. A start given any of
+these arguments runs beside the running copy instead, with its own output and
+exit code. Each entry is one argument as the user types it, and also matches
+it with a value: `--export` matches `--export=out.csv`, but not
+`--export-all`.
+
+Such a start is not the running copy: a later start is never handed over to
+it, and it is not told where requests arrive. It takes no part in updates: it
+runs the active version, never activates a staged one, and checks for none.
+When a mandatory release is waiting, it refuses until the application has been
+started on it. It may run while the window is open, so both may use the same
+files at once; the application has to allow for that.
+
+`alongside` makes the package format 5, with the same rule: installations made
+with xPack 0.6.x or earlier cannot update to it until they are uninstalled and
+installed again.
+
 The platform defaults to the machine you build on; `xpack pack --platform
 windows-x64` builds for another.
 

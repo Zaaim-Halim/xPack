@@ -148,6 +148,25 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
     protected Boolean singleInstance;
 
     /**
+     * Arguments that make a start a command rather than a request for the
+     * window, with {@code <singleInstance>}: {@code --version},
+     * {@code --status}, {@code export}.
+     *
+     * <p>A start given any of them runs beside the running copy, with its own
+     * output and exit code, instead of being handed over to it. Handed over, a
+     * command prints nothing and reports success, because the copy that would
+     * have answered it was never started. Each entry is one argument as the
+     * user types it; it also matches that argument with a value
+     * ({@code --export} matches {@code --export=out.csv}).
+     *
+     * <p>Packages that set it are format 5: installations made with xPack
+     * 0.6.x or earlier cannot install or update to them, and an installer
+     * refuses to install one over such an installation.
+     */
+    @Parameter(property = "xpack.singleInstanceAlongside")
+    protected List<String> singleInstanceAlongside = new ArrayList<>();
+
+    /**
      * Locking the application behind a password: {@code <installer>} makes
      * the installer ask for it; {@code <packages>} also seals every package,
      * update and delta, and needs {@code <installer>}. Both off by default.

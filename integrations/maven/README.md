@@ -309,6 +309,21 @@ named by `XPACK_INSTANCE_INBOX`, which a `WatchService` can follow. See
 does and what it cannot. It makes the package format 4, which installations
 made with xPack 0.5.0 or earlier cannot install or update to.
 
+An application that also answers on the command line lists the arguments that
+are commands, so they run beside the open window with their own output and
+exit code instead of being handed over (and printing nothing):
+
+```xml
+<singleInstanceAlongside>
+  <argument>--version</argument>
+  <argument>--status</argument>
+</singleInstanceAlongside>
+```
+
+Each entry is one argument as typed, and also matches it with a value
+(`--export` matches `--export=out.csv`). It makes the package format 5, which
+installations made with xPack 0.6.x or earlier cannot install or update to.
+
 ## Quickstart
 
 Needs a JDK with `jlink`, the `xpack` binary on `PATH` (or `-Dxpack.home=`),

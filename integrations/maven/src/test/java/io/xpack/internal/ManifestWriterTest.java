@@ -120,6 +120,40 @@ class ManifestWriterTest {
     }
 
     @Test
+    void writes_the_commands_that_run_beside_the_running_copy() {
+        Map<String, Object> manifest = Json.parseObject(minimal()
+                .singleInstance(true)
+                .alongside(List.of("--status", "export"))
+                .toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> instance = (Map<String, Object>) manifest.get("instance");
+        assertEquals(Map.of("single", true, "alongside", List.of("--status", "export")), instance);
+    }
+
+    /** None leaves the setting out: the format-4 file earlier builds wrote. */
+    @Test
+    void writes_no_commands_beside_the_running_copy_unless_some_are_listed() {
+        String single = minimal().singleInstance(true).toJson();
+        for (List<String> none : java.util.Arrays.asList(null, List.<String>of())) {
+            String json = minimal().singleInstance(true).alongside(none).toJson();
+            assertFalse(json.contains("alongside"), json);
+            assertEquals(single, json);
+        }
+    }
+
+    /** Left for the packager to refuse, with its own message, not dropped. */
+    @Test
+    void writes_commands_beside_the_running_copy_even_without_a_single_instance() {
+        Map<String, Object> manifest =
+                Json.parseObject(minimal().alongside(List.of("--status")).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> instance = (Map<String, Object>) manifest.get("instance");
+        assertEquals(Map.of("alongside", List.of("--status")), instance);
+    }
+
+    @Test
     void writes_the_locks_asked_for_and_never_a_password() {
         io.xpack.config.ProtectionSpec protection = new io.xpack.config.ProtectionSpec();
         protection.setInstaller(true);

@@ -50,6 +50,7 @@ public final class ManifestWriter {
     private DesktopSpec desktop;
     private String command;
     private boolean singleInstance;
+    private List<String> alongside = new ArrayList<>();
     private ProtectionSpec protection;
 
     public ManifestWriter id(String value) {
@@ -136,6 +137,18 @@ public final class ManifestWriter {
     /** Whether only one copy runs at a time; {@code null} is no. */
     public ManifestWriter singleInstance(Boolean value) {
         this.singleInstance = Boolean.TRUE.equals(value);
+        return this;
+    }
+
+    /**
+     * Arguments that make a start a command running beside the single running
+     * copy; {@code null} or empty is none.
+     *
+     * <p>Written as given, even without {@link #singleInstance}: the packager
+     * refuses a list that cannot mean anything, and says why.
+     */
+    public ManifestWriter alongside(List<String> value) {
+        this.alongside = value == null ? new ArrayList<>() : value;
         return this;
     }
 
@@ -279,7 +292,9 @@ public final class ManifestWriter {
                 .putIfAny("desktop", desktopObject)
                 .putIfAny("command", new Json.Obj().put("name", command))
                 .putIfAny("instance",
-                        new Json.Obj().put("single", singleInstance ? Boolean.TRUE : null))
+                        new Json.Obj()
+                                .put("single", singleInstance ? Boolean.TRUE : null)
+                                .putIfAny("alongside", alongside))
                 .putIfAny("protection", protectionObject())
                 .toString();
     }
