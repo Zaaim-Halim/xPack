@@ -261,6 +261,32 @@ impl InstallPaths {
         self.per_user_dir().join("instance.lock")
     }
 
+    /// The lock every launcher holds, shared, for as long as it runs.
+    ///
+    /// Unlike [`Self::instance_lock_file`], which only the first copy of a
+    /// running application holds, every launcher process takes this one in
+    /// shared mode: a second copy, a command running beside the first, a
+    /// restart. An installer that cannot take it exclusively knows something
+    /// of the installation is running and does not replace its programs. The
+    /// operating system releases a shared lock when its holder ends, however
+    /// it ends, so a crash never makes an installation look busy.
+    ///
+    /// Per user, as the instance lock is: in an installation for one user that
+    /// is its state directory, where the installer looks.
+    pub fn presence_lock_file(&self) -> PathBuf {
+        self.per_user_dir().join("running.lock")
+    }
+
+    /// The record of a replacement of the runtime programs in progress.
+    ///
+    /// Written before the first program moves and removed after the last, so
+    /// whoever finds it knows a replacement was interrupted, and which files
+    /// it concerned. In the installation's own state directory, never a
+    /// user's: only whoever may replace the programs may write it.
+    pub fn runtime_replacement_journal_file(&self) -> PathBuf {
+        self.state_dir().join("runtime-replace.json")
+    }
+
     /// What the launcher holding [`Self::instance_lock_file`] records about
     /// the copy it started, for a second start to hand over to.
     ///
@@ -935,6 +961,7 @@ mod tests {
             mine.instance_lock_file(),
             mine.instance_record_file(),
             mine.instance_inbox_dir(),
+            mine.presence_lock_file(),
         ] {
             assert!(!path.starts_with(mine.root()), "{} is in the installation", path.display());
         }
@@ -942,8 +969,16 @@ mod tests {
         assert_eq!(mine.state_file(), shared.state_file());
         assert_eq!(mine.lock_file(), shared.lock_file());
         assert_eq!(mine.version_dir(&version), shared.version_dir(&version));
-        // And a per-user installation keeps everything in its own state.
+        // Only whoever may replace the programs may write the journal.
+        assert_eq!(
+            mine.runtime_replacement_journal_file(),
+            shared.runtime_replacement_journal_file()
+        );
+        assert!(mine.runtime_replacement_journal_file().starts_with(mine.state_dir()));
+        // And a per-user installation keeps everything in its own state,
+        // the presence lock included, where an installer looks for it.
         assert_eq!(shared.per_user_dir(), shared.state_dir());
+        assert!(shared.presence_lock_file().starts_with(shared.state_dir()));
     }
 
     #[test]

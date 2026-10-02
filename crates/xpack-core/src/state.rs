@@ -27,6 +27,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::runtime::RuntimeChange;
 use crate::store::{self, Loaded};
 use crate::version::Version;
 
@@ -329,6 +330,18 @@ pub struct InstallState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_format_version: Option<u32>,
 
+    /// The xPack release the installation's runtime programs came from: the
+    /// launcher, the updater, the uninstaller and the others placed beside
+    /// them.
+    ///
+    /// Recorded whenever those programs are placed or replaced, so a later
+    /// installer can tell whether its own are newer, and never put back older
+    /// ones over newer: an older launcher may not read the formats the
+    /// installation already holds. Absent on installations made before it
+    /// was recorded; see [`Self::runtime_change`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<Version>,
+
     /// Who this installation is for. Absent is one user, which is what every
     /// installation made before this was recorded is.
     #[serde(default, skip_serializing_if = "InstallScope::is_user")]
@@ -378,6 +391,7 @@ impl InstallState {
             binary_base_name: None,
             announced_update: None,
             launcher_format_version: None,
+            runtime_version: None,
             scope: InstallScope::User,
             rollout_id: None,
         }
@@ -391,6 +405,20 @@ impl InstallState {
     /// that refuses nothing any of them was already given.
     pub fn launcher_reads(&self) -> u32 {
         self.launcher_format_version.unwrap_or(LAUNCHER_FORMAT_BEFORE_RECORD)
+    }
+
+    /// What placing the runtime programs of xPack release `incoming` would be
+    /// for this installation.
+    ///
+    /// An installation with no record has programs from a release older than
+    /// any that records one, so every recording release is an upgrade for it.
+    pub fn runtime_change(&self, incoming: &Version) -> RuntimeChange {
+        match &self.runtime_version {
+            None => RuntimeChange::Upgrade,
+            Some(installed) if incoming > installed => RuntimeChange::Upgrade,
+            Some(installed) if incoming == installed => RuntimeChange::Same,
+            Some(_) => RuntimeChange::Downgrade,
+        }
     }
 
     /// The names this installation's executables carry.
@@ -1042,5 +1070,49 @@ mod update_check_tests {
         let s: InstallState = serde_json::from_slice(json).unwrap();
         assert_eq!(s.last_update_check, None);
         assert!(s.update_check_is_due(1_000_000, 4 * HOUR));
+    }
+}
+
+#[cfg(test)]
+mod runtime_version_tests {
+    use super::*;
+
+    fn v(text: &str) -> Version {
+        Version::parse(text).unwrap()
+    }
+
+    #[test]
+    fn an_installation_with_no_record_takes_any_recording_release() {
+        // Made before the record existed, so older than every release that
+        // writes one.
+        let json = br#"{"stateFormatVersion":1,"applicationId":"com.example.app"}"#;
+        let state: InstallState = serde_json::from_slice(json).unwrap();
+        assert_eq!(state.runtime_version, None);
+        assert_eq!(state.runtime_change(&v("0.7.0")), RuntimeChange::Upgrade);
+    }
+
+    #[test]
+    fn newer_programs_replace_older_ones_and_never_the_other_way() {
+        let mut state = InstallState::new("com.example.app");
+        state.runtime_version = Some(v("0.7.0"));
+
+        assert_eq!(state.runtime_change(&v("0.7.1")), RuntimeChange::Upgrade);
+        assert_eq!(state.runtime_change(&v("0.7.0")), RuntimeChange::Same);
+        assert_eq!(state.runtime_change(&v("0.6.1")), RuntimeChange::Downgrade);
+        // A pre-release sorts before its release, as SemVer says: a release
+        // candidate never replaces the release it leads to.
+        assert_eq!(state.runtime_change(&v("0.7.0-rc.1")), RuntimeChange::Downgrade);
+    }
+
+    #[test]
+    fn the_record_survives_a_round_trip_and_is_absent_until_set() {
+        let mut state = InstallState::new("com.example.app");
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("runtimeVersion"), "an older build's document changed: {json}");
+
+        state.runtime_version = Some(v("0.7.0"));
+        let read: InstallState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(read.runtime_version, Some(v("0.7.0")));
     }
 }

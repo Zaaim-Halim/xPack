@@ -15,6 +15,7 @@ pub mod paths;
 pub mod platform;
 pub mod policy;
 pub mod progress;
+pub mod runtime;
 pub mod state;
 pub mod store;
 pub mod version;
@@ -34,6 +35,10 @@ pub use paths::{
 pub use platform::{Arch, Os, Platform};
 pub use policy::{AutomaticChecks, NO_UPDATE_ENV, UpdatePolicy, automatic_checks};
 pub use progress::{JsonProgress, NoProgress, ProgressEvent, ProgressReporter, STREAM_SCHEMA};
+pub use runtime::{
+    REPLACEMENT_JOURNAL_FORMAT, ReplacementEntry, ReplacementJournal, RuntimeChange, XPACK_RELEASE,
+    xpack_release,
+};
 pub use state::{InstallScope, InstallState, UpdatePhase, VersionRecord, VersionStatus};
 pub use store::Loaded;
 pub use version::Version;
