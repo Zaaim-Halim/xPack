@@ -150,7 +150,7 @@ fn build_package_full(
                 executable: "bin/app".into(),
             })
             .collect(),
-        instance: xpack_core::InstanceSpec { single },
+        instance: xpack_core::InstanceSpec { single, alongside: Vec::new() },
     };
     // The format a command needs; what `xpack pack` would declare.
     let manifest = Manifest { format_version: manifest.required_format_version(), ..manifest };

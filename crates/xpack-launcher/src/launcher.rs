@@ -480,10 +480,6 @@ impl Launcher {
             .ok_or_else(|| Error::invalid("installation", "root has no application id"))
     }
 
-    /// Reads the manifest recorded when this version was installed.
-    ///
-    /// Using the recorded manifest rather than re-reading a package means the
-    /// launch matches exactly what was verified at install time.
     /// Starts one of the application's extra commands, when `name` is one.
     ///
     /// The active version's program for that command, with the application's
@@ -520,6 +516,67 @@ impl Launcher {
         Ok(Some(status.code()))
     }
 
+    /// Starts the application beside its running copy, when the arguments
+    /// make this start one of the commands its package lists for that
+    /// (`--version`, `export`).
+    ///
+    /// The active version's program with its launch settings and these
+    /// arguments, waited on, its exit status returned. `None` when the
+    /// arguments are not such a command: the caller then starts the
+    /// application as usual, or hands over to the running copy.
+    ///
+    /// Nothing else of an ordinary start applies, whether or not a copy is
+    /// running:
+    ///
+    /// - The instance lock is not taken, so the command is never the copy a
+    ///   later start hands over to, and never makes one wait.
+    /// - A staged version is not activated and no probation is watched. The
+    ///   running copy runs the active version, which is what a start handing
+    ///   over to it reads; and a command's exit code says whether the command
+    ///   succeeded, not whether a new version starts.
+    /// - No update check: a script asking `--status` every minute would
+    ///   otherwise ask the update server every minute.
+    /// - The command is not told where requests arrive. They are for the
+    ///   running copy, and a command reading them would take them from it.
+    pub fn run_alongside(&self, arguments: &[String]) -> Result<Option<Option<i32>>> {
+        if arguments.is_empty() {
+            return Ok(None);
+        }
+        // Read without the lock, as an extra command's is. An installation
+        // that cannot be read here is left to the ordinary start, which
+        // recovers what it can and reports what it cannot, as it did before
+        // any command could run beside the application.
+        let Ok(stored) =
+            xpack_core::store::load::<xpack_core::InstallState>(&self.paths.state_file())
+        else {
+            return Ok(None);
+        };
+        let state = stored.value;
+        let Ok(version) = state.active().cloned() else {
+            return Ok(None);
+        };
+        let Ok(manifest) = self.read_manifest(&version) else {
+            return Ok(None);
+        };
+        if !manifest.instance.runs_alongside(arguments) {
+            return Ok(None);
+        }
+        ensure_command_may_run(&state, &version, &manifest)?;
+        let mut request = LaunchRequest::new(self.paths.version_dir(&version), manifest.launch)
+            .with_user_arguments(arguments.to_vec())
+            .with_launcher_environment(
+                APPLICATION_DIR_ENV,
+                self.paths.root().display().to_string(),
+            );
+        request.without_console = self.windowed && !manifest.desktop.terminal;
+        let status = launch(&request)?.wait().map_err(|e| Error::Launch(e.to_string()))?;
+        Ok(Some(status.code()))
+    }
+
+    /// Reads the manifest recorded when this version was installed.
+    ///
+    /// Using the recorded manifest rather than re-reading a package means the
+    /// launch matches exactly what was verified at install time.
     fn read_manifest(&self, version: &Version) -> Result<Manifest> {
         let path = self.paths.version_manifest_file(version);
         let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
@@ -765,6 +822,37 @@ fn ensure_not_older_than_required(
         ));
     }
     Ok(())
+}
+
+/// The required version, for a command that runs beside the application.
+///
+/// The same floor as every start: a mandatory release exists so that older
+/// versions stop running, and a command is a start. But a command activates
+/// nothing, so a required version that is installed and waiting is not a
+/// broken installation, only one the application has not been started on
+/// since: the message says to start it.
+fn ensure_command_may_run(
+    state: &xpack_core::InstallState,
+    version: &Version,
+    manifest: &Manifest,
+) -> Result<()> {
+    let Err(refused) = ensure_not_older_than_required(state, version) else {
+        return Ok(());
+    };
+    match (&state.update, &state.required_version) {
+        (UpdatePhase::Staged { version: staged }, Some(required)) if staged >= required => {
+            Err(Error::invalid(
+                "launch",
+                format!(
+                    "version {required} is required and is ready to use, but {name} has not \
+                     been started on it yet; close {name} if it is open, start it, then run \
+                     this again",
+                    name = manifest.application.name
+                ),
+            ))
+        }
+        _ => Err(refused),
+    }
 }
 
 /// What a launch keeps hold of while the application runs.

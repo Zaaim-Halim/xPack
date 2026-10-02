@@ -96,7 +96,7 @@ fn a_user_starts_an_installation_they_cannot_write_to() {
         created_at: None,
         command: None,
         commands: Vec::new(),
-        instance: xpack_core::InstanceSpec { single: true },
+        instance: xpack_core::InstanceSpec { single: true, alongside: Vec::new() },
     };
     let mut manifest = manifest;
     manifest.format_version = manifest.required_format_version();

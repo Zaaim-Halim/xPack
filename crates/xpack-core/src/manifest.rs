@@ -42,7 +42,8 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | 2 | `launch.keepWorkingDirectory`, [`VERSION_DIR_PLACEHOLDER`] in launch arguments and environment values, and `command` |
 /// | 3 | `commands` |
 /// | 4 | `instance` |
-pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 4;
+/// | 5 | `instance.alongside` |
+pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 5;
 
 /// Stands for the installed version directory in launch arguments and
 /// environment values.
@@ -638,6 +639,21 @@ pub struct InstanceSpec {
     /// are meant to run twice, and a command-line tool almost always is.
     #[serde(default)]
     pub single: bool,
+
+    /// Arguments that mark a start as a command, not a request for the
+    /// window: `--version`, `--status`, `export`.
+    ///
+    /// A start given any of them runs beside the running copy, with its own
+    /// output and exit code, and is neither handed over nor counted as the
+    /// running copy. Without this list the launcher cannot tell
+    /// `myapp --status` from `myapp notes.txt`, and hands both over: the
+    /// command prints nothing, because the copy that would have answered it
+    /// was never started.
+    ///
+    /// An entry matches an argument that equals it, or that starts with it
+    /// followed by `=` (`--export` matches `--export=out.csv`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alongside: Vec<String>,
 }
 
 impl InstanceSpec {
@@ -647,6 +663,53 @@ impl InstanceSpec {
     /// it stays readable by releases that never heard of it.
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// Whether a start with these arguments is a command that runs beside the
+    /// running copy; see [`Self::alongside`].
+    pub fn runs_alongside<S: AsRef<str>>(&self, arguments: &[S]) -> bool {
+        arguments.iter().any(|argument| {
+            let argument = argument.as_ref();
+            self.alongside.iter().any(|entry| {
+                argument
+                    .strip_prefix(entry.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+            })
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.alongside.is_empty() {
+            return Ok(());
+        }
+        if !self.single {
+            return Err(Error::invalid(
+                "instance.alongside",
+                "names commands that run beside a single running copy, but instance.single is \
+                 not set; set it, or remove the list",
+            ));
+        }
+        for (index, entry) in self.alongside.iter().enumerate() {
+            // An empty entry would match every argument that starts with `=`,
+            // and one with a space or `=` in it could never be what the
+            // packager meant: arguments are compared whole, up to their `=`.
+            if entry.is_empty() || entry.contains(|c: char| c.is_whitespace() || c == '=') {
+                return Err(Error::invalid(
+                    "instance.alongside",
+                    format!(
+                        "{entry:?} is not one argument; write each as the user types it, \
+                         without spaces or a value (\"--export\", not \"--export=FILE\")"
+                    ),
+                ));
+            }
+            if self.alongside[..index].contains(entry) {
+                return Err(Error::invalid(
+                    "instance.alongside",
+                    format!("{entry:?} is listed twice"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -746,7 +809,9 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if self.instance.single {
+        if !self.instance.alongside.is_empty() {
+            FormatVersion(5)
+        } else if self.instance.single {
             FormatVersion(4)
         } else if !self.commands.is_empty() {
             FormatVersion(3)
@@ -793,6 +858,8 @@ impl Manifest {
                 ));
             }
         }
+        self.instance.validate()?;
+
         // A manifest must declare every format it relies on. One that claims
         // an older format than its contents need tells an older reader it can
         // interpret the package, which that reader cannot.
@@ -1652,6 +1719,77 @@ mod tests {
         let mut understated = manifest;
         understated.format_version = FormatVersion(3);
         assert!(understated.validate().unwrap_err().to_string().contains("need at least 4"));
+    }
+
+    #[test]
+    fn commands_beside_the_running_copy_survive_the_signed_bytes_and_need_format_5() {
+        let mut manifest = sample();
+        manifest.instance.single = true;
+        manifest.instance.alongside = vec!["--status".into(), "--export".into()];
+        assert_eq!(manifest.required_format_version(), FormatVersion(5));
+        manifest.format_version = manifest.required_format_version();
+        let bytes = manifest.to_signed_bytes().unwrap();
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+
+        // Declaring format 4 would tell a 0.6.0 launcher it can start this.
+        // It cannot even read it: it refuses a setting it does not know.
+        let mut understated = manifest;
+        understated.format_version = FormatVersion(4);
+        assert!(understated.validate().unwrap_err().to_string().contains("need at least 5"));
+    }
+
+    #[test]
+    fn a_single_instance_without_such_commands_stays_format_4_and_does_not_mention_them() {
+        // So a launcher placed by 0.6.0 still reads what it could read before.
+        let mut manifest = sample();
+        manifest.instance.single = true;
+        manifest.format_version = manifest.required_format_version();
+        assert_eq!(manifest.format_version, FormatVersion(4));
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("alongside"), "{json}");
+    }
+
+    #[test]
+    fn a_start_is_a_command_when_any_argument_is_listed() {
+        let spec = InstanceSpec {
+            single: true,
+            alongside: vec!["--status".into(), "--export".into(), "export".into()],
+        };
+        assert!(spec.runs_alongside(&["--status"]));
+        assert!(spec.runs_alongside(&["--data-dir=/tmp/a", "--status"]));
+        assert!(spec.runs_alongside(&["--export=out.csv"]));
+        assert!(spec.runs_alongside(&["export", "out.csv"]));
+
+        assert!(!spec.runs_alongside::<&str>(&[]));
+        assert!(!spec.runs_alongside(&["notes.txt"]));
+        // Whole arguments only: neither a longer option nor a file that
+        // happens to begin the same way is the command.
+        assert!(!spec.runs_alongside(&["--status-bar"]));
+        assert!(!spec.runs_alongside(&["export.csv"]));
+        assert!(!spec.runs_alongside(&["--data-dir=--status"]));
+
+        assert!(
+            !InstanceSpec { single: true, alongside: Vec::new() }.runs_alongside(&["--status"])
+        );
+    }
+
+    #[test]
+    fn commands_beside_the_running_copy_are_refused_when_they_could_not_mean_anything() {
+        let with = |single: bool, alongside: &[&str]| {
+            let mut manifest = sample();
+            manifest.instance.single = single;
+            manifest.instance.alongside = alongside.iter().map(|s| (*s).to_string()).collect();
+            manifest.format_version = manifest.required_format_version();
+            manifest.validate().map_err(|e| e.to_string())
+        };
+        assert!(with(true, &["--status"]).is_ok());
+        // Nothing to run beside.
+        assert!(with(false, &["--status"]).unwrap_err().contains("instance.single"));
+        // Would match every start, or none.
+        assert!(with(true, &[""]).unwrap_err().contains("not one argument"));
+        assert!(with(true, &["--add Coffee"]).unwrap_err().contains("not one argument"));
+        assert!(with(true, &["--export=FILE"]).unwrap_err().contains("not one argument"));
+        assert!(with(true, &["--status", "--status"]).unwrap_err().contains("listed twice"));
     }
 
     #[test]

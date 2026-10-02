@@ -13,7 +13,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use xpack_core::manifest::{Application, FormatVersion, LaunchSpec, PayloadSpec, UpdateSpec};
-use xpack_core::{InstallPaths, InstanceSpec, Manifest, Platform, Version};
+use xpack_core::state::UpdatePhase;
+use xpack_core::{InstallPaths, InstallState, InstanceSpec, Manifest, Platform, Version};
 use xpack_install::{InstallOptions, Installer, TrustDecision, open_and_verify};
 use xpack_package::PackageBuilder;
 use xpack_platform::InstallLock;
@@ -21,22 +22,66 @@ use xpack_security::KeyPair;
 
 /// Appends one line per start, with the arguments and the inbox it was told
 /// about, then keeps running until killed.
+///
+/// Two arguments make it a command instead: `--status` prints its version
+/// and the inbox it was told about, and exits 3; `--hold` records itself and
+/// keeps running, as a long command would.
 const APP: &str = "#!/bin/sh\n\
+    case \"$1\" in\n\
+    --status*) printf 'status %s|%s\\n' \"$APP_VERSION\" \"$XPACK_INSTANCE_INBOX\"; exit 3 ;;\n\
+    --hold) printf 'hold\\n' >> \"$XPACK_APPLICATION_DIR/commands.log\"; exec sleep 30 ;;\n\
+    esac\n\
     printf 'start %s|%s\\n' \"$*\" \"$XPACK_INSTANCE_INBOX\" >> \"$XPACK_APPLICATION_DIR/starts.log\"\n\
     exec sleep 30\n";
 
 struct World {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     paths: InstallPaths,
     launcher: PathBuf,
+    key: KeyPair,
+    instance: InstanceSpec,
     running: Vec<Child>,
 }
 
 impl World {
     fn new(single: bool) -> Self {
+        Self::with(InstanceSpec { single, alongside: Vec::new() })
+    }
+
+    /// A single-instance application whose package lets these arguments run
+    /// beside the running copy.
+    fn alongside(commands: &[&str]) -> Self {
+        Self::with(InstanceSpec {
+            single: true,
+            alongside: commands.iter().map(ToString::to_string).collect(),
+        })
+    }
+
+    fn with(instance: InstanceSpec) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = KeyPair::generate().unwrap();
-        let payload = dir.path().join("payload");
+        let paths = InstallPaths::new(&dir.path().join("apps"), "com.example.app").unwrap();
+        let mut world = Self {
+            launcher: paths.root().join("xpack-launcher"),
+            dir,
+            paths,
+            key,
+            instance,
+            running: Vec::new(),
+        };
+        world.install("1.0.0", false, true);
+
+        // Where an install puts it: the launcher finds its installation from
+        // the directory it sits in.
+        fs::copy(env!("CARGO_BIN_EXE_xpack-launcher"), &world.launcher).unwrap();
+        world
+    }
+
+    /// Installs this version of the application; activated, or only staged
+    /// as the updater leaves one.
+    fn install(&mut self, version: &str, mandatory: bool, activate: bool) {
+        let build = self.dir.path().join(format!("build-{version}"));
+        let payload = build.join("payload");
         fs::create_dir_all(payload.join("bin")).unwrap();
         fs::write(payload.join("bin/app"), APP).unwrap();
         fs::set_permissions(payload.join("bin/app"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -46,7 +91,7 @@ impl World {
             application: Application {
                 id: "com.example.app".into(),
                 name: "Example".into(),
-                version: Version::parse("1.0.0").unwrap(),
+                version: Version::parse(version).unwrap(),
                 description: None,
                 publisher: None,
             },
@@ -56,9 +101,9 @@ impl World {
                 arguments: vec![],
                 working_directory: None,
                 keep_working_directory: false,
-                environment: BTreeMap::new(),
+                environment: BTreeMap::from([("APP_VERSION".into(), version.into())]),
             },
-            update: UpdateSpec::default(),
+            update: UpdateSpec { mandatory, ..UpdateSpec::default() },
             health: xpack_core::HealthSpec::default(),
             signing_key: None,
             desktop: xpack_core::DesktopSpec::default(),
@@ -66,26 +111,22 @@ impl World {
             created_at: None,
             command: None,
             commands: Vec::new(),
-            instance: InstanceSpec { single },
+            instance: self.instance.clone(),
         };
         manifest.format_version = manifest.required_format_version();
-        let package = dir.path().join("app.xpkg");
-        PackageBuilder::new(&payload, manifest).build(&package, &key).unwrap();
+        let package = build.join("app.xpkg");
+        PackageBuilder::new(&payload, manifest).build(&package, &self.key).unwrap();
 
-        let paths = InstallPaths::new(&dir.path().join("apps"), "com.example.app").unwrap();
-        let lock = InstallLock::acquire(&paths).unwrap();
+        let lock = InstallLock::acquire(&self.paths).unwrap();
         let mut verified =
-            open_and_verify(&package, &lock, &TrustDecision::Explicit(key.public())).unwrap();
+            open_and_verify(&package, &lock, &TrustDecision::Explicit(self.key.public())).unwrap();
         Installer::new(&lock)
-            .install(&mut verified, &InstallOptions { activate: true, ..Default::default() })
+            .install(&mut verified, &InstallOptions { activate, ..Default::default() })
             .unwrap();
-        drop(lock);
+    }
 
-        // Where an install puts it: the launcher finds its installation from
-        // the directory it sits in.
-        let launcher = paths.root().join("xpack-launcher");
-        fs::copy(env!("CARGO_BIN_EXE_xpack-launcher"), &launcher).unwrap();
-        Self { _dir: dir, paths, launcher, running: Vec::new() }
+    fn state(&self) -> InstallState {
+        xpack_core::store::load::<InstallState>(&self.paths.state_file()).unwrap().value
     }
 
     fn command(&self, arguments: &[&str]) -> Command {
@@ -284,4 +325,136 @@ fn a_start_that_arrives_while_the_first_is_still_starting_is_not_lost() {
         [serde_json::json!({ "arguments": ["opened meanwhile"] })],
         "a request was lost, or an old one kept"
     );
+}
+
+#[test]
+fn a_listed_command_runs_beside_the_running_copy_and_answers_for_itself() {
+    let mut world = World::alongside(&["--status"]);
+    world.start(&["window"]);
+    let record = fs::read(world.paths.instance_record_file()).unwrap();
+
+    let status = world.start_and_wait(&["--status"]);
+
+    // Its own output and exit code, not "already running" and success.
+    assert_eq!(status.status.code(), Some(3), "{status:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "status 1.0.0|\n",
+        "the command did not run, or was told where the running copy's requests arrive"
+    );
+    assert!(!String::from_utf8_lossy(&status.stderr).contains("already running"), "{status:?}");
+    assert!(world.requests().is_empty(), "the command was handed over as well");
+    assert_eq!(world.starts().len(), 1, "{:?}", world.starts());
+    assert!(world.running[0].try_wait().unwrap().is_none(), "the running copy was disturbed");
+    assert_eq!(
+        fs::read(world.paths.instance_record_file()).unwrap(),
+        record,
+        "the command replaced the record of the running copy"
+    );
+}
+
+#[test]
+fn a_listed_command_with_a_value_runs_beside_and_anything_else_is_handed_over() {
+    let mut world = World::alongside(&["--status"]);
+    world.start(&[]);
+
+    let with_value = world.start_and_wait(&["--status=short"]);
+    assert_eq!(with_value.status.code(), Some(3), "{with_value:?}");
+
+    // Not the listed argument, only one that begins the same way.
+    let other = world.start_and_wait(&["--status-bar"]);
+    assert!(other.status.success(), "{other:?}");
+    assert!(String::from_utf8_lossy(&other.stderr).contains("already running"), "{other:?}");
+    assert_eq!(world.requests(), [serde_json::json!({ "arguments": ["--status-bar"] })]);
+    assert_eq!(world.starts().len(), 1, "{:?}", world.starts());
+}
+
+#[test]
+fn a_command_running_with_no_copy_open_does_not_become_the_running_copy() {
+    // Were it to take the instance lock, the window opened while it runs
+    // would be handed over to a command, and never appear.
+    let mut world = World::alongside(&["--hold"]);
+    let command = world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    world.running.push(command.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !world.paths.root().join("commands.log").exists() {
+        assert!(Instant::now() < deadline, "the command never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    world.start(&["window"]);
+
+    assert!(world.starts()[0].starts_with("start window|"), "{:?}", world.starts());
+    assert!(world.requests().is_empty());
+}
+
+#[test]
+fn a_command_neither_activates_a_staged_version_nor_ends_its_wait() {
+    let mut world = World::alongside(&["--status"]);
+    world.start(&[]);
+    world.install("1.1.0", false, false);
+    let before = world.state();
+    assert!(matches!(before.update, UpdatePhase::Staged { .. }), "{:?}", before.update);
+
+    let status = world.start_and_wait(&["--status"]);
+
+    // The version the running copy runs, which a start handing over to it
+    // reads, stays the active one; the staged one waits for the next start
+    // of the application, which watches it start.
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "status 1.0.0|\n", "{status:?}");
+    let after = world.state();
+    assert_eq!(after.active().unwrap().to_string(), "1.0.0");
+    assert_eq!(after.update, before.update);
+}
+
+#[test]
+fn a_command_does_not_run_a_version_a_mandatory_release_has_retired() {
+    let mut world = World::alongside(&["--status"]);
+    world.start(&[]);
+    world.install("1.1.0", true, false);
+
+    let status = world.start_and_wait(&["--status"]);
+
+    assert!(!status.status.success(), "{status:?}");
+    assert!(status.stdout.is_empty(), "the retired version ran: {status:?}");
+    let said = String::from_utf8_lossy(&status.stderr);
+    assert!(said.contains("1.1.0 is required and is ready to use"), "{said}");
+    assert!(said.contains("start it"), "{said}");
+    assert_eq!(world.state().active().unwrap().to_string(), "1.0.0");
+}
+
+#[test]
+fn a_listed_command_typed_through_the_installed_command_runs_beside_the_running_copy() {
+    // What a user types: the script an install puts on the PATH, which names
+    // the command and passes the arguments on.
+    let mut world = World::alongside(&["--status"]);
+    world.start(&[]);
+    let script = world.dir.path().join("example");
+    fs::write(
+        &script,
+        xpack_install::integration::command::script(
+            &xpack_install::integration::command::Command {
+                application_id: "com.example.app".into(),
+                name: "example".into(),
+                launcher: world.launcher.clone(),
+                command_dir: world.paths.root().join(xpack_core::paths::COMMAND_DIR),
+            },
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let status = Command::new(&script)
+        .arg("--status")
+        .env_remove("XPACK_BUNDLE")
+        .env_remove("XPACK_RESTARTED")
+        .env("XPACK_NO_UPDATE", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(status.status.code(), Some(3), "{status:?}");
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "status 1.0.0|\n", "{status:?}");
+    assert!(world.requests().is_empty(), "the command was handed over");
+    assert_eq!(world.starts().len(), 1, "{:?}", world.starts());
 }

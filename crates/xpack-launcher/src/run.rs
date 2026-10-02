@@ -105,6 +105,16 @@ fn launch_with_one_restart(
     outcome
 }
 
+/// What a launcher that ran a command exits with: the command's own status.
+/// One ended by a signal has none, and failed.
+fn command_exit_code(code: Option<i32>) -> ExitCode {
+    match code {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from),
+        None => ExitCode::FAILURE,
+    }
+}
+
 /// Runs a launcher binary from start to finish.
 ///
 /// Returns the exit code the process should end with, rather than exiting
@@ -172,19 +182,26 @@ fn run_as(windowed: bool) -> ExitCode {
     );
     if let Some(name) = requested {
         match launcher.run_command(&name, &arguments) {
-            Ok(Some(code)) => {
-                return match code {
-                    Some(0) => ExitCode::SUCCESS,
-                    Some(code) => u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from),
-                    None => ExitCode::FAILURE,
-                };
-            }
+            Ok(Some(code)) => return command_exit_code(code),
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(%error, command = %name, "the command could not be started");
                 xpack_core::errln!("{name}: {error}");
                 return ExitCode::FAILURE;
             }
+        }
+    }
+
+    // A command the package lets run beside the running copy, such as
+    // `--version`: handed over, it would print nothing and report success,
+    // because the copy that would have answered it was never started.
+    match launcher.run_alongside(&arguments) {
+        Ok(Some(code)) => return command_exit_code(code),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(%error, "the command could not be started");
+            xpack_core::errln!("xpack: {error}");
+            return ExitCode::FAILURE;
         }
     }
 
