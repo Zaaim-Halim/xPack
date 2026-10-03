@@ -140,6 +140,10 @@ mod tests {
         fn launch(&self, _root: &Path) -> Result<(), Error> {
             Ok(())
         }
+
+        fn close_application(&self, _root: &Path) -> Result<(), Error> {
+            Ok(())
+        }
     }
 
     #[allow(clippy::unnecessary_wraps)] // Matches the engine's signature it stands in for.

@@ -14,7 +14,7 @@ use xpack_install::Existing;
 use super::page::{Page, PageSet};
 use super::plan::{AllUsers, UiPlan};
 use super::progress::Progress;
-use super::status::{InstallKind, Severity, Status};
+use super::status::{InstallKind, Offer, Severity, Status};
 use super::text::{Facts, Flavour, Key, Texts};
 use crate::engine::{Choices, Failure, FailureKind, Inspection, Installed};
 
@@ -110,6 +110,8 @@ pub struct Buttons {
     pub retry: Visibility,
     /// Launch, beside a status saying this version is already installed.
     pub launch_existing: Visibility,
+    /// "Close it for me", beside a status saying the application is open.
+    pub close_application: Visibility,
 }
 
 /// What happens when the person closes the window or presses Cancel.
@@ -216,6 +218,9 @@ pub struct Wizard {
     selections: Selections,
     progress: Progress,
     log: Option<PathBuf>,
+    /// Whether the running application was asked to close, since the
+    /// install last found it open: `Some(false)` when it could not be.
+    close_asked: Option<bool>,
 }
 
 impl Wizard {
@@ -259,6 +264,7 @@ impl Wizard {
             },
             progress: Progress::default(),
             log: spec.log,
+            close_asked: None,
         }
     }
 
@@ -367,13 +373,22 @@ impl Wizard {
     /// Shown on the location page, and on the page that starts the
     /// installation whenever it blocks, so a refusal is never unexplained.
     pub fn status(&self) -> Status {
-        Status::of(self.inspection.as_ref(), &self.texts)
+        let mut status = Status::of(self.inspection.as_ref(), &self.texts);
+        if status.offer == Some(Offer::CloseApplication)
+            && let Some(asked) = self.close_asked
+        {
+            status.body =
+                self.texts.line(if asked { Key::StatusOpenAsked } else { Key::StatusOpenNotAsked });
+        }
+        status
     }
 
     /// Whether the status line belongs on the current page.
     pub fn shows_status(&self) -> bool {
+        let status = self.status();
         self.page == Page::Location
-            || (self.page == self.pages.last_before_install() && !self.status().allows_install)
+            || (self.page == self.pages.last_before_install()
+                && (!status.allows_install || status.offer == Some(Offer::CloseApplication)))
     }
 
     /// What installing will be, once that is known and allowed.
@@ -514,8 +529,13 @@ impl Wizard {
                     } else {
                         Visibility::Hidden
                     },
-                    retry: Visibility::shown_if(status_shown && status.offers_retry),
-                    launch_existing: Visibility::shown_if(status_shown && status.offers_launch),
+                    retry: Visibility::shown_if(status_shown && status.offer == Some(Offer::Retry)),
+                    launch_existing: Visibility::shown_if(
+                        status_shown && status.offer == Some(Offer::Launch),
+                    ),
+                    close_application: Visibility::shown_if(
+                        status_shown && status.offer == Some(Offer::CloseApplication),
+                    ),
                 }
             }
             Phase::Installing => Buttons {
@@ -526,6 +546,7 @@ impl Wizard {
                 browse: Visibility::Hidden,
                 retry: Visibility::Hidden,
                 launch_existing: Visibility::Hidden,
+                close_application: Visibility::Hidden,
             },
             Phase::Finished(_) | Phase::Ended(_) => Buttons {
                 back: Visibility::Hidden,
@@ -535,6 +556,7 @@ impl Wizard {
                 browse: Visibility::Hidden,
                 retry: Visibility::Hidden,
                 launch_existing: Visibility::Hidden,
+                close_application: Visibility::Hidden,
             },
         }
     }
@@ -656,8 +678,24 @@ impl Wizard {
 
     /// Retry, beside a busy installation: look again.
     pub fn retry(&mut self) {
-        if self.is_choosing() && self.status().offers_retry {
+        if self.is_choosing() && self.status().offer == Some(Offer::Retry) {
             self.inspection = None;
+        }
+    }
+
+    /// "Close it for me", beside "the application is open": the root whose
+    /// application to ask, if the button is there to press.
+    pub fn close_application(&self) -> Option<PathBuf> {
+        (self.is_choosing()
+            && self.shows_status()
+            && self.status().offer == Some(Offer::CloseApplication))
+        .then(|| self.root.clone())
+    }
+
+    /// Whether asking the application to close worked, for the status to say.
+    pub fn asked_to_close(&mut self, asked: bool) {
+        if self.is_choosing() && self.status().offer == Some(Offer::CloseApplication) {
+            self.close_asked = Some(asked);
         }
     }
 
@@ -665,7 +703,10 @@ impl Wizard {
     ///
     /// Ends the run. Nothing was installed, and nothing needed to be.
     pub fn launch_existing(&mut self) -> Option<PathBuf> {
-        if !(self.is_choosing() && self.shows_status() && self.status().offers_launch) {
+        if !(self.is_choosing()
+            && self.shows_status()
+            && self.status().offer == Some(Offer::Launch))
+        {
             return None;
         }
         self.phase = Phase::Ended(Conclusion::AlreadyInstalled);
@@ -683,17 +724,25 @@ impl Wizard {
     ///
     /// A busy installation goes back to the page that started it, with the
     /// reason and a Retry beside it: another operation got there first, and
-    /// nothing was changed. Anything else is the last page.
+    /// nothing was changed. So does one whose application is open, with an
+    /// offer to ask it to close, and Install to try again. Anything else is
+    /// the last page.
     pub fn finished(&mut self, result: Result<Installed, Failure>) {
         if self.phase != Phase::Installing {
             return;
         }
-        if let Err(Failure { kind: FailureKind::Busy, .. }) = &result {
+        let back_with = match &result {
+            Err(Failure { kind: FailureKind::Busy, .. }) => Some(Existing::Busy),
+            Err(Failure { kind: FailureKind::Open, .. }) => Some(Existing::Open),
+            _ => None,
+        };
+        if let Some(verdict) = back_with {
             self.phase = Phase::Choosing;
             self.progress = Progress::default();
             self.page = self.pages.last_before_install();
+            self.close_asked = None;
             if let Some(inspection) = &mut self.inspection {
-                inspection.verdict = Ok(Existing::Busy);
+                inspection.verdict = Ok(verdict);
             }
             return;
         }
@@ -1508,6 +1557,61 @@ mod tests {
         assert_eq!(wizard.status().heading.as_deref(), Some("App is busy."));
         assert_eq!(wizard.buttons().retry, Visibility::Enabled);
         assert_eq!(wizard.buttons().primary, Visibility::Disabled);
+    }
+
+    #[test]
+    fn an_install_refused_because_the_application_is_open_goes_back_offering_to_close_it() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Older(v("1.0.0"))));
+        start_install(&mut wizard);
+        wizard.finished(Err(failure(FailureKind::Open)));
+
+        assert_eq!(wizard.page(), Page::Ready);
+        assert!(wizard.is_choosing(), "it ended, though nothing was changed");
+        assert!(wizard.shows_status(), "the reason is not on the page the install starts from");
+        let status = wizard.status();
+        assert_eq!(status.heading.as_deref(), Some("App is open."));
+        assert!(status.body.contains("Nothing has changed"), "{}", status.body);
+        let buttons = wizard.buttons();
+        assert_eq!(buttons.close_application, Visibility::Enabled);
+        // Install is the retry, once it has been closed.
+        assert_eq!(buttons.primary, Visibility::Enabled);
+        assert_eq!(buttons.primary_label, "Install");
+        assert_eq!(buttons.retry, Visibility::Hidden);
+    }
+
+    #[test]
+    fn asking_the_application_to_close_says_whether_it_could_be_asked() {
+        let mut wizard = wizard_with(spec(), Ok(Existing::Older(v("1.0.0"))));
+        start_install(&mut wizard);
+        wizard.finished(Err(failure(FailureKind::Open)));
+        assert_eq!(wizard.close_application(), Some(PathBuf::from("/home/u/apps")));
+
+        wizard.asked_to_close(true);
+        assert!(wizard.status().body.contains("was asked to close"), "{}", wizard.status().body);
+
+        wizard.asked_to_close(false);
+        assert!(
+            wizard.status().body.contains("could not be asked to close"),
+            "{}",
+            wizard.status().body
+        );
+
+        // Refused again: the earlier answer no longer describes it.
+        start_install(&mut wizard);
+        wizard.finished(Err(failure(FailureKind::Open)));
+        assert!(wizard.status().body.starts_with("Close it, then"), "{}", wizard.status().body);
+    }
+
+    #[test]
+    fn nothing_is_offered_to_close_unless_the_install_found_the_application_open() {
+        let wizard = wizard_with(spec(), Ok(Existing::Older(v("1.0.0"))));
+        assert_eq!(wizard.buttons().close_application, Visibility::Hidden);
+        assert_eq!(wizard.close_application(), None);
+        let mut busy = wizard_with(spec(), Ok(Existing::Nothing));
+        start_install(&mut busy);
+        busy.finished(Err(failure(FailureKind::Busy)));
+        assert_eq!(busy.buttons().close_application, Visibility::Hidden);
+        assert_eq!(busy.close_application(), None);
     }
 
     #[test]

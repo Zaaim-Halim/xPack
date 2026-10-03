@@ -44,6 +44,7 @@ pub(super) enum Action {
     Browse,
     Retry,
     LaunchExisting,
+    CloseApplication,
     Accept,
     Shortcut,
     DesktopShortcut,
@@ -73,6 +74,7 @@ pub(super) struct Controls {
     status: nwg::Label,
     retry: nwg::Button,
     launch_existing: nwg::Button,
+    close_application: nwg::Button,
     pub(super) accept: nwg::CheckBox,
     pub(super) shortcut: nwg::CheckBox,
     pub(super) desktop_shortcut: nwg::CheckBox,
@@ -145,6 +147,7 @@ impl Controls {
             &mut c.browse,
             &mut c.retry,
             &mut c.launch_existing,
+            &mut c.close_application,
             &mut c.back,
             &mut c.next,
             &mut c.cancel,
@@ -173,6 +176,7 @@ impl Controls {
             (&self.browse.handle, Action::Browse),
             (&self.retry.handle, Action::Retry),
             (&self.launch_existing.handle, Action::LaunchExisting),
+            (&self.close_application.handle, Action::CloseApplication),
             (&self.accept.handle, Action::Accept),
             (&self.shortcut.handle, Action::Shortcut),
             (&self.desktop_shortcut.handle, Action::DesktopShortcut),
@@ -375,8 +379,9 @@ impl Controls {
             Some(heading) => format!("{prefix}{heading} {}", status.body),
             None => format!("{prefix}{}", status.body),
         };
-        let has_button =
-            buttons.retry != Visibility::Hidden || buttons.launch_existing != Visibility::Hidden;
+        let has_button = buttons.retry != Visibility::Hidden
+            || buttons.launch_existing != Visibility::Hidden
+            || buttons.close_application != Visibility::Hidden;
         let width = if has_button { BODY_WIDTH - 130 } else { BODY_WIDTH };
         text(&self.status, &body, BODY_X, y, width, 48);
 
@@ -385,6 +390,8 @@ impl Controls {
             button(&self.retry, &texts.line(Key::Retry), side, y, 120, true);
         } else if buttons.launch_existing != Visibility::Hidden {
             button(&self.launch_existing, &texts.line(Key::Launch), side, y, 120, true);
+        } else if buttons.close_application != Visibility::Hidden {
+            button(&self.close_application, &texts.line(Key::CloseApplication), side, y, 120, true);
         }
         y + 56
     }
@@ -495,9 +502,15 @@ impl Controls {
         self.licence.set_visible(false);
         self.root.set_visible(false);
         self.progress.set_visible(false);
-        for button in
-            [&self.browse, &self.retry, &self.launch_existing, &self.back, &self.next, &self.cancel]
-        {
+        for button in [
+            &self.browse,
+            &self.retry,
+            &self.launch_existing,
+            &self.close_application,
+            &self.back,
+            &self.next,
+            &self.cancel,
+        ] {
             button.set_visible(false);
         }
         for checkbox in [

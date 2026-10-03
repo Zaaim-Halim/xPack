@@ -42,6 +42,11 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Starts the application installed under `root`, without waiting for it.
     fn launch(&self, root: &Path) -> Result<(), Error>;
+
+    /// Asks the application installed under `root`, which is running, to
+    /// close, the way a person closing its window would; never forces it.
+    /// Returns without waiting for it to close.
+    fn close_application(&self, root: &Path) -> Result<(), Error>;
 }
 
 /// The answer to [`Engine::inspect`].
@@ -123,6 +128,8 @@ impl Failure {
             FailureKind::Integrity
         } else if matches!(error, Error::Locked(_)) {
             FailureKind::Busy
+        } else if matches!(error, Error::ApplicationRunning(_)) {
+            FailureKind::Open
         } else {
             FailureKind::Other
         };
@@ -137,6 +144,9 @@ pub enum FailureKind {
     Integrity,
     /// Another xPack operation holds the installation. Worth retrying.
     Busy,
+    /// The application is open, and installing needs it closed. Nothing was
+    /// changed; worth retrying once it is closed.
+    Open,
     /// Anything else.
     Other,
 }
@@ -149,6 +159,10 @@ mod tests {
     fn failures_are_classified_the_way_exit_codes_are() {
         assert_eq!(Failure::of(&Error::Integrity("bad".into())).kind, FailureKind::Integrity);
         assert_eq!(Failure::of(&Error::Locked("held".into())).kind, FailureKind::Busy);
+        assert_eq!(
+            Failure::of(&Error::ApplicationRunning("Example".into())).kind,
+            FailureKind::Open
+        );
         assert_eq!(Failure::of(&Error::invalid("x", "y")).kind, FailureKind::Other);
     }
 }

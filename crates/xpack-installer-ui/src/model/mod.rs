@@ -16,7 +16,7 @@ pub mod wizard;
 pub use page::{Page, PageSet};
 pub use plan::{AllUsers, UiPlan};
 pub use progress::{Counts, Progress};
-pub use status::{InstallKind, Severity, Status};
+pub use status::{InstallKind, Offer, Severity, Status};
 pub use text::{Facts, Flavour, Key, TextOverride, Texts};
 pub use wizard::{
     Buttons, CloseRequest, CommandOffer, Conclusion, FinishView, Step, Visibility, Wizard,

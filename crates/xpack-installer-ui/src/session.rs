@@ -119,6 +119,20 @@ impl Session {
         Update::Page
     }
 
+    /// "Close it for me", beside "the application is open": asks it to close,
+    /// and says whether that could be done. Waits for nothing: the person
+    /// chooses Install again once it has closed.
+    pub(crate) fn close_application(&mut self) -> Update {
+        let Some(root) = self.wizard.close_application() else {
+            return Update::Nothing;
+        };
+        // Whether it could be asked is what the person needs to know; the
+        // engine logs why not.
+        let asked = self.engine.close_application(&root).is_ok();
+        self.wizard.asked_to_close(asked);
+        Update::Page
+    }
+
     /// Launch, beside "already installed". Ends the run.
     pub(crate) fn launch_existing(&mut self, host: &dyn Host) {
         if let Some(root) = self.wizard.launch_existing() {
@@ -199,12 +213,13 @@ mod tests {
 
     use super::*;
     use crate::engine::{Choices, Inspection, Installed};
-    use crate::model::{AllUsers, Facts, Flavour, Page, UiPlan, WizardSpec};
+    use crate::model::{AllUsers, Facts, Flavour, Page, UiPlan, Visibility, WizardSpec};
 
     /// An engine whose install succeeds and whose launch fails, recording both.
     struct Engine2 {
         existing: Existing,
         launched: std::sync::Mutex<Vec<PathBuf>>,
+        closed: std::sync::Mutex<Vec<PathBuf>>,
     }
 
     impl Engine for Engine2 {
@@ -226,6 +241,11 @@ mod tests {
             self.launched.lock().unwrap().push(root.to_path_buf());
             Err(Error::invalid("launch", "it would not start"))
         }
+
+        fn close_application(&self, root: &Path) -> Result<(), Error> {
+            self.closed.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        }
     }
 
     /// Answers the confirmation as told and records every error shown.
@@ -245,7 +265,11 @@ mod tests {
     }
 
     fn session(existing: Existing, launch_on_finish: bool) -> (Session, Arc<Engine2>) {
-        let engine = Arc::new(Engine2 { existing, launched: std::sync::Mutex::default() });
+        let engine = Arc::new(Engine2 {
+            existing,
+            launched: std::sync::Mutex::default(),
+            closed: std::sync::Mutex::default(),
+        });
         let wizard = Wizard::new(WizardSpec {
             flavour: Flavour::Windows,
             facts: Facts {
@@ -376,6 +400,10 @@ mod tests {
         fn launch(&self, _: &Path) -> Result<(), Error> {
             Ok(())
         }
+
+        fn close_application(&self, _: &Path) -> Result<(), Error> {
+            Ok(())
+        }
     }
 
     fn offering_everyone() -> Session {
@@ -426,6 +454,114 @@ mod tests {
         // What a front-end does on Back and Next: reads the field back.
         assert_eq!(session.set_root(PathBuf::from("/everyone/App")), Update::Nothing);
         assert_eq!(session.wizard().root(), Path::new("/r"));
+    }
+
+    /// An engine whose first install is refused because the application is
+    /// open, and whose next one succeeds; it records every request to close.
+    struct OpenOnce {
+        refusals: std::sync::Mutex<u32>,
+        closed: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl Engine for OpenOnce {
+        fn inspect(&self, root: &Path) -> Inspection {
+            Inspection { target: root.join("app"), verdict: Ok(Existing::Older(v("1.0.0"))) }
+        }
+
+        fn install(&self, _: &Choices, _: &dyn ProgressReporter) -> Result<Installed, Error> {
+            let mut refusals = self.refusals.lock().unwrap();
+            if *refusals == 0 {
+                *refusals += 1;
+                return Err(Error::ApplicationRunning("App".into()));
+            }
+            Ok(Installed {
+                directory: PathBuf::from("/r/app"),
+                version: v("2.0.0"),
+                shortcut_added: false,
+                command: None,
+                command_off_path: None,
+            })
+        }
+
+        fn launch(&self, _: &Path) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn close_application(&self, root: &Path) -> Result<(), Error> {
+            self.closed.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        }
+    }
+
+    fn v(text: &str) -> Version {
+        Version::parse(text).unwrap()
+    }
+
+    #[test]
+    fn an_open_application_is_closed_on_request_and_the_install_then_goes_ahead() {
+        // The whole way through, on the worker thread the window uses: refused,
+        // back with the offer, asked to close, Install again, installed.
+        let engine = Arc::new(OpenOnce {
+            refusals: std::sync::Mutex::new(0),
+            closed: std::sync::Mutex::default(),
+        });
+        let wizard = Wizard::new(WizardSpec {
+            flavour: Flavour::Windows,
+            facts: Facts {
+                name: "App".into(),
+                version: v("2.0.0"),
+                publisher: None,
+                description: None,
+            },
+            plan: UiPlan::default(),
+            licence: None,
+            shortcut_requested: false,
+            command: None,
+            root: PathBuf::from("/r"),
+            root_fixed: false,
+            log: None,
+        });
+        let as_engine: Arc<dyn Engine> = Arc::clone(&engine) as Arc<dyn Engine>;
+        let mut session = Session::new(wizard, as_engine, Arc::new(|| {}));
+        let host = host(false);
+
+        install(&mut session, &host);
+
+        assert_eq!(session.wizard().page(), Page::Ready, "a refusal ended the run");
+        assert_eq!(session.wizard().status().heading.as_deref(), Some("App is open."));
+        assert_eq!(session.wizard().buttons().close_application, Visibility::Enabled);
+        assert_eq!(session.ended(), None);
+
+        assert_eq!(session.close_application(), Update::Page);
+        assert_eq!(*engine.closed.lock().unwrap(), [PathBuf::from("/r")]);
+
+        install(&mut session, &host);
+
+        assert_eq!(session.wizard().page(), Page::Finish);
+        assert!(session.wizard().finish_view().unwrap().succeeded);
+        assert_eq!(*engine.refusals.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn close_it_for_me_asks_the_engine_about_the_root_and_says_so() {
+        let (mut session, engine) = session(Existing::Open, false);
+        // To the location page, where the status is shown.
+        while session.wizard().page() != Page::Location {
+            session.primary(&host(false));
+        }
+        assert_eq!(session.wizard().buttons().close_application, Visibility::Enabled);
+
+        assert_eq!(session.close_application(), Update::Page);
+
+        assert_eq!(*engine.closed.lock().unwrap(), [PathBuf::from("/r")]);
+        assert!(session.wizard().status().body.contains("was asked to close"));
+    }
+
+    #[test]
+    fn close_it_for_me_does_nothing_when_it_is_not_offered() {
+        let (mut session, engine) = session(Existing::Nothing, false);
+        assert_eq!(session.close_application(), Update::Nothing);
+        assert!(engine.closed.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -83,6 +83,18 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FILE", hide = true)]
     pub(crate) seal_key_file: Option<std::path::PathBuf>,
 
+    /// When the application is open and needs to be closed for this install,
+    /// wait this many seconds for it to close before giving up.
+    ///
+    /// Giving up changes nothing and exits with code 6.
+    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+    pub(crate) wait_for_close: u64,
+
+    /// When the application is open and needs to be closed for this install,
+    /// ask it to close, as closing its window would. It is never forced.
+    #[arg(long)]
+    pub(crate) close_running: bool,
+
     /// Describe what would be installed, without installing it.
     ///
     /// Exits with the code the installation itself would, so a script can ask
@@ -157,7 +169,21 @@ pub(crate) fn run(args: &Args) -> xpack_core::Result<ExitCode> {
     }
 
     let request = request(args, root, xpack_core::InstallScope::User);
-    let outcome = payload.install_into(&request, &xpack_core::NoProgress)?;
+    let name = &payload.manifest().application.name;
+    let outcome = payload.install_waiting_for_close(
+        &request,
+        &xpack_core::NoProgress,
+        std::time::Duration::from_secs(args.wait_for_close),
+        args.close_running,
+        &mut || {
+            let asking = if args.close_running { "; asking it to close" } else { "" };
+            xpack_core::errln!(
+                "{name} is open and needs to be closed for this install{asking}; waiting up to \
+                 {} seconds",
+                args.wait_for_close
+            );
+        },
+    )?;
     report(&outcome, payload.manifest());
     Ok(ExitCode::from(exit::INSTALLED))
 }
@@ -336,6 +362,7 @@ fn describe(existing: &Existing) -> Option<String> {
         Existing::Installed => Some("this version is already installed".to_string()),
         Existing::Newer(version) => Some(format!("a newer version ({version}) is installed")),
         Existing::Busy => Some("another xPack operation is using this installation".to_string()),
+        Existing::Open => Some("the application is open".to_string()),
         Existing::Unreadable(reason) => Some(format!("the installation cannot be read: {reason}")),
     }
 }

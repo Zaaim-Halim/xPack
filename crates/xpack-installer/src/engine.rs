@@ -61,6 +61,14 @@ impl Engine for VerifiedPayload {
         })
     }
 
+    fn close_application(&self, root: &Path) -> Result<()> {
+        let result = self.ask_running_copy_to_close(root);
+        if let Err(error) = &result {
+            tracing::warn!(%error, "could not ask the application to close");
+        }
+        result
+    }
+
     fn launch(&self, root: &Path) -> Result<()> {
         // An installation for everyone is reported as its own directory,
         // named after the application; one for the person installing, as the

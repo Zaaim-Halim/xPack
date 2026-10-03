@@ -1502,3 +1502,88 @@ fn a_missing_notice_stops_the_installer_rather_than_leaving_it_out() {
     );
     assert!(!fixture.path().join("Demo-installer").exists(), "a partial installer was left behind");
 }
+
+/// Builds an installer of `version` and returns the program to run.
+fn installer_of(fixture: &Fixture, version: &str) -> PathBuf {
+    let package = fixture.pack(version);
+    let out = format!("Demo-installer-{version}");
+    let built = fixture.run(&[
+        "installer",
+        &package,
+        "--out",
+        &out,
+        "--stub",
+        &installer_stub().to_string_lossy(),
+        "--json",
+    ]);
+    assert!(built.status.success(), "building the installer failed: {}", stderr(&built));
+    let report: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    match report["layout"].as_str() {
+        Some("bundle") => {
+            let macos = fixture.path().join(&out).join("Contents/MacOS");
+            std::fs::read_dir(&macos).unwrap().next().unwrap().unwrap().path()
+        }
+        _ => fixture.path().join(out),
+    }
+}
+
+#[test]
+fn a_newer_installer_waits_for_the_open_application_and_replaces_the_programs_once_closed() {
+    if !installer_binaries_are_built() {
+        eprintln!("skipping: run `cargo build --workspace` first");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let first = installer_of(&fixture, "1.0.0");
+    let second = installer_of(&fixture, "1.1.0");
+    let root = fixture.path().join("installed");
+    let root_arg = root.to_string_lossy().to_string();
+    let ran = Command::new(&first).args(["--root", &root_arg, "--silent"]).output().unwrap();
+    assert!(ran.status.success(), "{}", stderr(&ran));
+
+    // As if installed by an older xPack: its programs are to be replaced.
+    let paths = xpack_core::InstallPaths::new(&root, "com.example.demo").unwrap();
+    {
+        let lock = xpack_platform::InstallLock::acquire(&paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.runtime_version = Some(xpack_core::Version::parse("0.0.1").unwrap());
+        lock.save_state(&state).unwrap();
+    }
+    let before = std::fs::read(paths.state_file()).unwrap();
+
+    // Open: a launcher of this release holds the presence lock while it runs.
+    let running = xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::ZERO)
+        .unwrap()
+        .unwrap();
+    let refused = Command::new(&second)
+        .args(["--root", &root_arg, "--silent", "--wait-for-close", "1"])
+        .output()
+        .unwrap();
+
+    assert_eq!(refused.status.code(), Some(6), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("is open"), "{}", stderr(&refused));
+    assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "a refused install changed it");
+    assert!(!paths.version_dir(&xpack_core::Version::parse("1.1.0").unwrap()).exists());
+
+    // Closed while the installer waits: it goes ahead.
+    let installer = Command::new(&second)
+        .args(["--root", &root_arg, "--silent", "--wait-for-close", "30"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    drop(running);
+    let done = installer.wait_with_output().unwrap();
+
+    assert!(done.status.success(), "{}", stderr(&done));
+    let state =
+        xpack_core::store::load::<xpack_core::InstallState>(&paths.state_file()).unwrap().value;
+    assert_eq!(state.current_version, Some(xpack_core::Version::parse("1.1.0").unwrap()));
+    assert_eq!(
+        state.runtime_version.map(|v| v.to_string()).as_deref(),
+        Some(xpack_core::XPACK_RELEASE),
+        "the programs were not replaced"
+    );
+}

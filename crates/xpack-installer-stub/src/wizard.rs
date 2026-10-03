@@ -114,6 +114,7 @@ fn exit_code(conclusion: Conclusion) -> u8 {
         Conclusion::Cancelled => exit::CANCELLED,
         Conclusion::Failed(FailureKind::Integrity) => exit::INTEGRITY,
         Conclusion::Failed(FailureKind::Busy) => exit::BUSY,
+        Conclusion::Failed(FailureKind::Open) => exit::APPLICATION_OPEN,
         Conclusion::Failed(FailureKind::Other) => exit::FAILED,
     }
 }

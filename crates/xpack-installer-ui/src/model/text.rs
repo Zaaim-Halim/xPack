@@ -128,6 +128,7 @@ pub enum Key {
     Browse,
     Retry,
     Launch,
+    CloseApplication,
 
     WelcomeTitle,
     WelcomeHeadline,
@@ -161,6 +162,10 @@ pub enum Key {
     StatusNewerBody,
     StatusBusyHeading,
     StatusBusyBody,
+    StatusOpenHeading,
+    StatusOpenBody,
+    StatusOpenAsked,
+    StatusOpenNotAsked,
     StatusNotAbsolute,
     StatusNotWritable,
     StatusTooDeep,
@@ -223,7 +228,7 @@ pub enum Key {
 impl Key {
     /// Every key, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 89] = {
+    pub(crate) const ALL: [Self; 94] = {
         use Key::*;
         [
             WindowTitle,
@@ -235,6 +240,7 @@ impl Key {
             Browse,
             Retry,
             Launch,
+            CloseApplication,
             WelcomeTitle,
             WelcomeHeadline,
             WelcomeByline,
@@ -264,6 +270,10 @@ impl Key {
             StatusNewerBody,
             StatusBusyHeading,
             StatusBusyBody,
+            StatusOpenHeading,
+            StatusOpenBody,
+            StatusOpenAsked,
+            StatusOpenNotAsked,
             StatusNotAbsolute,
             StatusNotWritable,
             StatusTooDeep,
@@ -341,6 +351,7 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::Browse => either("Browse…", "Choose…"),
         Key::Retry => Some("Retry"),
         Key::Launch => either("Launch {name}", "Open {name}"),
+        Key::CloseApplication => Some("Close it for me"),
 
         Key::WelcomeTitle => either("Welcome to the {name} Setup Wizard", "Welcome to {name}"),
         Key::WelcomeHeadline => either("{name} {version}", "{name}"),
@@ -391,6 +402,15 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::StatusNewerBody => Some("Setup can't replace it with {new}."),
         Key::StatusBusyHeading => Some("{name} is busy."),
         Key::StatusBusyBody => Some("It is being updated or run by another xPack operation."),
+        Key::StatusOpenHeading => Some("{name} is open."),
+        // Short: the status line holds three lines beside its button.
+        Key::StatusOpenBody => Some("Close it, then choose Install. Nothing has changed."),
+        Key::StatusOpenAsked => {
+            Some("It was asked to close; choose Install once it has. Nothing has changed.")
+        }
+        Key::StatusOpenNotAsked => {
+            Some("It could not be asked to close. Close it, then choose Install.")
+        }
         Key::StatusNotAbsolute => Some("Enter a full folder path."),
         Key::StatusNotWritable => {
             Some("You can't install to this folder. Choose a folder in your user account.")

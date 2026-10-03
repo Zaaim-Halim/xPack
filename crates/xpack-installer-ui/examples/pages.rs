@@ -30,6 +30,10 @@ impl Engine for Fixed {
     fn launch(&self, _: &Path) -> Result<(), Error> {
         Ok(())
     }
+
+    fn close_application(&self, _: &Path) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 fn version(text: &str) -> Version {
@@ -131,6 +135,18 @@ fn main() {
         command_off_path: Some(PathBuf::from("/Users/demo/.local/bin")),
     }));
     states.push(("6-finish", done, nothing.clone()));
+
+    // Refused because the application is open, and then asked to close.
+    let mut open = at(Page::Ready, &nothing);
+    open.advance();
+    open.finished(Err(Failure {
+        kind: FailureKind::Open,
+        message: "Demo is running; close it, then try again".into(),
+    }));
+    let mut asked = open.clone();
+    asked.asked_to_close(true);
+    states.push(("4-ready-open", open, nothing.clone()));
+    states.push(("4-ready-open-asked", asked, nothing.clone()));
 
     let mut failed = at(Page::Ready, &nothing);
     failed.advance();

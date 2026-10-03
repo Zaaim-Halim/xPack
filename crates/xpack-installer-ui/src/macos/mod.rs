@@ -329,6 +329,11 @@ impl App {
         self.session.launch_existing(&self.dialogs);
     }
 
+    fn close_application(&mut self) {
+        let update = self.session.close_application();
+        self.apply(update);
+    }
+
     fn toggle(&mut self, change: impl FnOnce(&mut Wizard)) {
         let update = self.session.change(change);
         self.apply(update);

@@ -239,6 +239,7 @@ impl App {
                 self.session.launch_existing(&self.dialogs);
                 Update::Nothing
             }
+            Action::CloseApplication => self.session.close_application(),
             Action::Accept => {
                 let on = is_checked(&self.controls.accept);
                 self.session.change(|wizard| wizard.set_accepted(on))

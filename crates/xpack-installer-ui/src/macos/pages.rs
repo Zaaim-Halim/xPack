@@ -266,8 +266,9 @@ impl App {
             Severity::Warning => ("⚠", NSColor::systemOrangeColor()),
             Severity::Error => ("✕", NSColor::systemRedColor()),
         };
-        let has_button =
-            buttons.retry != Visibility::Hidden || buttons.launch_existing != Visibility::Hidden;
+        let has_button = buttons.retry != Visibility::Hidden
+            || buttons.launch_existing != Visibility::Hidden
+            || buttons.close_application != Visibility::Hidden;
         let text_width = if has_button { width - 120.0 } else { width } - 22.0;
 
         y -= 48.0;
@@ -290,6 +291,8 @@ impl App {
             side(Key::Retry, sel!(retry:));
         } else if buttons.launch_existing != Visibility::Hidden {
             side(Key::Launch, sel!(launchExisting:));
+        } else if buttons.close_application != Visibility::Hidden {
+            side(Key::CloseApplication, sel!(closeApplication:));
         }
         y
     }

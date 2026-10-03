@@ -44,6 +44,11 @@ pub enum Existing {
     Newer(Version),
     /// Another xPack operation holds the installation.
     Busy,
+    /// The application, or another of its programs, is running, and this
+    /// install replaces xPack's programs, which needs it closed. Found by an
+    /// install that was refused for it, having changed nothing; installing
+    /// again once it is closed goes ahead.
+    Open,
     /// The installation could not be read, in the words of the error.
     Unreadable(String),
 }
@@ -51,7 +56,7 @@ pub enum Existing {
 impl Existing {
     /// Whether installing would go ahead.
     pub fn allows_install(&self) -> bool {
-        matches!(self, Self::Nothing | Self::Older(_) | Self::Inactive | Self::Damaged)
+        matches!(self, Self::Nothing | Self::Older(_) | Self::Inactive | Self::Damaged | Self::Open)
     }
 
     /// Whether this would be the first installation here.

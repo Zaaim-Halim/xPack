@@ -39,6 +39,17 @@ impl InstallKind {
     }
 }
 
+/// The one button a status line can have beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// Retry, beside a busy installation.
+    Retry,
+    /// Start what is already installed.
+    Launch,
+    /// Ask the running application to close.
+    CloseApplication,
+}
+
 /// The status line, and what it allows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -50,10 +61,8 @@ pub struct Status {
     pub body: String,
     /// Whether installing may go ahead.
     pub allows_install: bool,
-    /// Whether a Retry button belongs beside it.
-    pub offers_retry: bool,
-    /// Whether to offer starting what is already installed.
-    pub offers_launch: bool,
+    /// The button beside it, if one belongs there.
+    pub offer: Option<Offer>,
 }
 
 impl Status {
@@ -67,8 +76,7 @@ impl Status {
             heading: None,
             body,
             allows_install: false,
-            offers_retry: false,
-            offers_launch: false,
+            offer: None,
         };
 
         let Some(inspection) = inspection else {
@@ -100,7 +108,7 @@ impl Status {
             ),
             Existing::Damaged => allowed(Severity::Warning, texts.line(Key::StatusDamaged)),
             Existing::Installed => Self {
-                offers_launch: true,
+                offer: Some(Offer::Launch),
                 ..plain(Severity::Info, texts.line(Key::StatusInstalled))
             },
             Existing::Newer(newer) => Self {
@@ -111,8 +119,15 @@ impl Status {
             },
             Existing::Busy => Self {
                 heading: Some(texts.line(Key::StatusBusyHeading)),
-                offers_retry: true,
+                offer: Some(Offer::Retry),
                 ..plain(Severity::Warning, texts.line(Key::StatusBusyBody))
+            },
+            // Installing is allowed: the primary button is the retry, once
+            // the application is closed.
+            Existing::Open => Self {
+                heading: Some(texts.line(Key::StatusOpenHeading)),
+                offer: Some(Offer::CloseApplication),
+                ..allowed(Severity::Warning, texts.line(Key::StatusOpenBody))
             },
             Existing::Unreadable(message) => plain(Severity::Error, message.clone()),
         }
@@ -181,7 +196,7 @@ mod tests {
     fn the_same_version_installed_is_not_reinstalled_but_can_be_opened() {
         let status = status(Ok(Existing::Installed));
         assert!(!status.allows_install);
-        assert!(status.offers_launch);
+        assert_eq!(status.offer, Some(Offer::Launch));
     }
 
     #[test]
@@ -192,14 +207,14 @@ mod tests {
             status.heading.as_deref(),
             Some("A newer version (3.0.0) is already installed here.")
         );
-        assert!(!status.offers_retry);
+        assert_ne!(status.offer, Some(Offer::Retry));
     }
 
     #[test]
     fn a_busy_installation_blocks_and_offers_a_retry() {
         let status = status(Ok(Existing::Busy));
         assert!(!status.allows_install);
-        assert!(status.offers_retry);
+        assert_eq!(status.offer, Some(Offer::Retry));
     }
 
     #[test]

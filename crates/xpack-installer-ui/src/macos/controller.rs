@@ -82,6 +82,11 @@ define_class!(
             with_app(App::launch_existing);
         }
 
+        #[unsafe(method(closeApplication:))]
+        fn close_application(&self, _sender: Option<&AnyObject>) {
+            with_app(App::close_application);
+        }
+
         #[unsafe(method(toggleAccepted:))]
         fn toggle_accepted(&self, sender: Option<&AnyObject>) {
             let on = is_on(sender);

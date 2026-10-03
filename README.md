@@ -391,6 +391,14 @@ MyApp-1.3.0-windows-x64-Setup.exe --silent
 | `--log <FILE>` | Also write a log of the run. |
 | `--all-users` | Install for everyone on the computer, where the installer offers it. Needs administrator rights. |
 | `--only-me` | Install for the person running it only, where the installer offers the choice. |
+| `--wait-for-close <SECONDS>` | When the application is open and has to be closed for the install, wait this long for it (default 60), then give up with exit code `6`, having changed nothing. |
+| `--close-running` | When the application is open and has to be closed for the install, ask it to close, as closing its window would. It is never forced. |
+
+The application has to be closed only when the installer replaces xPack's own
+programs in the installation, which it does when it comes from a newer xPack
+than the one that installed them. The installer's window then says the
+application is open, offers to ask it to close, and installs when Install is
+chosen again.
 
 On Windows, `xpack installer` produces a windowed installer by default. A shell
 does not wait for a windowed program, so build installers that only scripts
@@ -596,7 +604,8 @@ application xPack is validated against.
 **Exit codes**, the same for `xpack` and every installer: `0` success, `1`
 failure, `2` bad command line, `3` a signature or checksum did not verify
 (never worth retrying), `4` another xPack operation is busy (worth retrying),
-`5` the user cancelled the installer.
+`5` the user cancelled the installer, `6` the application is open and has to
+be closed for the install (nothing was changed).
 
 ## Building and contributing
 

@@ -57,6 +57,10 @@ pub mod exit {
     pub const BUSY: u8 = 4;
     /// The person installing chose not to, before anything was changed.
     pub const CANCELLED: u8 = 5;
+    /// The application is open, and installing needs it closed. Nothing was
+    /// changed. Kept apart from [`BUSY`] because the remedy differs: that one
+    /// is waited out, this one needs the application closed.
+    pub const APPLICATION_OPEN: u8 = 6;
 }
 
 /// Maps a failure to the exit code a script should branch on.
@@ -70,8 +74,37 @@ pub fn exit_code_for(error: &Error) -> u8 {
     }
     match error {
         Error::Locked(_) => exit::BUSY,
+        Error::ApplicationRunning(_) => exit::APPLICATION_OPEN,
         _ => exit::FAILED,
     }
+}
+
+/// Asks the running copy of the application installed at `paths` to close.
+///
+/// The launcher that started it records its process, and that record is
+/// believed only while the launcher holds the instance lock: one left by a
+/// launcher that crashed names a process that may since be another program,
+/// which must never be asked to close. So nothing is asked unless the lock
+/// is held.
+///
+/// # Errors
+///
+/// When no running copy can be named, or asking it fails (on Windows, a
+/// program with no window cannot be asked).
+pub fn ask_to_close(paths: &InstallPaths) -> Result<()> {
+    /// The part of the launcher's record of the running copy needed here.
+    #[derive(serde::Deserialize)]
+    struct Record {
+        pid: u32,
+    }
+    let not_running =
+        || Error::invalid("closing the application", "no running copy of it can be named here");
+    if xpack_platform::InstanceLock::acquire(paths)?.is_some() {
+        return Err(not_running());
+    }
+    let record: Record =
+        xpack_core::atomic::read_json(&paths.instance_record_file()).map_err(|_| not_running())?;
+    xpack_platform::request_close(record.pid)
 }
 
 /// Where a root came from, which decides whether it may be changed.
@@ -507,6 +540,50 @@ impl VerifiedPayload {
         Ok(xpack_install::inspect(&self.paths(root)?, &self.manifest.application.version))
     }
 
+    /// Asks the running copy of the application installed under `root` to
+    /// close, the way closing its window would; never forces it, and does
+    /// not wait. See [`ask_to_close`].
+    pub fn ask_running_copy_to_close(&self, root: &Path) -> Result<()> {
+        ask_to_close(&self.paths(root)?)
+    }
+
+    /// [`Self::install_into`], waiting up to `wait` for the application to
+    /// close when the install is refused because it is open.
+    ///
+    /// Such a refusal changes nothing, so trying again is safe. With `close`,
+    /// the running copy is asked to close once, the first time; `waiting` is
+    /// called once then too, for the caller to say what it is waiting for.
+    /// Still open when `wait` runs out, the refusal is returned.
+    pub fn install_waiting_for_close(
+        &self,
+        request: &Request,
+        progress: &dyn ProgressReporter,
+        wait: std::time::Duration,
+        close: bool,
+        waiting: &mut dyn FnMut(),
+    ) -> Result<Outcome> {
+        let deadline = std::time::Instant::now() + wait;
+        let mut first = true;
+        loop {
+            match self.install_into(request, progress) {
+                Err(Error::ApplicationRunning(name)) => {
+                    if first {
+                        first = false;
+                        waiting();
+                        if close && let Err(error) = self.ask_running_copy_to_close(&request.root) {
+                            tracing::warn!(%error, "could not ask the application to close");
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::ApplicationRunning(name));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// Installs the application as `request` asks, reporting progress.
     pub fn install_into(
         &self,
@@ -744,6 +821,82 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program that keeps running until it is asked to stop, recorded the
+    /// way a launcher records the copy it started.
+    #[cfg(unix)]
+    fn recorded_running_program(paths: &InstallPaths) -> std::process::Child {
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::create_dir_all(paths.per_user_dir()).unwrap();
+        std::fs::write(paths.instance_record_file(), format!(r#"{{"pid":{}}}"#, child.id()))
+            .unwrap();
+        child
+    }
+
+    #[cfg(unix)]
+    fn ends_within(child: &mut std::process::Child, seconds: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_nobody_holds_the_lock_for_never_gets_its_process_asked_to_close() {
+        // Left by a launcher that crashed: the process it names may since be
+        // another program, and that one must not be closed.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = InstallPaths::new(dir.path(), "com.example.app").unwrap();
+        let mut innocent = recorded_running_program(&paths);
+
+        let refused = ask_to_close(&paths);
+
+        let survived = !ends_within(&mut innocent, 1);
+        let _ = innocent.kill();
+        let _ = innocent.wait();
+        assert!(refused.is_err(), "a stale record was believed");
+        assert!(survived, "a process named only by a stale record was closed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_running_copy_is_asked_to_close_while_its_launcher_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = InstallPaths::new(dir.path(), "com.example.app").unwrap();
+        let mut running = recorded_running_program(&paths);
+        let _launcher = xpack_platform::InstanceLock::acquire(&paths).unwrap().unwrap();
+
+        let asked = ask_to_close(&paths);
+
+        let closed = ends_within(&mut running, 5);
+        let _ = running.kill();
+        let _ = running.wait();
+        asked.unwrap();
+        assert!(closed, "the running copy was not asked to close");
+    }
+
+    #[test]
+    fn no_record_means_nothing_to_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = InstallPaths::new(dir.path(), "com.example.app").unwrap();
+        let _launcher = xpack_platform::InstanceLock::acquire(&paths).unwrap().unwrap();
+        assert!(ask_to_close(&paths).is_err());
+    }
+
+    #[test]
+    fn an_open_application_has_its_own_exit_code() {
+        assert_eq!(
+            exit_code_for(&Error::ApplicationRunning("Example".into())),
+            exit::APPLICATION_OPEN
+        );
+        assert_eq!(exit::APPLICATION_OPEN, 6);
+        assert_ne!(exit::APPLICATION_OPEN, exit::BUSY);
+    }
 
     #[test]
     fn a_request_nobody_was_asked_about_makes_what_the_installer_offers_ticked() {
