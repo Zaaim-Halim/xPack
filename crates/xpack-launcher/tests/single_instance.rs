@@ -331,7 +331,16 @@ fn a_start_that_arrives_while_the_first_is_still_starting_is_not_lost() {
 fn a_listed_command_runs_beside_the_running_copy_and_answers_for_itself() {
     let mut world = World::alongside(&["--status"]);
     world.start(&["window"]);
-    let record = fs::read(world.paths.instance_record_file()).unwrap();
+    // The launcher records the copy just after starting it, so the
+    // application can be up a moment before the record is.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let record = loop {
+        match fs::read(world.paths.instance_record_file()) {
+            Ok(record) => break record,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => panic!("the running copy was never recorded: {error}"),
+        }
+    };
 
     let status = world.start_and_wait(&["--status"]);
 
