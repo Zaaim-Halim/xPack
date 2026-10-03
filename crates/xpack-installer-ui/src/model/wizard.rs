@@ -1486,7 +1486,7 @@ mod tests {
         let mut wizard = wizard_with(commanding(true), Ok(Existing::Nothing));
         start_install(&mut wizard);
         wizard.finished(Ok(installed()));
-        assert!(wizard.finish_view().unwrap().command.is_empty());
+        assert_eq!(wizard.finish_view().unwrap().command, Vec::<String>::new());
     }
 
     // --- ready and installing -------------------------------------------------

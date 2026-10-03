@@ -619,7 +619,7 @@ mod tests {
                 Some("https://updates.example.com/myapp/windows-x64"),
             ),
         ];
-        assert!(colliding_urls(&packages).is_empty());
+        assert_eq!(colliding_urls(&packages), Vec::new());
     }
 
     #[test]
@@ -630,7 +630,7 @@ mod tests {
             described("com.example.app", Platform::new(Os::Linux, Arch::X64), None),
             described("com.example.app", Platform::new(Os::Windows, Arch::X64), None),
         ];
-        assert!(colliding_urls(&packages).is_empty());
+        assert_eq!(colliding_urls(&packages), Vec::new());
     }
 
     #[test]
@@ -678,6 +678,6 @@ mod tests {
             Platform::new(Os::Linux, Arch::X64),
             Some("https://updates.example.com/myapp/linux-x64"),
         )];
-        assert!(colliding_urls(&packages).is_empty());
+        assert_eq!(colliding_urls(&packages), Vec::new());
     }
 }

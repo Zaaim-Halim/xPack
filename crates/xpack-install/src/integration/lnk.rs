@@ -638,7 +638,7 @@ mod tests {
                 "the name is said to start past the end of the block"
             );
             // And the bytes there really are the name, not a coincidence.
-            assert!(!long_name_of(&item).is_empty());
+            assert_ne!(long_name_of(&item), "");
         }
     }
 

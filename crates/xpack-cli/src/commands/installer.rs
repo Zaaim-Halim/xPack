@@ -801,7 +801,7 @@ mod tests {
             let (installed, role) =
                 branded_identity(&names, stem).unwrap_or_else(|| panic!("{stem} is unrecognised"));
             assert!(installed.contains("Demo App"), "{stem} -> {installed}");
-            assert!(!role.is_empty());
+            assert_ne!(role, "", "{stem} has no role");
         }
         assert_eq!(branded_identity(&names, "something-else"), None);
     }

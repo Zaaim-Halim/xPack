@@ -279,7 +279,7 @@ fn an_application_that_does_not_ask_runs_as_many_copies_as_are_started() {
         "told of an inbox it cannot use: {:?}",
         world.starts()
     );
-    assert!(world.requests().is_empty());
+    assert_eq!(world.requests(), Vec::<serde_json::Value>::new());
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn a_command_running_with_no_copy_open_does_not_become_the_running_copy() {
     world.start(&["window"]);
 
     assert!(world.starts()[0].starts_with("start window|"), "{:?}", world.starts());
-    assert!(world.requests().is_empty());
+    assert_eq!(world.requests(), Vec::<serde_json::Value>::new());
 }
 
 #[test]

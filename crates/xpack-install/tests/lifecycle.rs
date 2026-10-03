@@ -1102,7 +1102,7 @@ fn a_package_that_asks_for_an_entry_gets_one_and_an_icon_beside_the_launcher() {
         xpack_install::DesktopOutcome::Done(paths) => paths.clone(),
         other => panic!("expected an entry to be created, got {other:?}"),
     };
-    assert!(!created.is_empty());
+    assert_ne!(created, Vec::<std::path::PathBuf>::new(), "no entry was written");
     for path in &created {
         assert!(path.exists(), "{} was reported but does not exist", path.display());
     }
