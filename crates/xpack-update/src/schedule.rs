@@ -74,15 +74,17 @@ mod tests {
         // plus a quarter.
         assert!(next.iter().all(|&t| t >= now + DAY && t <= now + DAY + DAY / 4));
 
-        // Spread across the window rather than bunched: no single minute
-        // holds more than a small share of the fleet. Evenly spread, a
-        // six-hour window of minutes holds under one machine each.
+        // Spread across the window rather than bunched. A thousand machines
+        // over the window's 361 minutes average under three a minute, and the
+        // busiest minute of an honest draw averages about nine; more than 20
+        // happens by chance about once in a thousand million runs. A fleet
+        // that does not spread puts all 1000 in one.
         let mut per_minute = std::collections::BTreeMap::new();
         for t in &next {
             *per_minute.entry(t / 60).or_insert(0u32) += 1;
         }
         let busiest = per_minute.values().copied().max().unwrap();
-        assert!(busiest <= 10, "{busiest} of 1000 machines asked in the same minute");
+        assert!(busiest <= 20, "{busiest} of 1000 machines asked in the same minute");
         assert!(per_minute.len() > 200, "only {} distinct minutes", per_minute.len());
     }
 }
