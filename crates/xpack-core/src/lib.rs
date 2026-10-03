@@ -8,6 +8,7 @@
 pub mod atomic;
 pub mod digest;
 pub mod error;
+pub mod hooks;
 pub mod manifest;
 pub mod naming;
 pub mod output;

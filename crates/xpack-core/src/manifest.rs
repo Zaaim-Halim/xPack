@@ -43,7 +43,8 @@ pub const PAYLOAD_PREFIX: &str = "payload/";
 /// | 3 | `commands` |
 /// | 4 | `instance` |
 /// | 5 | `instance.alongside` |
-pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 5;
+/// | 6 | `hooks` |
+pub const MAX_SUPPORTED_FORMAT_VERSION: u32 = 6;
 
 /// Stands for the installed version directory in launch arguments and
 /// environment values.
@@ -749,6 +750,12 @@ pub struct Manifest {
     /// Requires [`FormatVersion`] 4 when it asks for anything.
     #[serde(default, skip_serializing_if = "InstanceSpec::is_default")]
     pub instance: InstanceSpec,
+
+    /// Scripts run at chosen moments of the installation's life, and what
+    /// they may do. Left out entirely when there are none, so a package
+    /// without hooks is the one every earlier release could read.
+    #[serde(default, skip_serializing_if = "crate::hooks::Hooks::is_empty")]
+    pub hooks: crate::hooks::Hooks,
     /// Payload inventory.
     pub payload: PayloadSpec,
     /// Hex-encoded public key the publisher declares as theirs.
@@ -809,7 +816,9 @@ impl Manifest {
     /// What a packager should declare: anything higher shuts out
     /// installations that could have read the package.
     pub fn required_format_version(&self) -> FormatVersion {
-        if !self.instance.alongside.is_empty() {
+        if !self.hooks.is_empty() {
+            FormatVersion(6)
+        } else if !self.instance.alongside.is_empty() {
             FormatVersion(5)
         } else if self.instance.single {
             FormatVersion(4)
@@ -859,6 +868,7 @@ impl Manifest {
             }
         }
         self.instance.validate()?;
+        self.hooks.validate(&self.payload)?;
 
         // A manifest must declare every format it relies on. One that claims
         // an older format than its contents need tells an older reader it can
@@ -1262,6 +1272,7 @@ mod tests {
             command: None,
             commands: Vec::new(),
             instance: InstanceSpec::default(),
+            hooks: crate::hooks::Hooks::default(),
         }
     }
 
@@ -1790,6 +1801,53 @@ mod tests {
         assert!(with(true, &["--add Coffee"]).unwrap_err().contains("not one argument"));
         assert!(with(true, &["--export=FILE"]).unwrap_err().contains("not one argument"));
         assert!(with(true, &["--status", "--status"]).unwrap_err().contains("listed twice"));
+    }
+
+    /// The sample with a hook script in its payload and a hook naming it.
+    fn with_a_hook() -> Manifest {
+        let mut manifest = sample();
+        manifest.payload.files.push(PayloadFile {
+            path: "xpack/hooks/install.js".into(),
+            size: 120,
+            sha256: crate::Sha256Digest::from_bytes([3; crate::SHA256_LEN]),
+            mode: None,
+        });
+        manifest.payload.total_size += 120;
+        manifest.hooks = serde_json::from_str(r#"{"install":"xpack/hooks/install.js"}"#).unwrap();
+        manifest.format_version = manifest.required_format_version();
+        manifest
+    }
+
+    #[test]
+    fn hooks_survive_the_signed_bytes_and_need_format_6() {
+        let manifest = with_a_hook();
+        assert_eq!(manifest.required_format_version(), FormatVersion(6));
+        let bytes = manifest.to_signed_bytes().unwrap();
+        assert_eq!(Manifest::from_slice(&bytes).unwrap(), manifest);
+
+        // Declaring 5 would tell a 0.7.0 launcher it can start this.
+        let mut understated = manifest;
+        understated.format_version = FormatVersion(5);
+        assert!(understated.validate().unwrap_err().to_string().contains("need at least 6"));
+    }
+
+    #[test]
+    fn a_package_without_hooks_does_not_mention_them_or_need_format_6() {
+        let manifest = sample();
+        assert!(manifest.required_format_version() < FormatVersion(6));
+        let json = String::from_utf8(manifest.to_signed_bytes().unwrap()).unwrap();
+        assert!(!json.contains("hooks"), "{json}");
+    }
+
+    #[test]
+    fn a_manifest_with_a_broken_hook_is_refused_when_read() {
+        // Validation runs on every manifest read, so a signed package that
+        // never went through `xpack pack` is held to the same rules.
+        let mut manifest = with_a_hook();
+        manifest.hooks.install[0].script = "xpack/hooks/missing.js".into();
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let error = Manifest::from_slice(&bytes).unwrap_err().to_string();
+        assert!(error.contains("not a file of the payload"), "{error}");
     }
 
     #[test]

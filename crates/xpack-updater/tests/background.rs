@@ -91,6 +91,7 @@ fn build_package(dir: &Path, key: &KeyPair, version: &str) -> PathBuf {
         command: None,
         commands: Vec::new(),
         instance: xpack_core::InstanceSpec::default(),
+        hooks: xpack_core::hooks::Hooks::default(),
     };
     let out = dir.join(format!("demo-{version}.xpkg"));
     PackageBuilder::new(&payload, manifest).build(&out, key).unwrap();

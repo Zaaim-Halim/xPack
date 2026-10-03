@@ -1039,6 +1039,7 @@ mod tests {
             command: None,
             commands: Vec::new(),
             instance: xpack_core::InstanceSpec::default(),
+            hooks: xpack_core::hooks::Hooks::default(),
         }
     }
 }

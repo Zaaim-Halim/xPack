@@ -277,6 +277,15 @@ impl InstallPaths {
         self.per_user_dir().join("running.lock")
     }
 
+    /// The hook record: one line per hook run, appended and never rewritten.
+    ///
+    /// Apart from the state file on purpose: that is replaced whole and can
+    /// be restored from its backup after a crash, and a restored state must
+    /// never forget that a hook ran.
+    pub fn hook_record_file(&self) -> PathBuf {
+        self.state_dir().join("hooks.jsonl")
+    }
+
     /// The record of a replacement of the runtime programs in progress.
     ///
     /// Written before the first program moves and removed after the last, so

@@ -119,6 +119,7 @@ impl ProjectConfig {
             command: self.command.clone(),
             commands: self.commands.clone(),
             instance: self.instance.clone(),
+            hooks: xpack_core::hooks::Hooks::default(),
         };
         manifest.format_version = manifest.required_format_version();
         manifest

@@ -65,6 +65,7 @@ fn install(dir: &Path, terminal: bool) -> InstallPaths {
         command: None,
         commands: Vec::new(),
         instance: xpack_core::InstanceSpec::default(),
+        hooks: xpack_core::hooks::Hooks::default(),
     };
     let package = dir.join("app.xpkg");
     PackageBuilder::new(&payload, manifest).build(&package, &key).unwrap();

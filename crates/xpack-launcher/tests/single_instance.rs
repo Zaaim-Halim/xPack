@@ -112,6 +112,7 @@ impl World {
             command: None,
             commands: Vec::new(),
             instance: self.instance.clone(),
+            hooks: xpack_core::hooks::Hooks::default(),
         };
         manifest.format_version = manifest.required_format_version();
         let package = build.join("app.xpkg");

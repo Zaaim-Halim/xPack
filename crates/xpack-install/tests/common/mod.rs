@@ -151,6 +151,7 @@ fn build_package_full(
             })
             .collect(),
         instance: xpack_core::InstanceSpec { single, alongside: Vec::new() },
+        hooks: xpack_core::hooks::Hooks::default(),
     };
     // The format a command needs; what `xpack pack` would declare.
     let manifest = Manifest { format_version: manifest.required_format_version(), ..manifest };
