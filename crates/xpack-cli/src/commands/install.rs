@@ -272,6 +272,9 @@ fn report_binary(what: &str, outcome: Option<LauncherOutcome>, path: &std::path:
     match outcome {
         Some(LauncherOutcome::Installed) => crate::output::field(what, path.display()),
         Some(LauncherOutcome::AlreadyPresent) => crate::output::field(what, "already present"),
+        Some(LauncherOutcome::Replaced) => {
+            crate::output::field(what, format!("{} (replaced by this release's)", path.display()));
+        }
         None => crate::output::field(what, "none"),
     }
 }

@@ -103,29 +103,45 @@ fn the_other_scope_is_refused_and_nothing_changes() {
 }
 
 #[test]
-fn a_machine_wide_install_replaces_the_launcher_and_a_users_does_not() {
-    for (scope, replaced) in [(InstallScope::Machine, true), (InstallScope::User, false)] {
-        let world = World::new();
-        world.install("1.0.0", &world.options(scope)).unwrap();
-        let launcher = world.paths.launcher_file_named(&installed_names());
-        std::fs::write(&launcher, "an older launcher").unwrap();
+fn programs_from_an_older_release_are_replaced_in_either_scope_and_the_same_release_never() {
+    for scope in [InstallScope::Machine, InstallScope::User] {
+        for (recorded, replaced) in [("0.0.1", true), (xpack_core::XPACK_RELEASE, false)] {
+            let world = World::new();
+            world.install("1.0.0", &world.options(scope)).unwrap();
+            let launcher = world.paths.launcher_file_named(&installed_names());
+            std::fs::write(&launcher, "an older launcher").unwrap();
+            let lock = InstallLock::acquire(&world.paths).unwrap();
+            let mut state = lock.load_state().unwrap().value;
+            state.runtime_version = Some(v(recorded));
+            lock.save_state(&state).unwrap();
+            drop(lock);
 
-        world.install("1.1.0", &world.options(scope)).unwrap();
+            world.install("1.1.0", &world.options(scope)).unwrap();
 
-        let now = std::fs::read_to_string(&launcher).unwrap();
-        assert_eq!(now != "an older launcher", replaced, "{scope:?}: {now}");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&launcher).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "{scope:?}: not executable");
+            let now = std::fs::read_to_string(&launcher).unwrap();
+            assert_eq!(now != "an older launcher", replaced, "{scope:?}, {recorded}: {now}");
+            assert_eq!(
+                world.state().runtime_version,
+                Some(v(if replaced { xpack_core::XPACK_RELEASE } else { recorded })),
+                "{scope:?}, {recorded}"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&launcher).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111, "{scope:?}: not executable");
+            }
+            let leftovers: Vec<_> = std::fs::read_dir(world.paths.root())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    name.contains("xpack-new") || name.contains("xpack-old")
+                })
+                .collect();
+            assert!(leftovers.is_empty(), "{scope:?}: {leftovers:?}");
+            assert!(!world.paths.runtime_replacement_journal_file().exists());
         }
-        let leftovers: Vec<_> = std::fs::read_dir(world.paths.root())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains("xpack-new"))
-            .collect();
-        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }
 

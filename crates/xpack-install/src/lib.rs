@@ -45,6 +45,7 @@ pub mod inspect;
 pub mod installer;
 pub mod integration;
 pub mod recovery;
+pub mod runtime;
 pub mod trust;
 
 pub use inspect::{Existing, inspect};

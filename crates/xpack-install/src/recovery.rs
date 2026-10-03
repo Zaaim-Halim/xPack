@@ -36,6 +36,9 @@ pub struct RecoveryReport {
     pub completed_rollback: Option<String>,
     /// Whether the phase was left untouched deliberately.
     pub left_in_place: bool,
+    /// A replacement of xPack's programs that a process stopped part way
+    /// through, and what was done about it.
+    pub programs: Option<crate::runtime::Resolution>,
 }
 
 impl RecoveryReport {
@@ -53,6 +56,29 @@ pub fn recover(lock: &InstallLock) -> Result<RecoveryReport> {
     let Some(id) = paths.application_id() else {
         return Ok(report);
     };
+
+    // First, whatever the phase: the programs that run everything else must
+    // be one release's, complete, before anything relies on them. A journal
+    // that cannot be resolved fails recovery, and with it whatever operation
+    // or start asked, rather than run a mixture.
+    report.programs = crate::runtime::resolve_interrupted(paths, &mut |journal| {
+        let mut state = lock.load_or_new_state(id)?;
+        state.runtime_version = Some(journal.to.clone());
+        // The formats the new launcher reads are this build's only if this
+        // build is that release; otherwise the record is left as it was,
+        // which can only refuse a package, never let one in.
+        let launcher = paths.launcher_file_named(&state.binary_names());
+        let replaced_launcher = journal
+            .entries
+            .iter()
+            .any(|entry| journal.destination(paths.root(), entry) == launcher);
+        if replaced_launcher && xpack_core::xpack_release().is_ok_and(|this| this == journal.to) {
+            state.launcher_format_version =
+                Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION);
+        }
+        lock.save_state(&state)
+    })?;
+
     let mut state = lock.load_or_new_state(id)?;
 
     match state.update.clone() {

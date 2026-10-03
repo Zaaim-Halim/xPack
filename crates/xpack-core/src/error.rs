@@ -104,6 +104,15 @@ pub enum Error {
     #[error("another xpack operation is already running for this installation ({0})")]
     Locked(String),
 
+    /// The application, or another of its installation's programs, is
+    /// running, and the operation needs it closed: replacing xPack's
+    /// programs in an installation for one user.
+    ///
+    /// Kept apart from [`Self::Locked`] because the remedy differs: that one
+    /// is waited out, this one needs someone to close a window.
+    #[error("{0} is running; close it, then try again")]
+    ApplicationRunning(String),
+
     /// The operation is not implemented for the current platform.
     #[error("{0} is not supported on this platform yet")]
     Unsupported(String),

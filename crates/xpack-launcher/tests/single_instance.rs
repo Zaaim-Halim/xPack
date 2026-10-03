@@ -566,3 +566,20 @@ fn a_start_that_meets_a_replacement_still_going_says_so_and_starts_nothing() {
     );
     assert!(world.starts().is_empty(), "it started anyway: {:?}", world.starts());
 }
+
+#[test]
+fn a_start_that_finds_a_replacement_it_cannot_resolve_starts_nothing() {
+    // A replacement of the programs stopped part way, and its record cannot
+    // be read: running whatever mixture is on disk is the one thing not done.
+    let world = World::new(false);
+    fs::write(world.paths.runtime_replacement_journal_file(), b"{ torn").unwrap();
+
+    let output = world.start_and_wait(&[]);
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(world.starts().is_empty(), "it started anyway: {:?}", world.starts());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("run the installer again"),
+        "{output:?}"
+    );
+}

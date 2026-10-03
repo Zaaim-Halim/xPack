@@ -11,6 +11,8 @@ use xpack_package::VerifiedPackage;
 use xpack_platform::InstallLock;
 
 use crate::recovery::{self, RecoveryReport};
+use crate::runtime::Program;
+use xpack_core::RuntimeChange;
 
 /// Choices a caller makes when installing.
 #[derive(Debug, Clone, Default)]
@@ -121,6 +123,9 @@ pub enum LauncherOutcome {
     Installed,
     /// A launcher was already there and was left untouched.
     AlreadyPresent,
+    /// One was there, from an older xPack release, and was replaced with
+    /// this release's, together with the rest of xPack's programs.
+    Replaced,
 }
 
 /// The result of a successful install.
@@ -338,12 +343,12 @@ impl<'lock> Installer<'lock> {
         // Before anything is written, so a refusal leaves no trace.
         Self::ensure_same_scope(&state, first_installation, options.scope)?;
         state.scope = options.scope;
+        // Before anything is written: which of xPack's programs this install
+        // replaces, whether anything stops it, and whether a launcher it
+        // leaves in place can read the package.
+        let (release, replacing, _nothing_runs) =
+            self.prepare_programs(options, &manifest, &state)?;
         Self::apply_choices(&state, paths, options)?;
-        if options.scope == xpack_core::InstallScope::User {
-            // A machine-wide install replaces the launcher, so whatever is
-            // there now does not have to read this package.
-            Self::ensure_launcher_reads(&state, paths, &manifest)?;
-        }
 
         // The command the version being replaced put in place, so one this
         // package renames or drops is taken away rather than left behind.
@@ -398,6 +403,13 @@ impl<'lock> Installer<'lock> {
             state.ensure_not_downgrade(&version, options.allow_downgrade)?;
         }
 
+        // After every refusal and before the new version is written: a
+        // refused install changes nothing, and the format check above trusts
+        // the new launcher to read the package, so the version must never be
+        // installed if that launcher did not arrive. Newer programs left by
+        // an install that fails later read every older format.
+        self.replace_programs(&replacing, &release, &mut state)?;
+
         // Extraction happens in staging and is promoted only once every hash
         // has matched, so a crash can never leave a half-written tree under
         // `versions/` that looks complete.
@@ -430,7 +442,7 @@ impl<'lock> Installer<'lock> {
 
         // Before activation, so that a version becoming current always has an
         // entry point by the time anything could try to start it.
-        let placed = self.place_binaries(options, &manifest)?;
+        let placed = self.place_binaries(options, &manifest, &replacing, &release)?;
         if let Some(key) = &options.seal_key
             && options.scope == xpack_core::InstallScope::User
         {
@@ -790,12 +802,20 @@ impl<'lock> Installer<'lock> {
         &self,
         options: &InstallOptions,
         manifest: &xpack_core::Manifest,
+        replacing: &[Replacement],
+        release: &Version,
     ) -> Result<Placed> {
         let shared = options.scope == xpack_core::InstallScope::Machine;
+        // Whether any of xPack's programs was here before this install: if one
+        // was and is not replaced, it still comes from its own release, and
+        // placing others beside it must not record this one.
+        let had_programs = self.has_any_program();
+        // Each is placed where it is missing and left where it is not; the
+        // ones this install replaced already are reported as such.
         let place = |source: &Option<PathBuf>, how: fn(&Self, &Path) -> Result<LauncherOutcome>| {
             source.as_deref().map(|source| how(self, source)).transpose()
         };
-        Ok(Placed {
+        let mut placed = Placed {
             launcher: place(&options.launcher, Self::install_launcher)?,
             gui_launcher: place(&options.gui_launcher, Self::install_gui_launcher)?,
             updater: if shared { None } else { place(&options.updater, Self::install_updater)? },
@@ -805,7 +825,173 @@ impl<'lock> Installer<'lock> {
             } else {
                 place(&options.notifier, Self::install_notifier)?
             },
-        })
+        };
+
+        if !replacing.is_empty() {
+            for replaced in replacing {
+                let outcome = Some(LauncherOutcome::Replaced);
+                match replaced.slot {
+                    Slot::Launcher => placed.launcher = outcome,
+                    Slot::GuiLauncher => placed.gui_launcher = outcome,
+                    Slot::Updater => placed.updater = outcome,
+                    Slot::Uninstaller => placed.uninstaller = outcome,
+                    Slot::Notifier => placed.notifier = outcome,
+                    Slot::CommandCopy => {}
+                }
+            }
+        } else if placed.any_installed() && !had_programs {
+            // A first installation: every program here is this release's.
+            self.record_runtime(release, false)?;
+        }
+        Ok(placed)
+    }
+
+    /// Decides, before anything is written, which of xPack's programs this
+    /// install replaces with its newer ones, and refuses the install when it
+    /// cannot: something of a per-user installation is running, or a launcher
+    /// it leaves in place cannot read the package.
+    ///
+    /// The presence lock comes back held alone when programs are replaced in
+    /// an installation for one user: no launcher may start until they are,
+    /// so the caller keeps it for the rest of the install.
+    fn prepare_programs(
+        &self,
+        options: &InstallOptions,
+        manifest: &xpack_core::Manifest,
+        state: &InstallState,
+    ) -> Result<(Version, Vec<Replacement>, Option<xpack_platform::PresenceLock>)> {
+        let paths = self.lock.paths();
+        let release = xpack_core::xpack_release()?;
+        let replacing = self.programs_to_replace(options, manifest, state, &release);
+        let alone = if !replacing.is_empty() && options.scope == xpack_core::InstallScope::User {
+            Some(ensure_nothing_runs(paths, &replacing, &manifest.application.name)?)
+        } else {
+            None
+        };
+        // A launcher this install replaces does not have to read the package;
+        // one it leaves in place does.
+        if !replaces_every_launcher(state, paths, &replacing) {
+            Self::ensure_launcher_reads(state, paths, manifest)?;
+        }
+        Ok((release, replacing, alone))
+    }
+
+    /// Whether any of xPack's programs is in the installation, under the names
+    /// it uses.
+    fn has_any_program(&self) -> bool {
+        let paths = self.lock.paths();
+        let names = self.binary_names();
+        [
+            paths.launcher_file_named(&names),
+            paths.gui_launcher_file_named(&names),
+            paths.updater_file_named(&names),
+            paths.uninstaller_file_named(&names),
+            paths.notifier_file_named(&names),
+        ]
+        .iter()
+        .any(|path| path.exists())
+    }
+
+    /// Replaces `replacing` with this release's programs, all or none, and
+    /// records the release: on disk, and in `state`, the install's own copy,
+    /// which it saves again later and would otherwise put the old record
+    /// back with. See [`crate::runtime`].
+    fn replace_programs(
+        &self,
+        replacing: &[Replacement],
+        release: &Version,
+        state: &mut InstallState,
+    ) -> Result<()> {
+        if replacing.is_empty() {
+            return Ok(());
+        }
+        let from = self.load_state()?.runtime_version;
+        let programs: Vec<_> = replacing.iter().map(|r| r.program.clone()).collect();
+        let launcher = replacing.iter().any(|r| r.slot == Slot::Launcher);
+        crate::runtime::replace(self.lock.paths(), &programs, from, release.clone(), &mut || {
+            self.record_runtime(release, launcher)
+        })?;
+        state.runtime_version = Some(release.clone());
+        if launcher {
+            state.launcher_format_version =
+                Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION);
+        }
+        tracing::info!(%release, "replaced xPack's programs with this release's");
+        Ok(())
+    }
+
+    /// Records that the installation's programs are this release's, and,
+    /// when the launcher was among them, the formats it reads.
+    fn record_runtime(&self, release: &Version, launcher: bool) -> Result<()> {
+        let mut state = self.load_state()?;
+        state.runtime_version = Some(release.clone());
+        if launcher {
+            state.launcher_format_version =
+                Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION);
+        }
+        self.lock.save_state(&state)
+    }
+
+    /// The programs already in the installation that this install replaces:
+    /// those it supplies a newer release of, where one is already in place.
+    ///
+    /// None unless the installation's programs come from an older release
+    /// (or say nothing of theirs): a newer installation keeps its own, and
+    /// the same release has nothing to change. A program not in place is
+    /// not replaced but placed, as on a first installation.
+    fn programs_to_replace(
+        &self,
+        options: &InstallOptions,
+        manifest: &xpack_core::Manifest,
+        state: &InstallState,
+        release: &Version,
+    ) -> Vec<Replacement> {
+        if state.runtime_change(release) != RuntimeChange::Upgrade {
+            return Vec::new();
+        }
+        let paths = self.lock.paths();
+        let names = state.binary_names();
+        let shared = options.scope == xpack_core::InstallScope::Machine;
+        let notifier_wanted = !shared && Self::notifier_is_wanted(manifest);
+        let candidates = [
+            (Slot::Launcher, &options.launcher, paths.launcher_file_named(&names), true),
+            (Slot::GuiLauncher, &options.gui_launcher, paths.gui_launcher_file_named(&names), true),
+            (Slot::Updater, &options.updater, paths.updater_file_named(&names), !shared),
+            (Slot::Uninstaller, &options.uninstaller, paths.uninstaller_file_named(&names), true),
+            (Slot::Notifier, &options.notifier, paths.notifier_file_named(&names), notifier_wanted),
+        ];
+        let mut replacing: Vec<Replacement> = Vec::new();
+        for (slot, source, destination, wanted) in candidates {
+            // Where there is one build, the windowed launcher's name is the
+            // console one's; the file is replaced once, as the launcher.
+            let listed = replacing.iter().any(|r| r.program.destination == destination);
+            if let Some(source) = source
+                && wanted
+                && destination.exists()
+                && !listed
+            {
+                replacing.push(Replacement {
+                    slot,
+                    program: Program { destination, source: source.clone() },
+                });
+            }
+        }
+        // On Windows each command is a copy of the console launcher in the
+        // command directory, and runs as one: it is replaced with it.
+        if cfg!(windows)
+            && let Some(launcher) = &options.launcher
+        {
+            for command in previous_commands(paths, state) {
+                let copy = command.command_dir.join(format!("{}.exe", command.name));
+                if copy.exists() {
+                    replacing.push(Replacement {
+                        slot: Slot::CommandCopy,
+                        program: Program { destination: copy, source: launcher.clone() },
+                    });
+                }
+            }
+        }
+        replacing
     }
 
     /// Refuses installing for one scope into an installation made for the
@@ -833,22 +1019,13 @@ impl<'lock> Installer<'lock> {
         self.load_state().map_or(xpack_core::InstallScope::User, |state| state.scope)
     }
 
-    /// Whether xPack's own programs are replaced when installed again.
+    /// Refuses a package the launcher already in the installation cannot read,
+    /// when this install leaves that launcher in place.
     ///
-    /// In a machine-wide installation, which only an administrator writes to:
-    /// an old launcher would otherwise stay for good, and the file can be
-    /// replaced safely even while it runs (see [`Self::install_binary`]). In
-    /// one user's installation they are placed only when absent.
-    fn replaces_binaries(&self) -> bool {
-        self.scope() == xpack_core::InstallScope::Machine
-    }
-
-    /// Refuses a package the launcher already in the installation cannot read.
-    ///
-    /// Nothing replaces a launcher that is already there, neither an update
-    /// nor a newer installer run over the installation. A version in a format
-    /// that launcher does not know would be installed and made active, and
-    /// then never start: the launcher refuses the manifest, and a shortcut
+    /// An update never replaces a launcher, and an installer replaces it only
+    /// with a newer release's. A version in a format a launcher left in place
+    /// does not know would be installed and made active, and then never
+    /// start: the launcher refuses the manifest, and a shortcut
     /// start has nowhere to say so. Refused here instead, before anything is
     /// written, with what to do about it.
     ///
@@ -871,8 +1048,9 @@ impl<'lock> Installer<'lock> {
             "installation",
             format!(
                 "{} {} is package format {needs}, and the launcher already installed reads \
-                 format {reads} at most. An installed launcher is never replaced, so this \
-                 version would install and then not start. Uninstall {} and install it again.",
+                 format {reads} at most. This install does not replace it, so this version \
+                 would install and then not start. Run the newest installer of {}, which \
+                 replaces it.",
                 manifest.application.name, manifest.application.version, manifest.application.name
             ),
         ))
@@ -901,7 +1079,6 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().launcher_file_named(&self.binary_names()),
             "launcher",
-            self.replaces_binaries(),
         )?;
         if outcome == LauncherOutcome::Installed {
             let mut state = self.load_state()?;
@@ -1083,7 +1260,6 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().gui_launcher_file_named(&self.binary_names()),
             "windowed launcher",
-            self.replaces_binaries(),
         )
     }
 
@@ -1098,7 +1274,6 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().updater_file_named(&self.binary_names()),
             "updater",
-            self.replaces_binaries(),
         )
     }
 
@@ -1138,7 +1313,6 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().notifier_file_named(&self.binary_names()),
             "notifier",
-            self.replaces_binaries(),
         )
     }
 
@@ -1148,7 +1322,6 @@ impl<'lock> Installer<'lock> {
             source,
             &self.lock.paths().uninstaller_file_named(&self.binary_names()),
             "uninstaller",
-            self.replaces_binaries(),
         )
     }
 
@@ -1176,23 +1349,14 @@ impl<'lock> Installer<'lock> {
     /// Takes no `self`: the destination is already resolved by the caller, and
     /// the installation lock is held by whoever called into the installer.
     ///
-    /// With `replace`, one that is there is replaced instead. The new file is
-    /// written beside it, made executable, and renamed over it, so there is no
-    /// moment with a missing or unrunnable program. On Windows, which refuses
-    /// to replace a program that is running, the old one is renamed aside
-    /// first, which it allows, and removed at a later install.
-    fn install_binary(
-        source: &Path,
-        destination: &Path,
-        what: &str,
-        replace: bool,
-    ) -> Result<LauncherOutcome> {
-        if destination.exists() && !replace {
+    /// One that is there is left alone here. Replacing xPack's programs with a
+    /// newer release's is done for all of them at once, by the install that
+    /// supplies them, so that an installation never runs a mixture; see
+    /// [`crate::runtime`].
+    fn install_binary(source: &Path, destination: &Path, what: &str) -> Result<LauncherOutcome> {
+        if destination.exists() {
             tracing::debug!(path = %destination.display(), what, "already present");
             return Ok(LauncherOutcome::AlreadyPresent);
-        }
-        if destination.exists() {
-            return Self::replace_binary(source, destination, what);
         }
 
         let bytes = std::fs::read(source).map_err(|e| Error::io(source, e))?;
@@ -1215,38 +1379,6 @@ impl<'lock> Installer<'lock> {
         }
 
         tracing::info!(path = %destination.display(), what, "installed");
-        Ok(LauncherOutcome::Installed)
-    }
-
-    fn replace_binary(source: &Path, destination: &Path, what: &str) -> Result<LauncherOutcome> {
-        let bytes = std::fs::read(source).map_err(|e| Error::io(source, e))?;
-        if bytes.is_empty() {
-            return Err(Error::invalid(
-                what,
-                format!("{} is empty and cannot be an executable", source.display()),
-            ));
-        }
-        let name =
-            destination.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        remove_set_aside(destination, &name);
-
-        let incoming = destination.with_file_name(format!(".{name}.xpack-new"));
-        std::fs::write(&incoming, &bytes).map_err(|e| Error::io(&incoming, e))?;
-        if let Err(e) = set_executable(&incoming) {
-            let _ = std::fs::remove_file(&incoming);
-            return Err(e);
-        }
-        if cfg!(windows) {
-            let aside = destination.with_file_name(format!(
-                "{name}.xpack-old-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos())
-            ));
-            std::fs::rename(destination, &aside).map_err(|e| Error::io(destination, e))?;
-        }
-        std::fs::rename(&incoming, destination).map_err(|e| Error::io(destination, e))?;
-        tracing::info!(path = %destination.display(), what, "replaced");
         Ok(LauncherOutcome::Installed)
     }
 
@@ -1502,6 +1634,81 @@ struct Placed {
     notifier: Option<LauncherOutcome>,
 }
 
+impl Placed {
+    /// Whether any program was written where there was none.
+    fn any_installed(&self) -> bool {
+        [self.launcher, self.gui_launcher, self.updater, self.uninstaller, self.notifier]
+            .contains(&Some(LauncherOutcome::Installed))
+    }
+}
+
+/// Which of xPack's programs a [`Replacement`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Launcher,
+    GuiLauncher,
+    Updater,
+    Uninstaller,
+    Notifier,
+    /// A command's copy of the console launcher, on Windows.
+    CommandCopy,
+}
+
+/// A program already in the installation that this install replaces.
+#[derive(Debug, Clone)]
+struct Replacement {
+    slot: Slot,
+    program: Program,
+}
+
+/// Makes sure nothing of a per-user installation runs before its programs
+/// are replaced, and keeps it that way until they are.
+///
+/// Asked of three things, because no one of them sees every case: the
+/// presence lock, which every launcher of this release or later holds while
+/// it runs; the instance lock, which the first copy of a running application
+/// holds, with launchers older than the presence lock among them; and on
+/// Windows each program's file, which says whether it runs whoever started
+/// it. The presence lock is returned held alone, so no launcher starts until
+/// the caller drops it.
+fn ensure_nothing_runs(
+    paths: &xpack_core::InstallPaths,
+    replacing: &[Replacement],
+    application: &str,
+) -> Result<xpack_platform::PresenceLock> {
+    let running = || Error::ApplicationRunning(application.to_string());
+    let Some(alone) = xpack_platform::PresenceLock::exclusive(paths)? else {
+        return Err(running());
+    };
+    if xpack_platform::InstanceLock::acquire(paths)?.is_none() {
+        return Err(running());
+    }
+    for replacement in replacing {
+        if xpack_platform::program_in_use(&replacement.program.destination)? {
+            return Err(running());
+        }
+    }
+    Ok(alone)
+}
+
+/// Whether every launcher in the installation is among the programs being
+/// replaced, so none of the old ones has to read the incoming package. Both
+/// count: shortcuts on Windows start the windowed one.
+fn replaces_every_launcher(
+    state: &InstallState,
+    paths: &xpack_core::InstallPaths,
+    replacing: &[Replacement],
+) -> bool {
+    let names = state.binary_names();
+    let replaced = |path: &Path| replacing.iter().any(|r| r.program.destination == path);
+    // Where there is one build, the windowed launcher's name is the console
+    // one's: the same file, replaced once.
+    let console = paths.launcher_file_named(&names);
+    let windowed = paths.gui_launcher_file_named(&names);
+    let covered = |path: &Path| !path.exists() || replaced(path);
+    !replacing.is_empty() && covered(&console) && covered(&windowed)
+}
+
 fn describe_scope(scope: xpack_core::InstallScope) -> &'static str {
     match scope {
         xpack_core::InstallScope::User => "one user",
@@ -1511,21 +1718,6 @@ fn describe_scope(scope: xpack_core::InstallScope) -> &'static str {
 
 /// Removes copies of `name` an earlier replacement set aside, where nothing
 /// runs them any more. One still running stays until a later install.
-fn remove_set_aside(destination: &Path, name: &str) {
-    let Some(dir) = destination.parent() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let prefix = format!("{name}.xpack-old-");
-    for entry in entries.filter_map(std::result::Result::ok) {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
 /// Marks a file executable by its owner, and readable and executable by all.
 ///
 /// Windows has no equivalent bit — executability there comes from the file
@@ -1533,7 +1725,7 @@ fn remove_set_aside(destination: &Path, name: &str) {
 ///
 /// [`InstallPaths::launcher_file`]: xpack_core::InstallPaths::launcher_file
 #[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
+pub(crate) fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| Error::io(path, e))
@@ -1542,7 +1734,7 @@ fn set_executable(path: &Path) -> Result<()> {
 // Mirrors the Unix version's signature, which genuinely can fail.
 #[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
-fn set_executable(path: &Path) -> Result<()> {
+pub(crate) fn set_executable(path: &Path) -> Result<()> {
     let _ = path;
     Ok(())
 }

@@ -819,8 +819,9 @@ fn a_placed_launcher_records_the_newest_format_it_reads() {
 
 #[test]
 fn a_package_the_installed_launcher_cannot_read_is_refused_and_changes_nothing() {
-    // What an installer run over an older installation does: the launcher
-    // stays, and was placed before the record existed, so it reads format 3.
+    // An installer whose programs are no newer than the installation's: the
+    // launcher stays, and was placed before the format record existed, so it
+    // reads format 3.
     let dir = tempfile::tempdir().unwrap();
     let key = KeyPair::generate().unwrap();
     let paths = install_paths(dir.path());
@@ -841,11 +842,51 @@ fn a_package_the_installed_launcher_cannot_read_is_refused_and_changes_nothing()
 
     let message = err.to_string();
     assert!(message.contains("format 4") && message.contains("format 3"), "{message}");
-    assert!(message.contains("Uninstall"), "says what to do: {message}");
+    assert!(message.contains("newest installer"), "says what to do: {message}");
     assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "the state changed");
     assert!(
         !paths.version_dir(&Version::parse("1.1.0").unwrap()).exists(),
         "the refused version was unpacked"
+    );
+}
+
+#[test]
+fn a_newer_installer_replaces_a_launcher_that_cannot_read_the_package_and_installs_it() {
+    // The same installation, given an installer of a newer xPack: the old
+    // launcher no longer stands in the way, because it is replaced.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let paths = install_paths(dir.path());
+    let lock = InstallLock::acquire(&paths).unwrap();
+
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(fake_launcher(dir.path())),
+        ..Default::default()
+    };
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+    std::fs::write(paths.launcher_file_named(&installed_names()), b"a launcher of 0.5").unwrap();
+    let mut state = lock.load_state().unwrap().value;
+    state.launcher_format_version = None;
+    state.runtime_version = None;
+    lock.save_state(&state).unwrap();
+
+    let installed = install_format_4(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+
+    assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::Replaced));
+    assert_eq!(
+        std::fs::read(paths.launcher_file_named(&installed_names())).unwrap(),
+        std::fs::read(options.launcher.as_ref().unwrap()).unwrap()
+    );
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.current_version, Some(Version::parse("1.1.0").unwrap()));
+    assert_eq!(
+        state.runtime_version.map(|v| v.to_string()).as_deref(),
+        Some(xpack_core::XPACK_RELEASE)
+    );
+    assert_eq!(
+        state.launcher_format_version,
+        Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION)
     );
 }
 
@@ -1265,7 +1306,12 @@ fn an_installation_that_already_carries_xpack_names_keeps_them() {
 
     let state = lock.load_state().unwrap().value;
     assert_eq!(state.binary_base_name, None, "an existing installation must not be renamed");
-    assert_eq!(std::fs::read(paths.launcher_file()).unwrap(), b"an older launcher");
+    // Older than any release that records one, so replaced: in place, under
+    // the name it already has.
+    assert_eq!(
+        std::fs::read(paths.launcher_file()).unwrap(),
+        std::fs::read(options.launcher.as_ref().unwrap()).unwrap()
+    );
     assert!(
         !paths.launcher_file_named(&installed_names()).exists(),
         "a second launcher was written beside the one already there"
@@ -1852,4 +1898,276 @@ fn a_package_for_another_platform_than_the_installation_is_refused_and_changes_n
     }
     assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "the state changed");
     assert!(!paths.version_dir(&Version::parse("1.1.0").unwrap()).exists());
+}
+
+/// An installation of 1.0.0 whose programs say they come from `recorded`,
+/// with an old launcher in place, ready for a newer xPack to install 1.1.0.
+fn installation_with_programs_from(
+    dir: &std::path::Path,
+    key: &KeyPair,
+    recorded: Option<&str>,
+) -> (InstallLock, InstallOptions) {
+    let paths = install_paths(dir);
+    let lock = InstallLock::acquire(&paths).unwrap();
+    let options = InstallOptions {
+        activate: true,
+        launcher: Some(fake_launcher(dir)),
+        updater: Some(common::fake_binary(dir, "updater-source")),
+        ..Default::default()
+    };
+    install(&lock, dir, key, "1.0.0", &options).unwrap();
+    std::fs::write(paths.launcher_file_named(&installed_names()), b"an old launcher").unwrap();
+    let mut state = lock.load_state().unwrap().value;
+    state.runtime_version = recorded.map(|r| Version::parse(r).unwrap());
+    lock.save_state(&state).unwrap();
+    (lock, options)
+}
+
+fn launcher_now(lock: &InstallLock) -> Vec<u8> {
+    std::fs::read(lock.paths().launcher_file_named(&installed_names())).unwrap()
+}
+
+#[test]
+fn a_running_application_keeps_its_programs_and_nothing_at_all_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) = installation_with_programs_from(dir.path(), &key, Some("0.0.1"));
+    // A launcher of this release, running: it holds the presence lock.
+    let _running =
+        xpack_platform::PresenceLock::shared_within(lock.paths(), std::time::Duration::ZERO)
+            .unwrap()
+            .unwrap();
+    let state_before = std::fs::read(lock.paths().state_file()).unwrap();
+
+    let error = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap_err();
+
+    assert!(matches!(error, xpack_core::Error::ApplicationRunning(_)), "{error}");
+    assert!(error.to_string().contains("Example is running"), "{error}");
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+    assert_eq!(std::fs::read(lock.paths().state_file()).unwrap(), state_before);
+    assert!(!lock.paths().version_dir(&Version::parse("1.1.0").unwrap()).exists());
+}
+
+#[test]
+fn a_launcher_older_than_the_presence_lock_is_noticed_through_the_instance_lock() {
+    // Launchers placed before this release hold only the instance lock.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) = installation_with_programs_from(dir.path(), &key, None);
+    let _old_launcher = xpack_platform::InstanceLock::acquire(lock.paths()).unwrap().unwrap();
+
+    let error = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap_err();
+
+    assert!(matches!(error, xpack_core::Error::ApplicationRunning(_)), "{error}");
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+}
+
+#[test]
+fn with_nothing_running_the_older_programs_are_replaced_and_the_release_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) = installation_with_programs_from(dir.path(), &key, Some("0.0.1"));
+
+    let installed = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+
+    assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::Replaced));
+    assert_eq!(installed.updater, Some(xpack_install::LauncherOutcome::Replaced));
+    assert_eq!(launcher_now(&lock), std::fs::read(options.launcher.as_ref().unwrap()).unwrap());
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.runtime_version.unwrap().to_string(), xpack_core::XPACK_RELEASE);
+    assert!(!lock.paths().runtime_replacement_journal_file().exists());
+    // Nothing kept the installation from being started again afterwards.
+    assert!(xpack_platform::PresenceLock::exclusive(lock.paths()).unwrap().is_some());
+}
+
+#[test]
+fn programs_from_a_newer_release_are_never_replaced_by_older_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) = installation_with_programs_from(dir.path(), &key, Some("99.0.0"));
+
+    let installed = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+
+    assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::AlreadyPresent));
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.runtime_version, Some(Version::parse("99.0.0").unwrap()));
+    assert_eq!(state.current_version, Some(Version::parse("1.1.0").unwrap()));
+}
+
+#[test]
+fn an_install_with_nothing_to_replace_does_not_ask_for_the_application_to_close() {
+    // The same release over itself: an ordinary install, which must go on
+    // working while the application is open, as it always has.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) =
+        installation_with_programs_from(dir.path(), &key, Some(xpack_core::XPACK_RELEASE));
+    let _running =
+        xpack_platform::PresenceLock::shared_within(lock.paths(), std::time::Duration::ZERO)
+            .unwrap()
+            .unwrap();
+
+    let installed = install(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
+
+    assert_eq!(installed.launcher, Some(xpack_install::LauncherOutcome::AlreadyPresent));
+}
+
+/// Writes what a replacement that stopped part way leaves: the journal, and
+/// the launcher either set aside (the old one moved, nothing yet in its
+/// place) or swapped (the new one in place, the old one beside it).
+fn interrupted_replacement(lock: &InstallLock, new: &[u8], swapped: bool) {
+    let paths = lock.paths();
+    let launcher = paths.launcher_file_named(&installed_names());
+    let name = launcher.file_name().unwrap().to_string_lossy().into_owned();
+    let journal = xpack_core::ReplacementJournal::new(
+        "42",
+        None,
+        xpack_core::xpack_release().unwrap(),
+        vec![xpack_core::ReplacementEntry {
+            destination: name.clone(),
+            sha256: xpack_security::hash::sha256(new),
+        }],
+    );
+    std::fs::write(paths.runtime_replacement_journal_file(), serde_json::to_vec(&journal).unwrap())
+        .unwrap();
+    let aside = launcher.with_file_name(format!("{name}.xpack-old-42"));
+    std::fs::rename(&launcher, &aside).unwrap();
+    if swapped {
+        std::fs::write(&launcher, new).unwrap();
+    }
+}
+
+#[test]
+fn recovery_puts_the_old_launcher_back_when_the_new_one_never_arrived() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, _) = installation_with_programs_from(dir.path(), &key, Some("0.0.1"));
+    interrupted_replacement(&lock, b"the new launcher", false);
+
+    let report = Installer::new(&lock).recover().unwrap();
+
+    assert_eq!(report.programs, Some(xpack_install::runtime::Resolution::Undone));
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(
+        state.runtime_version,
+        Some(Version::parse("0.0.1").unwrap()),
+        "an undone release was recorded"
+    );
+    assert!(!lock.paths().runtime_replacement_journal_file().exists());
+}
+
+#[test]
+fn recovery_finishes_a_replacement_whose_new_launcher_is_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, _) = installation_with_programs_from(dir.path(), &key, Some("0.0.1"));
+    let mut state = lock.load_state().unwrap().value;
+    state.launcher_format_version = None;
+    lock.save_state(&state).unwrap();
+    interrupted_replacement(&lock, b"the new launcher", true);
+
+    let report = Installer::new(&lock).recover().unwrap();
+
+    assert!(
+        matches!(report.programs, Some(xpack_install::runtime::Resolution::Finished { .. })),
+        "{report:?}"
+    );
+    assert_eq!(launcher_now(&lock), b"the new launcher");
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.runtime_version.unwrap().to_string(), xpack_core::XPACK_RELEASE);
+    assert_eq!(
+        state.launcher_format_version,
+        Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION),
+        "the new launcher's formats were not recorded"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(lock.paths().root())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".xpack-old"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn placing_a_missing_program_beside_old_ones_does_not_claim_they_are_new() {
+    // An install that supplies no launcher replaces none; the old launcher
+    // stays, and a later installer must still know to replace it.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, _) = installation_with_programs_from(dir.path(), &key, None);
+    let only_an_uninstaller = InstallOptions {
+        activate: true,
+        uninstaller: Some(common::fake_binary(dir.path(), "uninstaller-source")),
+        ..Default::default()
+    };
+
+    let installed = install(&lock, dir.path(), &key, "1.1.0", &only_an_uninstaller).unwrap();
+
+    assert_eq!(installed.uninstaller, Some(xpack_install::LauncherOutcome::Installed));
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+    assert_eq!(
+        lock.load_state().unwrap().value.runtime_version,
+        None,
+        "the old launcher was claimed new"
+    );
+}
+
+#[test]
+fn a_first_installation_records_the_release_of_its_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let lock = InstallLock::acquire(&install_paths(dir.path())).unwrap();
+    let options =
+        InstallOptions { launcher: Some(fake_launcher(dir.path())), ..Default::default() };
+
+    install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
+
+    let recorded = lock.load_state().unwrap().value.runtime_version;
+    assert_eq!(recorded.map(|v| v.to_string()).as_deref(), Some(xpack_core::XPACK_RELEASE));
+}
+
+#[test]
+fn a_replacement_that_fails_leaves_no_version_the_old_launcher_cannot_start() {
+    // The format check is skipped because the launcher is to be replaced; if
+    // the replacement then fails, the new version must not be there either,
+    // or the next start would activate a version the old launcher refuses.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, mut options) = installation_with_programs_from(dir.path(), &key, None);
+    let mut state = lock.load_state().unwrap().value;
+    state.launcher_format_version = None;
+    lock.save_state(&state).unwrap();
+    // A launcher that cannot be read: the replacement fails when it stages.
+    options.launcher = Some(dir.path().join("no-such-launcher"));
+    let before = std::fs::read(lock.paths().state_file()).unwrap();
+
+    let error = install_format_4(&lock, dir.path(), &key, "1.1.0", &options).unwrap_err();
+
+    assert!(error.to_string().contains("no-such-launcher"), "{error}");
+    assert!(
+        !lock.paths().version_dir(&Version::parse("1.1.0").unwrap()).exists(),
+        "the version was installed though the launcher that could start it was not"
+    );
+    assert_eq!(std::fs::read(lock.paths().state_file()).unwrap(), before, "the state changed");
+    assert_eq!(launcher_now(&lock), b"an old launcher");
+}
+
+#[test]
+fn an_install_that_is_refused_replaces_nothing() {
+    // Refused for what it installs, not for the programs: the user is told it
+    // failed, so nothing of the installation may have changed.
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let (lock, options) = installation_with_programs_from(dir.path(), &key, Some("0.0.1"));
+
+    let again = install(&lock, dir.path(), &key, "1.0.0", &options).unwrap_err();
+    let older = install(&lock, dir.path(), &key, "0.9.0", &options).unwrap_err();
+
+    assert!(again.to_string().contains("already installed"), "{again}");
+    assert!(older.to_string().to_lowercase().contains("downgrade"), "{older}");
+    assert_eq!(launcher_now(&lock), b"an old launcher", "a refused install replaced the launcher");
+    let state = lock.load_state().unwrap().value;
+    assert_eq!(state.runtime_version, Some(Version::parse("0.0.1").unwrap()));
 }
