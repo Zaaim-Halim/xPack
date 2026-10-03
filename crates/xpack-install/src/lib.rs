@@ -41,6 +41,7 @@
 //! It reports what it actually deleted. A root it could not empty is named in
 //! [`Removal::remaining`] rather than described as removed.
 
+pub mod hooks;
 pub mod inspect;
 pub mod installer;
 pub mod integration;
@@ -48,6 +49,7 @@ pub mod recovery;
 pub mod runtime;
 pub mod trust;
 
+pub use hooks::HookRun;
 pub use inspect::{Existing, inspect};
 pub use installer::{
     DeltaSource, InstallOptions, InstallSource, Installed, Installer, LauncherOutcome, Removal,

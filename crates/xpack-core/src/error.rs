@@ -125,6 +125,27 @@ pub enum Error {
     #[error("launch failed: {0}")]
     Launch(String),
 
+    /// A package's hook failed: it threw, timed out, was cancelled or could
+    /// not be run.
+    ///
+    /// Kept apart because what follows depends on it: a failed install is
+    /// undone, a failed update rolled back. It carries the hook's last lines
+    /// of output, because a failed install leaves no log to read them in.
+    #[error(
+        "the {point} hook {script} failed: {reason}{}",
+        if output.is_empty() { String::new() } else { format!("\n{}", output.join("\n")) }
+    )]
+    HookFailed {
+        /// Where it ran, such as `install.after`.
+        point: String,
+        /// The script, as the manifest names it.
+        script: String,
+        /// Why it failed, in its own words where it gave any.
+        reason: String,
+        /// Its last lines of output, oldest first.
+        output: Vec<String>,
+    },
+
     /// The disk does not have room for what is about to be written.
     ///
     /// Checked before writing, so the user hears it while nothing has

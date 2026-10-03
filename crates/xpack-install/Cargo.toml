@@ -16,7 +16,10 @@ xpack-platform.workspace = true
 tracing.workspace = true
 directories.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 zeroize.workspace = true
+# The directory each hook run gets, private to the account and removed after.
+tempfile.workspace = true
 
 # Registry access for the per-user Add/Remove Programs entry, which has no
 # equivalent in `std`. Windows-only, and confined to that one use: shortcuts

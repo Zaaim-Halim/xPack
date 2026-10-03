@@ -557,3 +557,50 @@ fn a_program_that_writes_without_end_hands_the_hook_only_so_much() {
     let (code, err) = install.run(script, json!({ "exec": ["/bin/sh"] }));
     assert_eq!(code, 0, "{err}");
 }
+
+// --- checking a script before it is accepted ---
+
+fn check(scripts: &[&Path]) -> (i32, String) {
+    let output = Command::new(HOOK).arg("--check").args(scripts).output().unwrap();
+    (output.status.code().unwrap_or(-1), String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+#[test]
+fn check_parses_a_script_and_runs_none_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.js");
+    // Its top level throws: if any of it ran, the check would fail.
+    std::fs::write(&good, "throw new Error('ran'); export function main() {}").unwrap();
+    let (code, err) = check(&[&good]);
+    assert_eq!(code, 0, "{err}");
+}
+
+#[test]
+fn check_names_every_script_that_does_not_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.js");
+    let broken = dir.path().join("broken.js");
+    let missing = dir.path().join("missing.js");
+    std::fs::write(&good, "export function main() {}").unwrap();
+    std::fs::write(&broken, "export function main( {").unwrap();
+    let (code, err) = check(&[&good, &broken, &missing]);
+    assert_eq!(code, 1);
+    assert!(err.contains("broken.js"), "{err}");
+    assert!(err.contains("missing.js"), "{err}");
+    assert!(!err.contains("good.js"), "{err}");
+    assert_eq!(check(&[]).0, 3);
+}
+
+#[test]
+fn a_script_copied_into_the_runs_own_directory_may_run_and_one_elsewhere_may_not() {
+    let install = Installation::new();
+    let mut request = install.request("export function main() {}");
+    let copy = install.temp.join("hook.js");
+    std::fs::write(&copy, "export function main() {}").unwrap();
+    request["script"] = json!(copy);
+    assert_eq!(run(&request, &[]).0, 0);
+    let elsewhere = install.home.join("hook.js");
+    std::fs::write(&elsewhere, "export function main() {}").unwrap();
+    request["script"] = json!(elsewhere);
+    assert_eq!(run(&request, &[]).0, 3);
+}

@@ -13,7 +13,7 @@ mod engine;
 mod policy;
 mod request;
 
-pub use engine::{Outcome, run};
+pub use engine::{Outcome, check, run};
 pub use request::Request;
 pub use xpack_core::hooks::Scope;
 

@@ -57,6 +57,19 @@ pub fn run(request: &Request, source: &str) -> Outcome {
     })
 }
 
+/// Whether `source` parses as a hook script, without running any of it.
+///
+/// What a version is checked with before it is accepted, so a script that
+/// cannot run is refused when it arrives rather than failing when it is due.
+pub fn check(name: &str, source: &str) -> Result<(), String> {
+    let runtime = Runtime::new().map_err(|e| e.to_string())?;
+    runtime.set_memory_limit(MEMORY_LIMIT);
+    let context = Context::full(&runtime).map_err(|e| e.to_string())?;
+    context.with(|ctx| {
+        Module::declare(ctx.clone(), name, source).map(drop).map_err(|e| describe(&ctx, &e))
+    })
+}
+
 fn run_here(request: &Request, source: &str) -> Outcome {
     let policy = match Policy::of(request) {
         Ok(policy) => Rc::new(policy),
@@ -168,11 +181,23 @@ fn context_object<'js>(
     )?;
 
     let log = Object::new(ctx.clone())?;
-    for level in ["info", "warn", "error"] {
+    // One line each, on standard error, which the runner reads line by line
+    // and prefixes with the hook point. Never beginning `xpack-hook: `, which
+    // is this program's own word on how the hook ended. Anything may be
+    // logged: it is made text, and text JavaScript allows but UTF-8 cannot
+    // carry (a lone surrogate) is replaced rather than failing the hook.
+    let as_text: Function = ctx.eval("(value) => String(value).toWellFormed()")?;
+    for (level, prefix) in [("info", ""), ("warn", "warning: "), ("error", "error: ")] {
+        let as_text = as_text.clone();
         log.set(
             level,
-            Function::new(ctx.clone(), move |line: String| {
-                xpack_core::errln!("[{level}] {line}");
+            Function::new(ctx.clone(), move |value: Value<'js>| {
+                let text: String = as_text.call((value,))?;
+                for line in text.lines() {
+                    let line = line.strip_prefix("xpack-hook: ").unwrap_or(line);
+                    xpack_core::errln!("{prefix}{line}");
+                }
+                Ok::<_, rquickjs::Error>(())
             })?,
         )?;
     }

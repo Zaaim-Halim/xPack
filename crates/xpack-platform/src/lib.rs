@@ -29,6 +29,7 @@ pub mod replace;
 pub mod rosetta;
 pub mod sharing;
 pub mod space;
+pub mod tree;
 pub mod window;
 pub mod windows_manifest;
 

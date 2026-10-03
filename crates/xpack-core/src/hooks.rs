@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -485,6 +485,96 @@ fn one_or_many<'de, D: Deserializer<'de>>(
 
 // --- the hook record ---------------------------------------------------------
 
+// --- what the program that runs a hook is told ---
+
+/// One hook to run, and everything it is given.
+///
+/// Sent to `xpack-hook` by the installer, launcher or uninstaller as one JSON document on
+/// standard input, read whole before the script starts: the script itself
+/// gets no input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Request {
+    /// The script, an absolute path inside [`Self::version_dir`] or
+    /// [`Self::temp_dir`].
+    pub script: PathBuf,
+    /// Where it runs.
+    pub point: HookPoint,
+    /// Why a version is being undone: `failedToStart`, `hookFailed` or
+    /// `requested`. Rollback only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// The version active before; absent for a first installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_version: Option<String>,
+    /// The version active after; absent for uninstalling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_version: Option<String>,
+    /// Who the installation is for.
+    pub scope: Scope,
+    /// The installation's root.
+    pub application_dir: PathBuf,
+    /// The directory of the version that ships the hook.
+    pub version_dir: PathBuf,
+    /// The installation's data directory, for hooks and the application.
+    pub data_dir: PathBuf,
+    /// Where the installation's logs go.
+    pub log_dir: PathBuf,
+    /// A directory made for this run and removed after it.
+    pub temp_dir: PathBuf,
+    /// The user's home; an installation for one user only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<PathBuf>,
+    /// The machine-wide data place; an installation for everyone only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_data: Option<PathBuf>,
+    /// The application's launch environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
+    /// The permissions in force: the package's block for this scope.
+    #[serde(default)]
+    pub permissions: ScopePermissions,
+    /// How long the hook may run.
+    pub timeout_seconds: u32,
+}
+
+impl Request {
+    /// Checks the request makes sense before anything runs.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, path) in [
+            ("script", &self.script),
+            ("applicationDir", &self.application_dir),
+            ("versionDir", &self.version_dir),
+            ("dataDir", &self.data_dir),
+            ("logDir", &self.log_dir),
+            ("tempDir", &self.temp_dir),
+        ] {
+            if !path.is_absolute() {
+                return Err(format!("{name} {} is not an absolute path", path.display()));
+            }
+        }
+        // In its version, or a copy in the run's temporary directory: the
+        // runner runs a copy it has checked against the signed hash, and
+        // before installing there is no version directory to run it from.
+        if !self.script.starts_with(&self.version_dir) && !self.script.starts_with(&self.temp_dir) {
+            return Err(format!(
+                "the script {} is in neither its version's directory nor this run's",
+                self.script.display()
+            ));
+        }
+        match self.scope {
+            Scope::User if self.program_data.is_some() => {
+                Err("an installation for one user has no programData".into())
+            }
+            Scope::Machine if self.home.is_some() => {
+                Err("an installation for everyone has no user's home".into())
+            }
+            _ if self.timeout_seconds == 0 => Err("timeoutSeconds is 0".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// What happened to a hook, as one line of the hook record says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -539,6 +629,8 @@ pub enum PointOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookRecord {
     points: BTreeMap<(Version, HookPoint), PointOutcome>,
+    /// Each script recorded as having succeeded, at its version and point.
+    succeeded: BTreeSet<(Version, HookPoint, String)>,
 }
 
 impl HookRecord {
@@ -590,6 +682,9 @@ impl HookRecord {
     }
 
     fn note(&mut self, line: &HookRecordLine) {
+        if line.event == HookEvent::Succeeded {
+            self.succeeded.insert((line.version.clone(), line.point, line.script.clone()));
+        }
         let entry = self
             .points
             .entry((line.version.clone(), line.point))
@@ -612,6 +707,29 @@ impl HookRecord {
     /// How `point` ended for `version`, if it has run.
     pub fn outcome(&self, version: &Version, point: HookPoint) -> Option<PointOutcome> {
         self.points.get(&(version.clone(), point)).copied()
+    }
+
+    /// Whether every one of `scripts` ran to success at `point` for
+    /// `version`, and nothing there failed.
+    ///
+    /// A point can read as succeeded with a script of it never started: the
+    /// machine stopped between one hook's success and the next one's start.
+    /// So a point that ran is only a success when each script declared at it
+    /// says so.
+    pub fn all_succeeded<'a>(
+        &self,
+        version: &Version,
+        point: HookPoint,
+        scripts: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        self.outcome(version, point) == Some(PointOutcome::Succeeded)
+            && scripts.into_iter().all(|script| self.script_succeeded(version, point, script))
+    }
+
+    /// Whether `script` is recorded as having succeeded at `point` for
+    /// `version`.
+    pub fn script_succeeded(&self, version: &Version, point: HookPoint, script: &str) -> bool {
+        self.succeeded.contains(&(version.clone(), point, script.to_string()))
     }
 
     /// Whether any of `version`'s hooks at points of `operation` has started.
@@ -971,6 +1089,31 @@ mod tests {
         );
         assert!(record.any_started(&v("1.1.0"), Operation::Update));
         assert!(!record.any_started(&v("1.0.0"), Operation::Update));
+    }
+
+    #[test]
+    fn a_point_is_a_success_only_when_every_script_of_it_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.jsonl");
+        let mut b = line("1.0.0", "install.after", HookEvent::Started);
+        b.script = "xpack/hooks/b.js".into();
+        append(&path, &line("1.0.0", "install.after", HookEvent::Started)).unwrap();
+        append(&path, &line("1.0.0", "install.after", HookEvent::Succeeded)).unwrap();
+        let record = HookRecord::read(&path).unwrap();
+        let both = ["xpack/hooks/a.js", "xpack/hooks/b.js"];
+        assert_eq!(
+            record.outcome(&v("1.0.0"), point("install.after")),
+            Some(PointOutcome::Succeeded)
+        );
+        assert!(record.all_succeeded(&v("1.0.0"), point("install.after"), ["xpack/hooks/a.js"]));
+        assert!(!record.all_succeeded(&v("1.0.0"), point("install.after"), both), "b never ran");
+
+        append(&path, &b).unwrap();
+        b.event = HookEvent::Succeeded;
+        append(&path, &b).unwrap();
+        let record = HookRecord::read(&path).unwrap();
+        assert!(record.all_succeeded(&v("1.0.0"), point("install.after"), both));
+        assert!(!record.all_succeeded(&v("1.1.0"), point("install.after"), both));
     }
 
     #[test]

@@ -317,6 +317,23 @@ impl InstallPaths {
         self.per_user_dir().join("logs")
     }
 
+    /// The installation's data directory: the one place in it that is the
+    /// application's and its hooks', kept across updates and removed with the
+    /// installation.
+    pub fn data_dir(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    /// Where each hook run gets a directory of its own, removed after it.
+    ///
+    /// Inside the installation rather than the system's temporary directory:
+    /// that one comes from the environment, which for an administrator's
+    /// process started by a user can still be the user's own, who could then
+    /// change a verified script between its check and its run.
+    pub fn hook_runs_dir(&self) -> PathBuf {
+        self.root.join("hook-runs")
+    }
+
     /// Directory for installation configuration.
     pub fn config_dir(&self) -> PathBuf {
         self.root.join("config")
