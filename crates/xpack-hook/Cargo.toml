@@ -1,0 +1,30 @@
+[package]
+name = "xpack-hook"
+description = "Runs a package's hook script, with the engine nothing else in xPack carries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xpack-hook"
+path = "src/main.rs"
+
+[dependencies]
+xpack-core.workspace = true
+xpack-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# QuickJS. Its C is compiled into this one program and no other: the
+# installer, launcher and uninstaller start `xpack-hook` as a process and never
+# link it, so the engine is loaded only when a hook runs. No `loader` feature:
+# a hook is one file, and an `import` must fail.
+rquickjs = { version = "0.14.0", default-features = false, features = ["futures"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
