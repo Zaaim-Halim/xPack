@@ -360,15 +360,36 @@ fn validate_script(subject: &str, script: &str, payload: &PayloadSpec) -> Result
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+/// Who an installation is for, and so whose rights its hooks run with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Scope {
+    /// One user, with that user's rights.
     User,
+    /// Everyone on the machine, with an administrator's rights.
     Machine,
 }
 
 /// Programs that would give a hook more rights than the installation's own,
 /// refused for an installation for one user, whatever it declares.
 pub const ELEVATION_PROGRAMS: [&str; 6] = ["sudo", "doas", "pkexec", "su", "runas", "osascript"];
+
+/// Whether `program`, a file name or a path, is one of the
+/// [`ELEVATION_PROGRAMS`] however it is spelled.
+///
+/// Windows matches names without regard to case, runs a name given without
+/// its extension, and drops trailing dots and spaces, so `RUNAS.EXE`,
+/// `runas.com` and `runas.exe.` all start `runas`.
+pub fn asks_for_administrator(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = name.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+    let stem = [".exe", ".com", ".bat", ".cmd"]
+        .iter()
+        .find_map(|extension| name.strip_suffix(extension))
+        .unwrap_or(&name)
+        .trim_end_matches(['.', ' ']);
+    ELEVATION_PROGRAMS.contains(&stem)
+}
 
 fn validate_scope(subject: &str, permissions: &ScopePermissions, scope: Scope) -> Result<()> {
     for program in &permissions.exec {
@@ -380,9 +401,7 @@ fn validate_scope(subject: &str, permissions: &ScopePermissions, scope: Scope) -
         if !absolute && (program.contains('/') || program.contains('\\')) {
             return refuse("must be a program's file name or an absolute path");
         }
-        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
-        let stem = name.strip_suffix(".exe").unwrap_or(name).to_ascii_lowercase();
-        if scope == Scope::User && ELEVATION_PROGRAMS.contains(&stem.as_str()) {
+        if scope == Scope::User && asks_for_administrator(program) {
             return refuse("asks for administrator rights, which a hook for one user never gets");
         }
     }
@@ -818,11 +837,28 @@ mod tests {
 
     #[test]
     fn a_hook_for_one_user_may_never_ask_for_administrator_rights() {
-        for program in ["sudo", "pkexec", "runas.exe", "/usr/bin/sudo", "osascript", "SU"] {
-            let json = format!(
-                r#"{{"install":"xpack/hooks/a.js","permissions":{{"user":{{"exec":["{program}"]}}}}}}"#
-            );
+        for program in [
+            "sudo",
+            "pkexec",
+            "runas.exe",
+            "/usr/bin/sudo",
+            "osascript",
+            "SU",
+            "RUNAS.EXE",
+            "Sudo.Exe",
+            "runas.com",
+            "runas.exe.",
+            "C:\\Windows\\System32\\RunAs.Exe",
+        ] {
+            let json = serde_json::json!(
+                {"install":"xpack/hooks/a.js","permissions":{"user":{"exec":[program]}}}
+            )
+            .to_string();
             assert!(refused(&json).contains("administrator rights"), "{program} was allowed");
+            assert!(asks_for_administrator(program), "{program}");
+        }
+        for program in ["sudoku", "suspend", "runasroot", "git", "su-helper.exe"] {
+            assert!(!asks_for_administrator(program), "{program}");
         }
         // The same programs are an administrator's own business.
         hooks(r#"{"install":"xpack/hooks/a.js","permissions":{"machine":{"exec":["runas.exe"]}}}"#)
