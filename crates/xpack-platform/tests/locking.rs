@@ -423,3 +423,156 @@ fn a_killed_instance_does_not_keep_the_next_start_out() {
             .unwrap();
     assert!(next.is_some(), "a killed holder kept the lock");
 }
+
+/// Exit codes the presence-lock children use.
+const CHILD_JOINED: i32 = 30;
+const CHILD_KEPT_OUT: i32 = 31;
+
+/// Performs the child half of a presence-lock test: hold the lock shared and
+/// stay running, as a launcher does, or try to join it once and report.
+fn run_presence_child_if_selected(expected_role: &str) -> bool {
+    let Ok(role) = std::env::var(CHILD_ROLE) else {
+        return false;
+    };
+    if role != expected_role {
+        return false;
+    }
+    let root = std::env::var(CHILD_DIR).expect("child directory");
+    let paths = paths_in(Path::new(&root));
+    let joined = xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::ZERO);
+    match (role.as_str(), joined) {
+        ("presence-holder", Ok(Some(_held))) => {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::process::exit(CHILD_JOINED);
+        }
+        (_, Ok(Some(_))) => std::process::exit(CHILD_JOINED),
+        (_, Ok(None)) => std::process::exit(CHILD_KEPT_OUT),
+        (_, Err(_)) => std::process::exit(CHILD_OTHER_ERROR),
+    }
+}
+
+#[test]
+fn any_number_of_launchers_hold_the_presence_lock_and_an_installer_waits_for_all() {
+    // Two launchers of one installation: two copies of an application that
+    // allows several, or a command running beside the window.
+    if run_presence_child_if_selected("presence-probe") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    let zero = std::time::Duration::ZERO;
+
+    let first = xpack_platform::PresenceLock::shared_within(&paths, zero).unwrap();
+    assert!(first.is_some(), "a launcher could not join a free lock");
+    let status = spawn_child(
+        "presence-probe",
+        dir.path(),
+        "any_number_of_launchers_hold_the_presence_lock_and_an_installer_waits_for_all",
+    );
+    assert_eq!(status.code(), Some(CHILD_JOINED), "a second launcher was kept out");
+    let second = xpack_platform::PresenceLock::shared_within(&paths, zero).unwrap();
+    assert!(second.is_some());
+
+    assert!(
+        xpack_platform::PresenceLock::exclusive(&paths).unwrap().is_none(),
+        "an installer was let in while two launchers ran"
+    );
+    drop(first);
+    assert!(
+        xpack_platform::PresenceLock::exclusive(&paths).unwrap().is_none(),
+        "an installer was let in while one launcher still ran"
+    );
+    drop(second);
+    assert!(
+        xpack_platform::PresenceLock::exclusive(&paths).unwrap().is_some(),
+        "an installer was kept out with no launcher running"
+    );
+}
+
+#[test]
+fn a_killed_launcher_does_not_keep_an_installer_out() {
+    // The operating system releases the lock however its holder ends, so a
+    // crash never makes an installation look busy for good.
+    if run_presence_child_if_selected("presence-holder") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    let exe = std::env::current_exe().unwrap();
+    let mut holder = Command::new(exe)
+        .args([
+            "--exact",
+            "a_killed_launcher_does_not_keep_an_installer_out",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ROLE, "presence-holder")
+        .env(CHILD_DIR, dir.path())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while xpack_platform::PresenceLock::exclusive(&paths).unwrap().is_some() {
+        assert!(std::time::Instant::now() < deadline, "the launcher never joined the lock");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    holder.kill().unwrap();
+    let _ = holder.wait();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while xpack_platform::PresenceLock::exclusive(&paths).unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline, "a killed launcher kept the lock");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_launcher_waits_while_an_installer_holds_the_presence_lock_alone() {
+    // So nothing starts in the middle of the programs being replaced.
+    if run_presence_child_if_selected("presence-kept-out") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+
+    let installer = xpack_platform::PresenceLock::exclusive(&paths).unwrap();
+    assert!(installer.is_some());
+    let status = spawn_child(
+        "presence-kept-out",
+        dir.path(),
+        "a_launcher_waits_while_an_installer_holds_the_presence_lock_alone",
+    );
+    assert_eq!(status.code(), Some(CHILD_KEPT_OUT), "a launcher joined during a replacement");
+
+    let started = std::time::Instant::now();
+    assert!(
+        xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::from_millis(300))
+            .unwrap()
+            .is_none(),
+        "a launcher joined while the installer held the lock"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(300), "it did not wait");
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(installer);
+    });
+    let joined =
+        xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::from_secs(5))
+            .unwrap();
+    releaser.join().unwrap();
+    assert!(joined.is_some(), "a launcher did not join once the installer let go");
+}
+
+#[test]
+fn the_presence_lock_is_in_the_installations_state_for_one_user() {
+    // Where an installer of a per-user installation looks for it.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = paths_in(dir.path());
+    let _held = xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::ZERO)
+        .unwrap()
+        .unwrap();
+    assert!(paths.state_dir().join("running.lock").is_file());
+}

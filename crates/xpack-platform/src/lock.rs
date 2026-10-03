@@ -357,3 +357,85 @@ impl Drop for InstanceLock {
         let _ = self.file.unlock();
     }
 }
+
+/// Held, shared, by every launcher for as long as it runs; taken alone by an
+/// installer that needs nothing of the installation to be running.
+///
+/// [`InstanceLock`] is held only by the first copy of a running application,
+/// so it cannot say whether a second copy, or a command running beside the
+/// first, is still going. This lock can: every launcher process holds it in
+/// shared mode, any number at once, and an installer asks for it
+/// exclusively, which the operating system grants only when no launcher holds
+/// it. Held alone, it also keeps a launcher from starting until the installer
+/// lets go, so nothing starts in the middle of the programs being replaced.
+///
+/// As with every lock here, the operating system releases it when its holder
+/// ends, however it ends: a launcher that crashes never makes an installation
+/// look busy.
+#[derive(Debug)]
+pub struct PresenceLock {
+    /// Holding this handle holds the lock; dropping it releases.
+    file: File,
+}
+
+impl PresenceLock {
+    /// Joins the launchers holding the lock, waiting up to `timeout` while an
+    /// installer holds it alone.
+    ///
+    /// `None` when the installer still holds it after `timeout`: a launcher
+    /// then decides for itself whether to start without it.
+    pub fn shared_within(
+        paths: &InstallPaths,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Self>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let file = Self::open(paths)?;
+        loop {
+            match file.try_lock_shared() {
+                Ok(()) => return Ok(Some(Self { file })),
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => {
+                    return Err(Error::io(paths.presence_lock_file(), e));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Takes the lock alone, or returns `None` when any launcher holds it:
+    /// something of the installation is running.
+    ///
+    /// Asked once, never waited on: whether to wait for the application to
+    /// close is the caller's to decide, and to say.
+    pub fn exclusive(paths: &InstallPaths) -> Result<Option<Self>> {
+        let file = Self::open(paths)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(e)) => Err(Error::io(paths.presence_lock_file(), e)),
+        }
+    }
+
+    /// Opens the lock file without truncating it, for the reasons the
+    /// installation lock documents.
+    fn open(paths: &InstallPaths) -> Result<File> {
+        let path = paths.presence_lock_file();
+        xpack_core::atomic::create_dir_all(xpack_core::atomic::parent_dir(&path)?)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| Error::io(&path, e))
+    }
+}
+
+impl Drop for PresenceLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
