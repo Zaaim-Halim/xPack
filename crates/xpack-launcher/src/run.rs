@@ -31,10 +31,43 @@
 
 use std::process::ExitCode;
 
-use xpack_platform::InstanceLock;
+use xpack_platform::{InstanceLock, PresenceLock};
 
 use crate::Launcher;
 use crate::instance::Start;
+
+/// How long a start waits while an installer replaces xPack's programs.
+///
+/// The same patience a start already has for the installation lock: long
+/// enough for the programs to be swapped, which takes moments, and short
+/// enough that a start meeting an installation that is still running is told
+/// so rather than left hanging.
+const PRESENCE_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// An installer still holds the presence lock alone: it is replacing this
+/// installation's programs, and starting now could run a half-replaced set.
+struct Replacing;
+
+/// Joins the launchers holding the presence lock, so an installer knows this
+/// one is running and does not replace its programs underneath it.
+///
+/// Taken before anything else a start does that touches the installation,
+/// and before the installation lock: an installer takes them the other way
+/// round but never waits for this one, so the two cannot deadlock.
+///
+/// `Ok(None)` when the lock file could not be used at all. The start carries
+/// on without it: refusing to open the application over a lock file is the
+/// worse error, as it is for the instance lock.
+fn join_presence(launcher: &Launcher) -> Result<Option<PresenceLock>, Replacing> {
+    match PresenceLock::shared_within(launcher.paths(), PRESENCE_WAIT) {
+        Ok(Some(lock)) => Ok(Some(lock)),
+        Ok(None) => Err(Replacing),
+        Err(error) => {
+            tracing::warn!(%error, "could not take the presence lock; starting without it");
+            Ok(None)
+        }
+    }
+}
 
 /// Starts the application, and starts it once more if the user agreed to.
 ///
@@ -161,6 +194,17 @@ fn run_as(windowed: bool) -> ExitCode {
         file: Some(launcher.paths()),
         format: xpack_log::Format::Text,
     });
+
+    // Held until this process ends, whatever kind of start it is: an
+    // ordinary one, a second copy, a command, a start that hands over.
+    let Ok(_presence) = join_presence(&launcher) else {
+        tracing::warn!("an installation is replacing this application's programs; not starting");
+        xpack_core::errln!(
+            "xpack: this application is being installed or updated; start it again when that \
+                 has finished"
+        );
+        return ExitCode::FAILURE;
+    };
 
     // The launch another launcher opened the bundle for, to restart the
     // application. It offers no restart of its own, as a restart in place

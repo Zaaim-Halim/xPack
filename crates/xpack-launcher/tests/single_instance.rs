@@ -467,3 +467,102 @@ fn a_listed_command_typed_through_the_installed_command_runs_beside_the_running_
     assert!(world.requests().is_empty(), "the command was handed over");
     assert_eq!(world.starts().len(), 1, "{:?}", world.starts());
 }
+
+/// Whether an installer could take the presence lock alone right now, as it
+/// must before replacing the installation's programs.
+fn an_installer_could_replace(paths: &InstallPaths) -> bool {
+    xpack_platform::PresenceLock::exclusive(paths).unwrap().is_some()
+}
+
+/// Waits until `condition` holds, failing with `what` after ten seconds.
+fn eventually(what: &str, condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !condition() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_running_application_keeps_an_installer_from_replacing_its_programs() {
+    let mut world = World::new(false);
+    assert!(an_installer_could_replace(&world.paths), "busy before anything ran");
+
+    world.start(&["first"]);
+    assert!(!an_installer_could_replace(&world.paths), "an installer was let in while it ran");
+
+    world.crash_first();
+    eventually("an ended launcher kept an installer out", || {
+        an_installer_could_replace(&world.paths)
+    });
+}
+
+#[test]
+fn a_second_copy_keeps_an_installer_out_after_the_first_has_gone() {
+    // The instance lock goes with the first copy; a second copy of an
+    // application that allows several still runs the same programs.
+    let mut world = World::new(false);
+    world.start(&["first"]);
+    world.start(&["second"]);
+    world.crash_first();
+    assert!(
+        xpack_platform::InstanceLock::acquire(&world.paths).unwrap().is_some(),
+        "the instance lock was still held, so this proves nothing"
+    );
+
+    assert!(
+        !an_installer_could_replace(&world.paths),
+        "an installer was let in while the second copy ran"
+    );
+}
+
+#[test]
+fn a_command_running_beside_the_window_keeps_an_installer_out() {
+    let mut world = World::alongside(&["--hold"]);
+    let command = world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    world.running.push(command.unwrap());
+    eventually("the command never ran", || world.paths.root().join("commands.log").exists());
+
+    assert!(!an_installer_could_replace(&world.paths), "an installer was let in during a command");
+}
+
+#[test]
+fn a_start_waits_while_an_installer_replaces_the_programs() {
+    let mut world = World::new(false);
+    let installer = xpack_platform::PresenceLock::exclusive(&world.paths).unwrap().unwrap();
+
+    let start = world.command(&["waited"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    world.running.push(start.unwrap());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(world.starts().is_empty(), "it started in the middle of a replacement");
+
+    drop(installer);
+    world.wait_for_starts(1);
+    assert!(world.starts()[0].starts_with("start waited|"), "{:?}", world.starts());
+}
+
+#[test]
+fn a_start_that_meets_a_replacement_still_going_says_so_and_starts_nothing() {
+    let world = World::new(false);
+    let _installer = xpack_platform::PresenceLock::exclusive(&world.paths).unwrap().unwrap();
+
+    let mut start =
+        world.command(&[]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    // It waits fifteen seconds for the installer before giving up.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while start.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = start.kill();
+            panic!("the start never gave up waiting");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = start.wait_with_output().unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("being installed or updated"),
+        "{output:?}"
+    );
+    assert!(world.starts().is_empty(), "it started anyway: {:?}", world.starts());
+}
