@@ -992,3 +992,41 @@ fn a_sealed_delta_is_opened_with_the_kept_key_and_applied() {
         "the sealed delta was not used"
     );
 }
+
+#[test]
+fn an_update_refused_because_the_application_is_open_leaves_nothing_downloaded() {
+    // `xpack update` run by hand supplies its own programs; over older ones,
+    // with the application open, the install is refused. The package it
+    // downloaded is no use to anything after that, and must not stay.
+    let world = World::new();
+    {
+        let lock = world.lock();
+        let mut state = lock.load_state().unwrap().value;
+        std::fs::write(world.paths.launcher_file_named(&state.binary_names()), b"old").unwrap();
+        state.runtime_version = Some(Version::parse("0.0.1").unwrap());
+        lock.save_state(&state).unwrap();
+    }
+    let launcher = world.dir.path().join("new-launcher");
+    std::fs::write(&launcher, b"new").unwrap();
+    let _running =
+        xpack_platform::PresenceLock::shared_within(&world.paths, std::time::Duration::ZERO)
+            .unwrap()
+            .unwrap();
+    let package = build_package(world.dir.path(), &world.key, "1.1.0");
+    let size = std::fs::metadata(&package).unwrap().len();
+    let fixture = Fixture::default();
+    fixture.serve(&index_url(), index_json("1.1.0", "demo-1.1.0.xpkg", size));
+    fixture.serve_file(&format!("{BASE}/demo-1.1.0.xpkg"), &package);
+
+    let error = Updater::new(&world.paths, &fixture)
+        .update(BASE, &UpdateOptions { launcher: Some(launcher), ..options() })
+        .unwrap_err();
+
+    assert!(matches!(error, xpack_core::Error::ApplicationRunning(_)), "{error}");
+    let leftovers: Vec<_> = std::fs::read_dir(world.paths.downloads_dir())
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    assert!(world.lock().load_state().unwrap().value.update.is_idle());
+    assert_eq!(world.active(), Some(Version::parse("1.0.0").unwrap()));
+}

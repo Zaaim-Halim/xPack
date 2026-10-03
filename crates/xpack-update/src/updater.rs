@@ -484,26 +484,54 @@ impl<'a> Updater<'a> {
         let install_options = install_options(lock, options);
         self.progress.report(&ProgressEvent::Installing { version: index.version.clone() });
 
-        let outcome = if let Some(delta) = delta.as_mut() {
-            // The base is the version state says is installed, and the delta's
-            // own claim is checked against it inside `DeltaSource`. Reading the
-            // base from the delta instead would let the server pick the
-            // directory that gets rebuilt from.
-            let base_version = state.current_version.clone().ok_or_else(|| {
-                Error::invalid("update", "a delta cannot apply: nothing is installed")
-            })?;
-            let base_dir = self.paths.version_dir(&base_version);
-            let mut source = xpack_install::DeltaSource::new(delta, &base_version, base_dir)?;
-            installer.install_from_with_progress(&mut source, &install_options, self.progress)?
-        } else {
-            let package = package.as_mut().expect("one of the two was verified above");
-            installer.install_from_with_progress(package, &install_options, self.progress)?
+        // The phase is already clear, so recovery would never remove the
+        // download now: a refused install (the application open, a format the
+        // launcher cannot read) removes it here, rather than leave a whole
+        // package on disk for nothing.
+        let outcome = match self.install_verified(
+            &installer,
+            state.current_version.as_ref(),
+            delta.as_mut(),
+            package.as_mut(),
+            &install_options,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = atomic::remove_file_if_exists(downloaded);
+                return Err(error);
+            }
         };
 
         atomic::remove_file_if_exists(downloaded)?;
         tracing::info!(version = %outcome.version, "update installed");
         self.progress.report(&ProgressEvent::Completed { version: outcome.version.clone() });
         Ok(Some(outcome.version))
+    }
+
+    /// Installs the downloaded and verified update: the delta, rebuilt from
+    /// the installed version, or the full package.
+    fn install_verified(
+        &self,
+        installer: &Installer<'_>,
+        current: Option<&Version>,
+        delta: Option<&mut xpack_package::VerifiedDelta>,
+        package: Option<&mut xpack_package::VerifiedPackage>,
+        options: &InstallOptions,
+    ) -> Result<xpack_install::Installed> {
+        if let Some(delta) = delta {
+            // The base is the version state says is installed, and the delta's
+            // own claim is checked against it inside `DeltaSource`. Reading the
+            // base from the delta instead would let the server pick the
+            // directory that gets rebuilt from.
+            let base_version = current.ok_or_else(|| {
+                Error::invalid("update", "a delta cannot apply: nothing is installed")
+            })?;
+            let base_dir = self.paths.version_dir(base_version);
+            let mut source = xpack_install::DeltaSource::new(delta, base_version, base_dir)?;
+            return installer.install_from_with_progress(&mut source, options, self.progress);
+        }
+        let package = package.expect("one of the two was verified above");
+        installer.install_from_with_progress(package, options, self.progress)
     }
 
     /// Returns `true` when a staged rollout excludes this installation.

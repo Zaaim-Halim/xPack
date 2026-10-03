@@ -1587,3 +1587,65 @@ fn a_newer_installer_waits_for_the_open_application_and_replaces_the_programs_on
         "the programs were not replaced"
     );
 }
+
+#[test]
+fn xpack_install_waits_for_the_open_application_and_exits_6_if_it_stays_open() {
+    if !installer_binaries_are_built() {
+        eprintln!("skipping: run `cargo build --workspace` first");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.keygen();
+    let first = fixture.pack("1.0.0");
+    let second = fixture.pack("1.1.0");
+    let installed = fixture.run_in_root(&["install", &first, "--trust", "signing.pub.json"]);
+    assert!(installed.status.success(), "{}", stderr(&installed));
+
+    // As if installed by an older xPack, and open.
+    let paths = xpack_core::InstallPaths::new(&fixture.root(), "com.example.demo").unwrap();
+    {
+        let lock = xpack_platform::InstallLock::acquire(&paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.runtime_version = Some(xpack_core::Version::parse("0.0.1").unwrap());
+        lock.save_state(&state).unwrap();
+    }
+    let before = std::fs::read(paths.state_file()).unwrap();
+    let running = xpack_platform::PresenceLock::shared_within(&paths, std::time::Duration::ZERO)
+        .unwrap()
+        .unwrap();
+
+    let refused = fixture.run_in_root(&["install", &second, "--wait-for-close", "1"]);
+
+    assert_eq!(code(&refused), 6, "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("is open"), "{}", stderr(&refused));
+    assert_eq!(std::fs::read(paths.state_file()).unwrap(), before, "a refused install changed it");
+
+    // Closed while it waits, without the lock held meanwhile: it goes ahead.
+    let root = fixture.root().to_string_lossy().to_string();
+    let waiting = Command::new(xpack())
+        .current_dir(fixture.path())
+        .args(["--root", &root, "install", &second, "--wait-for-close", "30"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // A launcher closing records its run under the installation lock; the
+    // waiting install must not be holding it.
+    let taken =
+        xpack_platform::InstallLock::acquire_within(&paths, std::time::Duration::from_secs(2));
+    assert!(taken.is_ok(), "the install held the installation lock while waiting");
+    drop(taken);
+    drop(running);
+    let done = waiting.wait_with_output().unwrap();
+
+    assert!(done.status.success(), "{}", stderr(&done));
+    assert!(stdout(&done).contains("replaced by this release's"), "{}", stdout(&done));
+    let state =
+        xpack_core::store::load::<xpack_core::InstallState>(&paths.state_file()).unwrap().value;
+    assert_eq!(state.current_version, Some(xpack_core::Version::parse("1.1.0").unwrap()));
+    assert_eq!(
+        state.runtime_version.map(|v| v.to_string()).as_deref(),
+        Some(xpack_core::XPACK_RELEASE)
+    );
+}

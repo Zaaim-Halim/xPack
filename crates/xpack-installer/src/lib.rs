@@ -79,6 +79,49 @@ pub fn exit_code_for(error: &Error) -> u8 {
     }
 }
 
+/// Runs `attempt` until it is not refused because the application is open,
+/// for up to `wait`.
+///
+/// For an install that is refused with nothing changed while the
+/// application runs, which makes trying again safe. Each attempt must take
+/// and release whatever locks it needs itself: the application's launcher,
+/// when it closes, needs the installation lock for a moment, and waiting
+/// while holding it would hold the application up.
+///
+/// The first time it is refused, `waiting` is called, for the caller to say
+/// what it is waiting for, and with `close` the running copy at those paths
+/// is asked to close ([`ask_to_close`]). Still refused when `wait` runs out,
+/// the refusal is returned.
+pub fn wait_while_open<T>(
+    wait: std::time::Duration,
+    close: Option<&InstallPaths>,
+    waiting: &mut dyn FnMut(),
+    attempt: &mut dyn FnMut() -> Result<T>,
+) -> Result<T> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut first = true;
+    loop {
+        match attempt() {
+            Err(Error::ApplicationRunning(name)) => {
+                if first {
+                    first = false;
+                    waiting();
+                    if let Some(paths) = close
+                        && let Err(error) = ask_to_close(paths)
+                    {
+                        tracing::warn!(%error, "could not ask the application to close");
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::ApplicationRunning(name));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Asks the running copy of the application installed at `paths` to close.
 ///
 /// The launcher that started it records its process, and that record is
@@ -562,26 +605,10 @@ impl VerifiedPayload {
         close: bool,
         waiting: &mut dyn FnMut(),
     ) -> Result<Outcome> {
-        let deadline = std::time::Instant::now() + wait;
-        let mut first = true;
-        loop {
-            match self.install_into(request, progress) {
-                Err(Error::ApplicationRunning(name)) => {
-                    if first {
-                        first = false;
-                        waiting();
-                        if close && let Err(error) = self.ask_running_copy_to_close(&request.root) {
-                            tracing::warn!(%error, "could not ask the application to close");
-                        }
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(Error::ApplicationRunning(name));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                other => return other,
-            }
-        }
+        let paths = self.paths(&request.root)?;
+        wait_while_open(wait, close.then_some(&paths), waiting, &mut || {
+            self.install_into(request, progress)
+        })
     }
 
     /// Installs the application as `request` asks, reporting progress.

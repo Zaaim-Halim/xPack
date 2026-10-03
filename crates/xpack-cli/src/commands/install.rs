@@ -60,6 +60,20 @@ pub(crate) struct Args {
     #[arg(long, conflicts_with = "trust_on_first_use")]
     pub(crate) all_users: bool,
 
+    /// When the application is open and needs to be closed for this install,
+    /// wait this many seconds for it to close before giving up.
+    ///
+    /// It needs to be closed when this install replaces xPack's programs in
+    /// the installation, coming from a newer xPack than the one that placed
+    /// them. Giving up changes nothing and exits with code 6.
+    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+    wait_for_close: u64,
+
+    /// When the application is open and needs to be closed for this install,
+    /// ask it to close, as closing its window would. It is never forced.
+    #[arg(long)]
+    close_running: bool,
+
     /// The password, when the package is sealed with one.
     #[command(flatten)]
     password: super::sealing::PasswordArgs,
@@ -97,10 +111,24 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         (manifest.application.id, manifest.application.name)
     };
 
+    let scope = if args.all_users {
+        xpack_core::InstallScope::Machine
+    } else {
+        xpack_core::InstallScope::User
+    };
+    // Kept by an installation for one user, whose updates come sealed the
+    // same way.
+    let seal_key = match (&peeked.key, scope) {
+        (Some(key), xpack_core::InstallScope::User) => {
+            Some(std::sync::Arc::new(xpack_security::seal::SealKey::from_hex(&key.to_hex())?))
+        }
+        _ => None,
+    };
+
     // For every user: the checks an elevated install makes before it writes,
     // and the package copied where the user cannot change it, which is the
     // file verified and unpacked from here on.
-    let (lock, package, scope) = if args.all_users {
+    let (lock, (installed, decision, signed_by)) = if args.all_users {
         if context.root.is_some() {
             return Err(xpack_core::Error::invalid(
                 "--all-users",
@@ -122,23 +150,32 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
             }
             None => copy,
         };
-        (lock, package, xpack_core::InstallScope::Machine)
-    } else {
-        (context.lock(&application_id)?, peeked.path.clone(), xpack_core::InstallScope::User)
-    };
-    // Kept by an installation for one user, whose updates come sealed the
-    // same way.
-    let seal_key = match (&peeked.key, scope) {
-        (Some(key), xpack_core::InstallScope::User) => {
-            Some(std::sync::Arc::new(xpack_security::seal::SealKey::from_hex(&key.to_hex())?))
-        }
-        _ => None,
-    };
-    let installed = install_from(args, &lock, &package, scope, seal_key);
-    if args.all_users {
+        let installed = install_from(args, &lock, &package, scope, seal_key);
         let _ = std::fs::remove_file(&package);
-    }
-    let (installed, decision, signed_by) = installed?;
+        (lock, installed?)
+    } else {
+        // Refused with nothing changed while the application is open and its
+        // programs are to be replaced, so tried again while it closes; the
+        // lock is taken afresh for each try, never held while waiting.
+        let paths = context.paths(&application_id)?;
+        xpack_installer::wait_while_open(
+            std::time::Duration::from_secs(args.wait_for_close),
+            args.close_running.then_some(&paths),
+            &mut || {
+                let asking = if args.close_running { "; asking it to close" } else { "" };
+                xpack_core::errln!(
+                    "{name} is open and needs to be closed for this install{asking}; waiting \
+                     up to {} seconds",
+                    args.wait_for_close
+                );
+            },
+            &mut || {
+                let lock = context.lock(&application_id)?;
+                let installed = install_from(args, &lock, &peeked.path, scope, seal_key.clone())?;
+                Ok((lock, installed))
+            },
+        )?
+    };
 
     if !installed.recovery.is_empty() {
         xpack_core::errln!("note: recovered from an interrupted operation before installing");
