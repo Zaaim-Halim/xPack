@@ -59,6 +59,12 @@ struct Args {
     /// truth when nothing is able to restart the application for them.
     #[arg(long)]
     can_restart: bool,
+
+    /// Say that the version's hooks are being run and the application opens
+    /// when they finish, instead of announcing an update. The launcher ends
+    /// this process when they do.
+    #[arg(long)]
+    finishing: bool,
 }
 
 /// Parses a severity, naming the accepted values when it is not one.
@@ -85,6 +91,7 @@ fn main() -> ExitCode {
         // than a dialog with the system's default.
         icon: args.icon.filter(|path| path.is_file()),
         can_restart: args.can_restart,
+        finishing: args.finishing,
     };
 
     let answer = xpack_notify::show(&prompt);

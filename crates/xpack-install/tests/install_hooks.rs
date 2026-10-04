@@ -795,3 +795,24 @@ fn a_version_whose_script_cannot_run_is_refused_when_it_is_staged() {
     assert!(!fixture.paths().version_dir(&v("1.1.0")).exists(), "it was staged");
     assert_eq!(fixture.state().current_version, Some(v("1.0.0")));
 }
+
+#[test]
+fn a_package_with_hooks_gets_the_dialog_that_explains_its_start_where_there_is_one() {
+    let Some(fixture) = Fixture::new() else { return };
+    let package = fixture.package(
+        "1.0.0",
+        serde_json::json!({ "update": "xpack/hooks/mark.js" }),
+        &INSTALL_ALL,
+    );
+    let options = InstallOptions {
+        notifier: Some(fixture.stand_in("notifier")),
+        ..fixture.options(InstallScope::User)
+    };
+    let installed = fixture.install(&package, &options, &Moments::new(fixture.paths())).unwrap();
+    let expected = if cfg!(any(windows, target_os = "macos")) {
+        Some(xpack_install::LauncherOutcome::Installed)
+    } else {
+        None
+    };
+    assert_eq!(installed.notifier, expected);
+}

@@ -54,9 +54,10 @@ pub struct InstallOptions {
     /// Update notifier to place in the installation root, if any.
     ///
     /// Supplied like every other binary, and placed only when the package
-    /// being installed asks for a prompt: it declares `update.notify`, it
-    /// checks while it runs so that a prompt has a moment to appear from, and
-    /// it targets a platform with a dialog implemented. An installation that
+    /// being installed asks for a prompt (it declares `update.notify` and
+    /// checks while it runs, so that a prompt has a moment to appear from) or
+    /// has hooks, whose start the dialog explains while they run; and it
+    /// targets a platform with a dialog implemented. An installation that
     /// updates silently carries no dialog code at all, which is the point —
     /// the only graphical binary xPack has should exist only where somebody
     /// asked for a graphical thing to happen.
@@ -2051,8 +2052,10 @@ impl<'lock> Installer<'lock> {
     /// and a publisher who turns prompting on later needs a new installer for
     /// it to mean anything.
     fn notifier_is_wanted(manifest: &xpack_core::Manifest) -> bool {
-        manifest.update.notify
-            && manifest.update.check_while_running
+        // A prompt to show, or hooks whose start would otherwise wait with
+        // nothing on screen: the dialog says why nothing has opened yet.
+        let prompts = manifest.update.notify && manifest.update.check_while_running;
+        (prompts || !manifest.hooks.is_empty())
             && matches!(manifest.platform.os, xpack_core::Os::Windows | xpack_core::Os::Macos)
     }
 

@@ -13,9 +13,10 @@
 //! a message box looks like.
 //!
 //! Keeping them apart means the graphical dependency exists in exactly one
-//! crate, which is installed only when a publisher asks for a prompt. An
-//! installation that wants silent updates carries no dialog code at all, and
-//! the binaries that run unconditionally are unchanged.
+//! crate, which is installed only when a publisher asks for a prompt, or ships
+//! hooks, whose start it explains while they run. An installation that wants
+//! silent updates and has no hooks carries no dialog code at all, and the
+//! binaries that run unconditionally are unchanged.
 //!
 //! # One dialog per platform, and nothing shared between them
 //!
@@ -96,6 +97,9 @@ pub enum Buttons {
     Acknowledge,
     /// Apply now, or not yet.
     ApplyOrLater,
+    /// Nothing to answer: a notice that work is under way, which the user may
+    /// hide. The caller closes it when the work ends.
+    Hide,
 }
 
 /// Everything the dialog needs to know.
@@ -130,6 +134,15 @@ pub struct Prompt {
     /// asking would be offering a choice that changes nothing. The dialog says
     /// so instead.
     pub can_restart: bool,
+
+    /// A notice, not a question: the version's hooks are being run at this
+    /// start, and the application opens when they finish.
+    ///
+    /// Shown by the launcher when they take more than a moment, so a user who
+    /// clicked the application's icon sees why nothing has opened yet. It
+    /// asks nothing; the launcher closes it when the hooks end, and hiding it
+    /// changes nothing about them.
+    pub finishing: bool,
 }
 
 impl Prompt {
@@ -139,6 +152,9 @@ impl Prompt {
     /// is installed, so "later" would describe an outcome the launcher will
     /// not honour.
     pub fn buttons(&self) -> Buttons {
+        if self.finishing {
+            return Buttons::Hide;
+        }
         if !self.can_restart || self.severity == UpdateSeverity::Critical {
             Buttons::Acknowledge
         } else {
@@ -148,6 +164,9 @@ impl Prompt {
 
     /// The title to show: the publisher's, or one built from what is known.
     pub fn title(&self) -> String {
+        if self.finishing {
+            return format!("Finishing {}'s update", self.application);
+        }
         if let Some(title) = self.title.as_ref().map(|title| title.trim()).filter(|t| !t.is_empty())
         {
             return title.to_string();
@@ -164,6 +183,13 @@ impl Prompt {
     /// Saying "restarting now" to a user whose application is not going to
     /// restart is how an updater stops being believed.
     pub fn message(&self) -> String {
+        if self.finishing {
+            let application = &self.application;
+            return format!(
+                "{application} {} is being set up.\n\n{application} opens as soon as this is done.",
+                self.version
+            );
+        }
         if let Some(message) =
             self.message.as_ref().map(|message| message.trim()).filter(|m| !m.is_empty())
         {
@@ -227,6 +253,27 @@ mod tests {
             message: None,
             icon: None,
             can_restart: false,
+            finishing: false,
+        }
+    }
+
+    #[test]
+    fn a_finishing_notice_asks_nothing_and_says_why_nothing_has_opened() {
+        // Whatever else the prompt says: a notice offers only to hide it.
+        for can_restart in [false, true] {
+            for severity in [UpdateSeverity::Optional, UpdateSeverity::Critical] {
+                let notice = Prompt {
+                    finishing: true,
+                    can_restart,
+                    severity,
+                    title: Some("Publisher's title".into()),
+                    ..prompt()
+                };
+                assert_eq!(notice.buttons(), Buttons::Hide);
+                assert_eq!(notice.title(), "Finishing Demo's update");
+                assert!(notice.message().contains("opens as soon as this is done"));
+                assert!(notice.message().contains("1.2.0"));
+            }
         }
     }
 

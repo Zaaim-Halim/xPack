@@ -54,6 +54,11 @@ const BUSY: &str = "export function main(ctx) {
     ctx.file.write(ctx.path(ctx.dataDir, 'busy-done'), 'yes');
 }";
 
+/// Takes three seconds: longer than a start waits before showing why nothing
+/// has opened.
+const SLOW: &str =
+    "export function main() { const end = Date.now() + 3000; while (Date.now() < end) {} }";
+
 /// The application: starts well, or exits with a failure at once.
 #[derive(Clone, Copy)]
 enum App {
@@ -93,6 +98,7 @@ impl World {
         fs::write(payload.join("xpack/hooks/mark.js"), MARK).unwrap();
         fs::write(payload.join("xpack/hooks/fail.js"), FAIL).unwrap();
         fs::write(payload.join("xpack/hooks/busy.js"), BUSY).unwrap();
+        fs::write(payload.join("xpack/hooks/slow.js"), SLOW).unwrap();
         let manifest = Manifest {
             format_version: FormatVersion::CURRENT,
             application: Application {
@@ -342,4 +348,37 @@ fn a_second_start_does_not_wait_for_update_confirmed_hooks() {
         first.join().unwrap();
     });
     assert!(world.paths.data_dir().join("busy-done").exists(), "the confirmed hook did not finish");
+}
+
+/// Puts a stand-in dialog where the installation's notice program goes,
+/// recording each time it is started and how it was asked.
+fn stand_in_notice(world: &World) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let names = world.state().binary_names();
+    let notifier = world.paths.notifier_file_named(&names);
+    let log = world.dir.path().join("notices");
+    fs::write(&notifier, format!("#!/bin/sh\necho \"$*\" >> '{}'\nexec sleep 30\n", log.display()))
+        .unwrap();
+    fs::set_permissions(&notifier, fs::Permissions::from_mode(0o755)).unwrap();
+    log
+}
+
+#[test]
+fn a_start_whose_hooks_run_on_says_why_nothing_has_opened_and_one_whose_hooks_are_quick_does_not() {
+    let Some(world) = World::new() else { return };
+    let hooks =
+        serde_json::json!({ "update": { "when": "before", "script": "xpack/hooks/slow.js" } });
+    world.staged("1.1.0", App::Starts, hooks);
+    let notices = stand_in_notice(&world);
+    world.launch();
+    let said = fs::read_to_string(&notices).unwrap_or_default();
+    assert!(said.contains("--finishing"), "no notice: {said:?}");
+    assert!(said.contains("--application App"), "{said}");
+    assert!(said.contains("--version 1.1.0"), "{said}");
+
+    let Some(quick) = World::new() else { return };
+    quick.staged("1.1.0", App::Starts, every_update_moment());
+    let notices = stand_in_notice(&quick);
+    quick.launch();
+    assert!(!notices.exists(), "a notice flashed up for quick hooks");
 }

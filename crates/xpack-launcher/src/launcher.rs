@@ -29,6 +29,10 @@ pub const HEALTH_FILE_ENV: &str = xpack_core::paths::HEALTH_FILE_ENV;
 /// which no part of the layout promises to keep stable.
 pub const APPLICATION_DIR_ENV: &str = xpack_core::paths::APPLICATION_DIR_ENV;
 
+/// How long a start's hooks may run before the user is shown why nothing has
+/// opened yet. Shorter, and a quick hook would flash a window up and away.
+const FINISHING_NOTICE_AFTER: Duration = Duration::from_secs(2);
+
 /// How often a probationary process is checked for having exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -307,6 +311,9 @@ impl Launcher {
             progress: &NoProgress,
             cancel: None,
         };
+        // Up while this start's hooks run, if they run for more than a
+        // moment: whoever clicked the icon is told why nothing has opened.
+        let notice = self.finishing_notice(&state);
         let state = match &state.update {
             UpdatePhase::Staged { version } if installer.is_usable(version) => {
                 let staged = version.clone();
@@ -340,6 +347,7 @@ impl Launcher {
         } else {
             state
         };
+        drop(notice);
 
         let version = state.active()?.clone();
         if !installer.is_usable(&version) {
@@ -499,6 +507,47 @@ impl Launcher {
             tracing::error!(%version, "start failed and there is nothing to roll back to");
         }
         Ok(rolled_back)
+    }
+
+    /// The notice shown if this start's hooks run for more than a moment: for
+    /// the staged version about to be applied, or the version on probation
+    /// whose update hooks may not have finished. None where there are no
+    /// hooks to run, or no dialog to show them with.
+    fn finishing_notice(&self, state: &xpack_core::InstallState) -> FinishingNotice {
+        let version = match &state.update {
+            UpdatePhase::Staged { version } => Some(version),
+            phase if phase.is_probation() => state.current_version.as_ref(),
+            _ => None,
+        };
+        let Some(manifest) = version.and_then(|version| self.read_manifest(version).ok()) else {
+            return FinishingNotice::none();
+        };
+        if manifest.hooks.is_empty() {
+            return FinishingNotice::none();
+        }
+        let notifier = self.paths.notifier_file_named(&state.binary_names());
+        if !notifier.is_file() {
+            tracing::info!("no dialog in this installation; the start waits for its hooks quietly");
+            return FinishingNotice::none();
+        }
+        let mut command = std::process::Command::new(notifier);
+        command
+            .arg("--finishing")
+            .arg("--application")
+            .arg(&manifest.application.name)
+            .arg("--version")
+            .arg(manifest.application.version.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(icon) =
+            xpack_install::integration::icon_destination(&self.paths, &manifest.desktop)
+                .filter(|path| path.is_file())
+        {
+            command.arg("--icon").arg(icon);
+        }
+        xpack_platform::without_a_console(&mut command);
+        FinishingNotice::after(FINISHING_NOTICE_AFTER, command)
     }
 
     /// The installation's `xpack-hook`, if it has one.
@@ -1163,6 +1212,65 @@ fn pending_announcement(paths: &InstallPaths) -> Option<Announcement> {
     })
 }
 
+/// A notice that a start's hooks are running, shown only once they have run
+/// for longer than a moment, and closed when they end, which is when this is
+/// dropped.
+struct FinishingNotice {
+    /// Dropped when the hooks end, which is what the thread waits for.
+    done: Option<std::sync::mpsc::Sender<()>>,
+    /// Ends with whether the notice was shown.
+    thread: Option<std::thread::JoinHandle<bool>>,
+}
+
+impl FinishingNotice {
+    /// No notice at all.
+    fn none() -> Self {
+        Self { done: None, thread: None }
+    }
+
+    /// Starts `command`, the notice, if this is still held after `delay`, and
+    /// ends it when this is dropped.
+    fn after(delay: Duration, mut command: std::process::Command) -> Self {
+        let (done, ended) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let still_running = matches!(
+                ended.recv_timeout(delay),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            if !still_running {
+                return false;
+            }
+            let mut notice = match command.spawn() {
+                Ok(notice) => notice,
+                Err(error) => {
+                    tracing::warn!(%error, "could not show that the update is being finished");
+                    return false;
+                }
+            };
+            // Until the hooks end: the sender is dropped then.
+            let _ = ended.recv();
+            let _ = notice.kill();
+            let _ = notice.wait();
+            true
+        });
+        Self { done: Some(done), thread: Some(thread) }
+    }
+}
+
+impl FinishingNotice {
+    /// Ends the notice, if it is up, and says whether it was ever shown.
+    fn finish(&mut self) -> bool {
+        drop(self.done.take());
+        self.thread.take().is_some_and(|thread| thread.join().unwrap_or(false))
+    }
+}
+
+impl Drop for FinishingNotice {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 /// Runs the notifier and waits for the user, returning how they answered.
 ///
 /// `None` means no dialog was shown — the binary would not start, or reported
@@ -1424,5 +1532,54 @@ mod tests {
         let (_dir, paths) = installation(None);
         let update = UpdateSpec { url: None, ..watching() };
         assert!(!periodic_checks_wanted(&paths, &update, true));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod finishing_notice {
+    use super::*;
+
+    /// A stand-in notice that records it started, and its process id, then
+    /// stays up until it is ended.
+    fn stand_in(dir: &Path) -> std::process::Command {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "echo $$ > \"$1/started\"; exec sleep 30",
+            "sh",
+            &dir.display().to_string(),
+        ]);
+        command
+    }
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn hooks_that_end_in_a_moment_show_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notice = FinishingNotice::after(Duration::from_millis(300), stand_in(dir.path()));
+        assert!(!notice.finish(), "a notice flashed up for quick hooks");
+    }
+
+    #[test]
+    fn hooks_that_run_on_bring_the_notice_up_and_it_goes_when_they_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = FinishingNotice::after(Duration::from_millis(200), stand_in(dir.path()));
+        let started = Instant::now();
+        while !dir.path().join("started").exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = std::fs::read_to_string(dir.path().join("started")).unwrap();
+        let pid = pid.trim();
+        assert!(alive(pid), "the notice is not up");
+        let mut notice = notice;
+        assert!(notice.finish());
+        assert!(!alive(pid), "the notice outlived the hooks");
     }
 }

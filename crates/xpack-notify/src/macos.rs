@@ -117,6 +117,11 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
             alert.addButtonWithTitle(&NSString::from_str("Restart now"));
             alert.addButtonWithTitle(&NSString::from_str("Later"));
         }
+        // The launcher ends this process when the work it describes ends;
+        // until then the one button only hides it.
+        Buttons::Hide => {
+            alert.addButtonWithTitle(&NSString::from_str("Hide"));
+        }
     }
 
     if alert.runModal() == FIRST_BUTTON { Answer::Apply } else { Answer::Later }

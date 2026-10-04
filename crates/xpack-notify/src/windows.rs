@@ -103,6 +103,9 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
     let (primary_text, has_secondary) = match prompt.buttons() {
         Buttons::Acknowledge => ("OK", false),
         Buttons::ApplyOrLater => ("Restart now", true),
+        // The launcher ends this process when the work it describes ends;
+        // until then the one button only hides it.
+        Buttons::Hide => ("Hide", false),
     };
 
     if has_secondary {
