@@ -9,8 +9,8 @@ background, and puts the previous version back if a new one fails to start.
 It ships as a handful of small native binaries written in Rust; nothing of
 xPack becomes part of your application.
 
-> **Status: pre-release (0.7.0).** The command line, installing, updating and
-> rollback are implemented, and the test suite runs on Windows, macOS and Linux
+> **Status: pre-release (0.7.0).** The command line, installing, updating,
+> rollback and hooks are implemented, and the test suite runs on Windows, macOS and Linux
 > in CI. The installation
 > wizard is tested on macOS; on Windows it builds but has not yet been run on a
 > real machine. Expect breaking changes before 1.0.
@@ -33,6 +33,9 @@ xPack becomes part of your application.
   and ship only what changed between versions.
 - **A real installer.** One file a user downloads and double-clicks, with a
   native installation wizard, or runs with `--silent` from a script.
+- **Hooks.** Scripts the package runs once at moments of an installation's
+  life, to set up a service, migrate data or clean up, limited to what they
+  declare and tested before they can ship.
 
 ## How it works
 
@@ -51,6 +54,7 @@ xPack becomes part of your application.
    launcher ── starts the active version, confirms it is healthy
    updater  ── checks the index, downloads, verifies, installs beside it
    uninstaller, and an optional "update ready" dialog
+   xpack-hook ── runs the package's hooks, when it has any
 ```
 
 ## Supported platforms
@@ -191,6 +195,7 @@ user's machine.
 | `health` | How long a new version has to prove it starts. With `requireStartupReport`, the application must write the file named in `XPACK_HEALTH_FILE`. |
 | `desktop` | A Start Menu entry, a `~/Applications` bundle or a `.desktop` file, and the icon: `.ico` or `.png` on Windows, `.icns` on macOS, `.png` or `.svg` on Linux. |
 | `instance` | `"single": true` keeps one copy running for each user. See [one running copy](#one-running-copy). |
+| `hooks` | Scripts run once when the application is installed, updated, rolled back or uninstalled. See [hooks](#hooks). |
 
 ### Command-line tools
 
@@ -340,6 +345,9 @@ moment. You can also trigger it by hand:
 xpack update com.example.myapp
 xpack rollback com.example.myapp     # back to the previous healthy version
 ```
+
+A release with [hooks](#hooks) is indexed only once they have passed
+`xpack hooks test`.
 
 **Staged rollout:** `--rollout 5` offers the release to 5% of installations;
 re-run with a higher number to widen it, or `--rollout 0` to stop it.
@@ -502,6 +510,113 @@ after it is opened. What this is, and is not:
   for everyone keeps none: an administrator updates it by installing again,
   with the password.
 
+## Hooks
+
+Some applications need more than files: a background service registered, a
+database converted when a version changes, something removed when the
+application is. A hook is a JavaScript file in the payload that xPack runs
+**once** at a moment of an installation's life:
+
+| Operation | Moments (`when`) | Left out |
+| --- | --- | --- |
+| `install` | `before` anything is written, `afterFiles` (files placed, not yet active), `after` | `after` |
+| `update` | `before` the switch, `after` it, `confirmed` once the new version has started well | `after` |
+| `rollback` | `before`, `after` | `after` |
+| `uninstall` | `before`, `after` | `before` |
+
+```json
+"hooks": {
+  "install":   { "when": "after", "script": "xpack/hooks/install-service.js" },
+  "update": [
+    { "when": "before",    "script": "xpack/hooks/stop-service.js" },
+    { "when": "after",     "script": "xpack/hooks/start-service.js", "timeoutSeconds": 600 },
+    { "when": "confirmed", "script": "xpack/hooks/remove-backup.js" }
+  ],
+  "uninstall": "xpack/hooks/remove-service.js",
+  "permissions": {
+    "user": {
+      "exec":  ["systemctl"],
+      "write": ["{home}/.config/systemd/user"]
+    }
+  }
+}
+```
+
+`script` is a `.js` file of the payload, relative to it; `timeoutSeconds`
+defaults to 300. A script exports `main`, which may be `async`:
+
+```javascript
+// xpack/hooks/install-service.js
+export function main(ctx) {
+    if (ctx.platform.os === "linux") {
+        const agent = ctx.path(ctx.versionDir, "bin", "example-agent");
+        const unit = `[Service]\nExecStart=${agent}\n\n[Install]\nWantedBy=default.target\n`;
+        ctx.file.write(ctx.path(ctx.home, ".config/systemd/user/example.service"), unit);
+        const enabled = ctx.exec("systemctl", ["--user", "enable", "--now", "example"]);
+        if (enabled.exitCode !== 0) {
+            throw new Error(`systemctl failed: ${enabled.stderr}`);
+        }
+    }
+    ctx.log.info(`ready for ${ctx.toVersion}`);
+}
+```
+
+One script serves every platform: the engine, QuickJS, ships with xPack as
+`xpack-hook`, so nothing is installed on the user's machine, and the script
+branches on `ctx.platform` where the work differs. There is no `require`, no
+import, no Node or browser API and no network: only `ctx`, which gives the
+operation and versions (`operation`, `when`, `fromVersion`, `toVersion`, and
+`cause` for a rollback), the places (`versionDir`, `dataDir`, `tempDir`,
+`home`, …), `exec` (a program run directly, never through a shell), `file`
+(`exists`, `read`, `write`, `copy`, `move`, `remove`, `makeDir`, `list`) and
+`log`.
+
+**What a hook may do.** Inside the installation it may write only in its data
+directory (`ctx.dataDir`, shared with the application) and its own temporary
+directory. Beyond it, only what `permissions` declares, separately for an
+installation for one user (`user`: places under `{home}`) and one for
+everyone (`machine`): the programs it may run and the places it may write.
+Paths are resolved, links included, before they are checked. A hook runs as
+whoever runs the operation, never with more: in an installation for one user
+it cannot elevate, and `sudo`, `runas` and the like are refused.
+
+**When one fails.** A failed `install` hook undoes the installation and leaves
+nothing behind, its log included; the installer says which hook failed and
+why, and exits with code `7`. A failed `update.before` or `update.after`
+rolls the version back and marks it bad. A failed `confirmed`, `rollback` or
+`uninstall` hook is logged and the operation carries on. Every hook runs at
+most once, even if the machine stops halfway through it, so a hook should
+cope with finding some of its work already done.
+
+**Testing before shipping.** `xpack pack` checks every hook and its
+permissions; `xpack hooks check <payload>` does the same without building.
+`xpack hooks test` installs, updates and uninstalls the package in throwaway
+installations and runs its hooks:
+
+```sh
+xpack hooks test MyApp-1.3.0-linux-x64.xpkg --previous MyApp-1.2.0-linux-x64.xpkg
+```
+
+By default nothing a hook asks for is done: each program it would run and
+each file it would change is recorded and shown, and programs answer what
+`--answers` says. `--real` does it all, for a disposable machine of the
+target platform such as a CI runner, never your own. `--all-users` tests an
+installation for everyone. The report is written beside the package, and
+**`xpack installer`, `xpack index` and `xpack delta` refuse a package with
+hooks unless a passing report for that exact build is beside it**. The report
+must have run the update scenario when the release has update hooks and
+installations update to it, and must come from a real run when the release
+is mandatory. There is no override: to ship without testing a hook,
+remove it. `xpack index --current <published update tree>` also shows how a
+release's hooks differ from the published one's, and refuses to publish the
+change without `--accept-hook-changes`. `xpack list --hooks` shows which
+hooks have run in an installation.
+
+Hooks make the package format 6. Installations made with xPack 0.7.x or
+earlier cannot update to it on their own; running an installer built with
+xPack 0.8.0 or later over them brings xPack's programs up to date, the data
+kept.
+
 ## Rust
 
 `cargo xpack` ships beside `xpack`, so a Rust project is packaged with the
@@ -553,7 +668,8 @@ mvn package -Pinstaller
 See [`integrations/maven`](integrations/maven/README.md), and the complete
 example project in
 [`integrations/maven/src/it/bundled-jdk-app`](integrations/maven/src/it/bundled-jdk-app).
-The plugin is not yet published to Maven Central; install it locally with
+Hooks are declared in the POM, and `xpack:hooks-test` tests them as part of
+an ordinary build. The plugin is not yet published to Maven Central; install it locally with
 `mvn install` in `integrations/maven`.
 
 [Expense Tracker](https://github.com/Zaaim-Halim/expense-tracker) is a real
@@ -574,6 +690,11 @@ application xPack is validated against.
   everyone](#installing-for-everyone-on-the-computer), which asks for
   administrator rights once, to install; the application itself always runs
   as the user.
+- **Hooks are trusted code, not sandboxed code.** Their scripts are payload
+  files, verified with the rest before anything runs, and `ctx` holds them to
+  the places and programs they declare. But a program a hook may run can do
+  whatever the account running it can. Permissions make hooks reviewable and
+  catch mistakes; they do not contain a publisher who means harm.
 - **Sign your installers.** Code-sign and notarise installer files after
   `xpack installer` — appending the payload invalidates an earlier signature.
 
@@ -598,6 +719,7 @@ application xPack is validated against.
 | `uninstall` | Remove an installation |
 | `recover` | Finish or undo an interrupted operation |
 | `autoupdate` | Turn automatic update checks on or off |
+| `hooks` | Check a project's hooks, or test a package's in throwaway installations |
 
 `xpack <command> --help` describes each one.
 
@@ -605,7 +727,8 @@ application xPack is validated against.
 failure, `2` bad command line, `3` a signature or checksum did not verify
 (never worth retrying), `4` another xPack operation is busy (worth retrying),
 `5` the user cancelled the installer, `6` the application is open and has to
-be closed for the install (nothing was changed).
+be closed for the install (nothing was changed), `7` a hook of the package
+failed and the operation was undone.
 
 ## Building and contributing
 

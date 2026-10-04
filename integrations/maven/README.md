@@ -351,7 +351,8 @@ same phase, before `installer`, as the sample's `installer` profile does.
 
 `xpack:index` compares a release's hooks with the published one's when given
 `-Dxpack.index.current=<directory or https URL>`, the update tree as
-published, and refuses changes unless `-Dxpack.index.acceptHookChanges=true`.
+published, and refuses changes unless `-Dxpack.index.acceptHookChanges=true`. See
+[Hooks](../../README.md#hooks) for what a hook may do and how it is tested.
 
 ## One running copy
 
