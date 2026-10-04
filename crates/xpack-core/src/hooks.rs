@@ -370,6 +370,11 @@ pub enum Scope {
     Machine,
 }
 
+/// The hook interface this release's `xpack-hook` serves: the `ctx` a
+/// script is given. Package format 6 is interface 1; a new `ctx` member, or a
+/// changed meaning, is a new package format and a new interface.
+pub const HOOK_INTERFACE: u32 = 1;
+
 /// Programs that would give a hook more rights than the installation's own,
 /// refused for an installation for one user, whatever it declares.
 pub const ELEVATION_PROGRAMS: [&str; 6] = ["sudo", "doas", "pkexec", "su", "runas", "osascript"];

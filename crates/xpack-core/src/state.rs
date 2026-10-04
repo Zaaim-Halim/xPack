@@ -342,6 +342,16 @@ pub struct InstallState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_version: Option<Version>,
 
+    /// The hook interface the installation's `xpack-hook` serves, recorded
+    /// whenever it is placed or replaced.
+    ///
+    /// An installed `xpack-hook` is replaced only by a newer installer, so a
+    /// package whose hooks need more than it serves is refused before
+    /// anything is written. Absent: no `xpack-hook`, or one placed before the
+    /// record, which serves none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_interface: Option<u32>,
+
     /// Who this installation is for. Absent is one user, which is what every
     /// installation made before this was recorded is.
     #[serde(default, skip_serializing_if = "InstallScope::is_user")]
@@ -392,6 +402,7 @@ impl InstallState {
             announced_update: None,
             launcher_format_version: None,
             runtime_version: None,
+            hook_interface: None,
             scope: InstallScope::User,
             rollout_id: None,
         }

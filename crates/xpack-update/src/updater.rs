@@ -761,6 +761,11 @@ fn install_options(lock: &InstallLock, options: &UpdateOptions) -> InstallOption
         scope: lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope),
         // Already kept, from the install that asked for the password.
         seal_key: None,
+        // An update never brings the program that runs hooks: an installed
+        // runtime program is replaced only by a newer installer. Its hooks
+        // run with the installation's own.
+        hook_engine: None,
+        cancel: None,
     }
 }
 

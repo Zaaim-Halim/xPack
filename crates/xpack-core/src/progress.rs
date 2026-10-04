@@ -128,6 +128,18 @@ pub enum ProgressEvent {
         /// Version now installed.
         version: Version,
     },
+    /// A package's hooks are running at a hook point.
+    RunningHooks {
+        /// Where.
+        point: crate::hooks::HookPoint,
+    },
+    /// A line of a running hook's output, for a terminal or a progress page.
+    HookOutput {
+        /// Where the hook runs.
+        point: crate::hooks::HookPoint,
+        /// What it wrote.
+        line: String,
+    },
     /// The new version failed and the previous one was restored.
     RolledBack {
         /// Version abandoned.
@@ -174,6 +186,8 @@ impl ProgressEvent {
             Self::Activating { version } => format!("Activating {version}"),
             Self::Completed { version } => format!("Updated to {version}"),
             Self::RolledBack { from, to } => format!("{from} failed; restored {to}"),
+            Self::RunningHooks { point } => format!("Running the {point} hooks"),
+            Self::HookOutput { point, line } => format!("[{point}] {line}"),
             Self::Failed { reason } => format!("Failed: {reason}"),
         }
     }

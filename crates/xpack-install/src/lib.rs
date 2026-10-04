@@ -52,8 +52,9 @@ pub mod trust;
 pub use hooks::HookRun;
 pub use inspect::{Existing, inspect};
 pub use installer::{
-    DeltaSource, InstallOptions, InstallSource, Installed, Installer, LauncherOutcome, Removal,
-    SPACE_MARGIN, kept_seal_key, open_if_sealed, uninstall, uninstall_into, uninstall_with_roots,
+    DeltaSource, HookContext, InstallOptions, InstallSource, Installed, Installer, LauncherOutcome,
+    Removal, SPACE_MARGIN, finish_removal, kept_seal_key, open_if_sealed, uninstall,
+    uninstall_into, uninstall_with_roots,
 };
 pub use integration::{Entry as DesktopEntry, Outcome as DesktopOutcome};
 pub use recovery::RecoveryReport;

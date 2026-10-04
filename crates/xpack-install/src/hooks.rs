@@ -410,6 +410,47 @@ impl HookRun<'_> {
     }
 }
 
+/// Parses every script `manifest` names, as found in `scripts`, without
+/// running any of them: a version whose script cannot run is refused when it
+/// arrives, rather than failing when its hook is due.
+pub fn check_scripts(engine: &Path, manifest: &Manifest, scripts: &Path) -> Result<()> {
+    let mut names: Vec<&str> = manifest.hooks.all().map(|(_, hook)| hook.script.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let mut command = Command::new(engine);
+    command.env_clear().arg("--check");
+    for name in &names {
+        command.arg(name.split('/').fold(scripts.to_path_buf(), |path, part| path.join(part)));
+    }
+    for name in ENGINE_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    xpack_platform::without_a_console(&mut command);
+    let output = command
+        .output()
+        .map_err(|e| Error::invalid("hooks", format!("{}: {e}", engine.display())))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said: String = said.chars().take(LINE_LIMIT).collect();
+    Err(Error::invalid(
+        "hooks",
+        format!(
+            "{} {}: a hook script cannot run: {}",
+            manifest.application.name,
+            manifest.application.version,
+            said.trim().replace(&format!("{}", scripts.display()), "")
+        ),
+    ))
+}
+
 /// Why one hook failed, and what it said last.
 struct Failure {
     reason: String,

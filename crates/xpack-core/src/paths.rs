@@ -535,6 +535,14 @@ impl InstallPaths {
         self.per_user_dir().join(format!("started-{}.ok", version.to_directory_name()))
     }
 
+    /// The program that runs this installation's hooks.
+    ///
+    /// Always under xPack's own name: it shows no window, and is started only
+    /// by the installer, launcher and uninstaller, never by a person.
+    pub fn hook_engine_file(&self) -> PathBuf {
+        self.executable("xpack-hook")
+    }
+
     /// The uninstaller binary for this installation.
     ///
     /// Beside the launcher and the updater. It removes the directory it lives

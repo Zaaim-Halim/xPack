@@ -680,6 +680,8 @@ impl VerifiedPayload {
             updater: payload.binary("xpack-updater"),
             uninstaller: payload.binary("xpack-uninstaller"),
             notifier: payload.binary("xpack-notify"),
+            hook_engine: payload.binary("xpack-hook"),
+            cancel: None,
             desktop_roots: None,
             desktop_entry: request.desktop_entry,
             desktop_shortcut: request.desktop_shortcut,

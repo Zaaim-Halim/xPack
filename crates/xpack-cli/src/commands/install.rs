@@ -266,6 +266,10 @@ fn install_from(
         command_roots: None,
         scope,
         seal_key,
+        // The installation's own, if it has one; `xpack` does not yet bring
+        // its own beside it.
+        hook_engine: None,
+        cancel: None,
     };
     let installed = Installer::new(lock).install(&mut verified, &options)?;
     Ok((installed, decision, signed_by))

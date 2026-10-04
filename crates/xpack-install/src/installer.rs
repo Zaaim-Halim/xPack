@@ -4,6 +4,7 @@ use crate::integration::command::CommandRoots;
 use std::path::{Path, PathBuf};
 
 use xpack_core::atomic;
+use xpack_core::hooks::{HookPoint, HookRecord, Moment, Operation};
 use xpack_core::progress::{NoProgress, ProgressEvent, ProgressReporter};
 use xpack_core::state::{UpdatePhase, VersionStatus};
 use xpack_core::{Error, InstallState, Platform, Result, Version};
@@ -114,6 +115,18 @@ pub struct InstallOptions {
     /// installation so its background updates, sealed the same way, can be
     /// opened. Not kept in an installation for everyone, which has none.
     pub seal_key: Option<std::sync::Arc<xpack_security::seal::SealKey>>,
+    /// The program that runs hooks, `xpack-hook`, to place in the
+    /// installation and to run this install's hooks with.
+    ///
+    /// Placed in every installation, whether or not the package has hooks,
+    /// so that one which has none now can receive them in an update. Its
+    /// hooks run with this one, falling back to the installation's own: the
+    /// first of them run before any program has been placed.
+    pub hook_engine: Option<PathBuf>,
+    /// Set by someone else to cancel the install while a hook runs: the hook
+    /// is stopped with everything it started, has failed, and the install is
+    /// undone as for any failed hook.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// What installing a launcher did.
@@ -148,6 +161,8 @@ pub struct Installed {
     /// `None` when none was supplied, and also when one was supplied and the
     /// package did not ask for a prompt.
     pub notifier: Option<LauncherOutcome>,
+    /// What happened to the program that runs hooks, if one was supplied.
+    pub hook_engine: Option<LauncherOutcome>,
     /// What happened to the desktop entry the manifest asked for.
     pub desktop: crate::integration::Outcome,
     /// What happened to the shortcut on the user's desktop.
@@ -156,6 +171,101 @@ pub struct Installed {
     pub command: crate::integration::Outcome,
     /// What recovery cleaned up beforehand.
     pub recovery: RecoveryReport,
+}
+
+/// The hook point of `operation` at `moment`.
+const fn point(operation: Operation, moment: Moment) -> HookPoint {
+    HookPoint { operation, moment }
+}
+
+/// What a package's hooks run with, in an operation of this crate: which
+/// program, for whom, where their progress and output go, and what cancels.
+#[derive(Clone, Copy)]
+pub struct HookContext<'a> {
+    /// The `xpack-hook` program. None runs no hook: a point with hooks then
+    /// fails, as an installation that cannot run them must not pretend to.
+    pub engine: Option<&'a Path>,
+    /// Who the installation is for.
+    pub scope: xpack_core::InstallScope,
+    /// Told when a point's hooks start, and given each line they write.
+    pub progress: &'a dyn ProgressReporter,
+    /// Set by someone else to stop the running hook; it has then failed.
+    pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
+}
+
+impl<'a> HookContext<'a> {
+    /// What an install's hooks run with: `engine`, and `options`' scope and
+    /// cancel.
+    fn of(
+        engine: Option<&'a Path>,
+        options: &'a InstallOptions,
+        progress: &'a dyn ProgressReporter,
+    ) -> Self {
+        Self { engine, scope: options.scope, progress, cancel: options.cancel.as_deref() }
+    }
+
+    /// Runs `manifest`'s hooks at `point`, its scripts found in `scripts`.
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        installer: &Installer<'_>,
+        manifest: &xpack_core::Manifest,
+        scripts: &Path,
+        point: HookPoint,
+        from_version: Option<&Version>,
+        to_version: Option<&Version>,
+        cause: Option<&str>,
+    ) -> Result<()> {
+        if manifest.hooks.at(point).next().is_none() {
+            return Ok(());
+        }
+        let engine = self.engine.ok_or_else(|| {
+            Error::invalid(
+                "hooks",
+                format!(
+                    "{} {} has {point} hooks, and there is no program to run them with",
+                    manifest.application.name, manifest.application.version
+                ),
+            )
+        })?;
+        self.progress.report(&ProgressEvent::RunningHooks { point });
+        let progress = self.progress;
+        let sink = move |point: HookPoint, line: &str| {
+            progress.report(&ProgressEvent::HookOutput { point, line: line.to_string() });
+        };
+        crate::hooks::HookRun {
+            engine,
+            scope: self.scope,
+            manifest,
+            scripts,
+            from_version,
+            to_version,
+            cause,
+            on_line: Some(&sink),
+            cancel: self.cancel,
+        }
+        .run(installer.lock, point)
+    }
+
+    /// As [`Self::run`], for the points whose failure changes nothing: it is
+    /// logged, and the operation carries on.
+    #[allow(clippy::too_many_arguments)]
+    fn run_and_carry_on(
+        &self,
+        installer: &Installer<'_>,
+        manifest: &xpack_core::Manifest,
+        scripts: &Path,
+        point: HookPoint,
+        from_version: Option<&Version>,
+        to_version: Option<&Version>,
+        cause: Option<&str>,
+    ) {
+        if let Err(error) =
+            self.run(installer, manifest, scripts, point, from_version, to_version, cause)
+        {
+            tracing::warn!(%point, %error, "a hook failed; carrying on, as for every {point} hook");
+        }
+    }
 }
 
 /// Where an installed version's files come from.
@@ -283,6 +393,18 @@ impl<'lock> Installer<'lock> {
     }
 
     /// Installs a verified package.
+    ///
+    /// # Hooks
+    ///
+    /// A package's install hooks run on a first installation, its update
+    /// hooks when it is applied over another version; see
+    /// [`InstallOptions::hook_engine`]. A failed hook is
+    /// [`Error::HookFailed`](xpack_core::Error::HookFailed). On a first
+    /// installation everything the install wrote has then been undone but the
+    /// lock and its directory: release the lock, then call
+    /// [`finish_removal`], which leaves nothing. It is safe to call after
+    /// any failed install: it removes nothing of an installation that has
+    /// versions.
     pub fn install(
         &self,
         package: &mut VerifiedPackage,
@@ -340,6 +462,10 @@ impl<'lock> Installer<'lock> {
         // install not the first.
         let first_installation = state.versions.is_empty();
 
+        if !first_installation {
+            self.refuse_unfinished_first_install(&state, &manifest, options)?;
+        }
+
         // Before anything is written, so a refusal leaves no trace.
         Self::ensure_same_scope(&state, first_installation, options.scope)?;
         state.scope = options.scope;
@@ -371,37 +497,23 @@ impl<'lock> Installer<'lock> {
             state.pin_binary_names(&manifest.application.name);
         }
 
-        // Checked before the downgrade rule so reinstalling the active version
-        // reports what is actually wrong, rather than "downgrades are
-        // rejected", which describes a different problem entirely.
-        let is_repair = if state.record(&version).is_some() {
-            if self.is_usable(&version) {
-                return Err(Error::invalid(
-                    "install",
-                    format!("version {version} is already installed"),
-                ));
-            }
-            // State records it but the files are gone. Dropping the record
-            // lets the install proceed as a repair.
-            tracing::warn!(%version, "reinstalling a version whose files are missing");
-            state.versions.remove(&version.to_string());
-            self.lock.save_state(&state)?;
-            true
-        } else {
-            false
-        };
+        let is_repair = self.check_repair(&mut state, &version, options.allow_downgrade)?;
 
-        // A repair restores files that state already expects, so it is not a
-        // version change and the downgrade rule does not apply — refusing
-        // would leave a user unable to fix their own installation, and
-        // repairing the *active* version always compares equal to itself.
-        //
-        // Nothing is weakened by this: activation checks the rule again, so a
-        // repaired older version still cannot become active without passing
-        // it or an explicit override.
-        if !is_repair {
-            state.ensure_not_downgrade(&version, options.allow_downgrade)?;
-        }
+        // Whether this install runs the package's hooks: the install moments
+        // on a first installation, the update moments when it applies a
+        // version over another. Never on a repair, whose moments are past,
+        // nor when a version is only staged: whatever activates it runs them.
+        let has_hooks = !manifest.hooks.is_empty();
+        let install_hooks = first_installation && has_hooks;
+        let update_hooks = !first_installation && !is_repair && options.activate && has_hooks;
+        // Before anything is written, like every other refusal.
+        self.ensure_hooks_can_run(
+            options,
+            &manifest,
+            &state,
+            &replacing,
+            install_hooks || update_hooks,
+        )?;
 
         // After every refusal and before the new version is written: a
         // refused install changes nothing, and the format check above trusts
@@ -420,25 +532,29 @@ impl<'lock> Installer<'lock> {
         package.materialise(&staging, progress)?;
         write_version_metadata(&staging, package)?;
 
-        self.promote(&staging, &version, &state)?;
+        let engine = self.hook_engine(options);
+        let hooks = HookContext::of(engine.as_deref(), options, progress);
+        let dir = paths.version_dir(&version);
 
-        state.stage_version(&version, None);
-
-        // Read from the manifest that was just verified, never from the update
-        // index: a server that could declare releases mandatory could stop an
-        // application starting whenever it liked. Raised only, so an older
-        // release cannot lower a requirement a newer one set.
-        if manifest.update.mandatory
-            && state.required_version.as_ref().is_none_or(|current| current < &version)
+        if (install_hooks || update_hooks)
+            && let Err(error) = self.ready_to_promote(&hooks, &manifest, &staging, install_hooks)
         {
-            tracing::info!(%version, "this release is mandatory; older versions will not start");
-            state.required_version = Some(version.clone());
+            let _ = atomic::remove_dir_all_if_exists(&staging);
+            if first_installation {
+                self.undo_first_install(None, &[], options);
+            }
+            return Err(error);
         }
 
-        state.update = UpdatePhase::Staged { version: version.clone() };
-        self.lock.save_state(&state)?;
+        self.promote(&staging, &version, &state)?;
 
+        self.record_staged(&mut state, &manifest)?;
         tracing::info!(%version, "version installed");
+
+        if install_hooks {
+            let at = point(Operation::Install, Moment::AfterFiles);
+            self.run_or_undo(&hooks, &manifest, &dir, at, None, false, options)?;
+        }
 
         // Before activation, so that a version becoming current always has an
         // entry point by the time anything could try to start it.
@@ -449,42 +565,20 @@ impl<'lock> Installer<'lock> {
             keep_seal_key(paths, key)?;
         }
 
-        // After the binaries, because the entry points at one of them, and a
-        // shortcut to a launcher that is not there yet would be broken for as
-        // long as the window between the two writes lasted.
-        //
-        // Never fails the install: see the integration module for why.
-        let (desktop, written) =
-            self.update_desktop_entry(&manifest, &version, options.desktop_roots.as_ref());
-        let desktop_shortcut = self.update_desktop_shortcut(
-            written.as_ref(),
-            first_installation && options.desktop_shortcut,
-            options.desktop_roots.as_ref(),
-        );
-        // After the binaries too: the command runs the launcher.
-        let command =
-            self.update_commands(&manifest, &previous_commands, options.command_roots.as_ref());
+        let (desktop, written, desktop_shortcut, command) =
+            self.write_entries(&manifest, options, first_installation, &previous_commands);
 
-        let activated = if options.activate {
-            progress.report(&ProgressEvent::Activating { version: version.clone() });
-            // Re-activating the version that is already current is a no-op for
-            // the downgrade rule; a repair must be allowed to restore it.
-            let already_current = self.load_state()?.current_version.as_ref() == Some(&version);
-            self.activate(&version, options.allow_downgrade || (is_repair && already_current))?;
-            // Nothing can watch a machine-wide version start on its behalf: the
-            // launcher runs as a user, who cannot write here. So it is
-            // committed now, and the version before it is kept for an
-            // administrator to roll back to.
-            if options.scope == xpack_core::InstallScope::Machine {
-                self.commit_health()?;
-            }
-            true
-        } else {
-            false
-        };
+        let activated =
+            self.activate_installed(&hooks, &manifest, options, is_repair, update_hooks)?;
 
-        // Last, after everything this install writes, activation's state
-        // included: anything written after it would escape it.
+        // After activation, so it finds the installation complete; before the
+        // tree is restricted, so what it writes is restricted too.
+        if install_hooks {
+            let wrote = matches!(command, crate::integration::Outcome::Done(_));
+            let (at, entry) = (point(Operation::Install, Moment::After), written.as_ref());
+            self.run_or_undo(&hooks, &manifest, &dir, at, entry, wrote, options)?;
+        }
+
         if options.scope == xpack_core::InstallScope::Machine {
             restrict_tree(paths.root())?;
         }
@@ -497,11 +591,554 @@ impl<'lock> Installer<'lock> {
             updater: placed.updater,
             uninstaller: placed.uninstaller,
             notifier: placed.notifier,
+            hook_engine: placed.hook_engine,
             desktop,
             desktop_shortcut,
             command,
             recovery: report,
         })
+    }
+
+    /// Whether this install repairs a version whose files are missing:
+    /// recorded in state, but not on disk. A version installed and whole is
+    /// refused; the downgrade rule applies to anything that is not a repair.
+    fn check_repair(
+        &self,
+        state: &mut InstallState,
+        version: &Version,
+        allow_downgrade: bool,
+    ) -> Result<bool> {
+        // Checked before the downgrade rule so reinstalling the active version
+        // reports what is actually wrong, rather than "downgrades are
+        // rejected", which describes a different problem entirely.
+        let is_repair = if state.record(version).is_some() {
+            if self.is_usable(version) {
+                return Err(Error::invalid(
+                    "install",
+                    format!("version {version} is already installed"),
+                ));
+            }
+            // State records it but the files are gone. Dropping the record
+            // lets the install proceed as a repair.
+            tracing::warn!(%version, "reinstalling a version whose files are missing");
+            state.versions.remove(&version.to_string());
+            self.lock.save_state(state)?;
+            true
+        } else {
+            false
+        };
+
+        // A repair restores files that state already expects, so it is not a
+        // version change and the downgrade rule does not apply — refusing
+        // would leave a user unable to fix their own installation, and
+        // repairing the *active* version always compares equal to itself.
+        //
+        // Nothing is weakened by this: activation checks the rule again, so a
+        // repaired older version still cannot become active without passing
+        // it or an explicit override.
+        if !is_repair {
+            state.ensure_not_downgrade(version, allow_downgrade)?;
+        }
+
+        Ok(is_repair)
+    }
+
+    /// Records the version just promoted as staged, and raises the required
+    /// version if its release is mandatory.
+    fn record_staged(
+        &self,
+        state: &mut InstallState,
+        manifest: &xpack_core::Manifest,
+    ) -> Result<()> {
+        let version = &manifest.application.version;
+        state.stage_version(version, None);
+
+        // Read from the manifest that was just verified, never from the update
+        // index: a server that could declare releases mandatory could stop an
+        // application starting whenever it liked. Raised only, so an older
+        // release cannot lower a requirement a newer one set.
+        if manifest.update.mandatory
+            && state.required_version.as_ref().is_none_or(|current| current < version)
+        {
+            tracing::info!(%version, "this release is mandatory; older versions will not start");
+            state.required_version = Some(version.clone());
+        }
+
+        state.update = UpdatePhase::Staged { version: version.clone() };
+        self.lock.save_state(state)?;
+
+        Ok(())
+    }
+
+    /// Writes what the package asks for outside the installation: its menu
+    /// entry, the desktop shortcut and its commands. Never fails the install:
+    /// see the integration module for why.
+    fn write_entries(
+        &self,
+        manifest: &xpack_core::Manifest,
+        options: &InstallOptions,
+        first_installation: bool,
+        previous_commands: &[crate::integration::command::Command],
+    ) -> (
+        crate::integration::Outcome,
+        Option<crate::integration::Entry>,
+        crate::integration::Outcome,
+        crate::integration::Outcome,
+    ) {
+        let version = &manifest.application.version;
+        // After the binaries, because the entry points at one of them, and a
+        // shortcut to a launcher that is not there yet would be broken for as
+        // long as the window between the two writes lasted.
+        //
+        // Never fails the install: see the integration module for why.
+        let (desktop, written) =
+            self.update_desktop_entry(manifest, version, options.desktop_roots.as_ref());
+        let desktop_shortcut = self.update_desktop_shortcut(
+            written.as_ref(),
+            first_installation && options.desktop_shortcut,
+            options.desktop_roots.as_ref(),
+        );
+        // After the binaries too: the command runs the launcher.
+        let command =
+            self.update_commands(manifest, previous_commands, options.command_roots.as_ref());
+
+        (desktop, written, desktop_shortcut, command)
+    }
+
+    /// Makes the installed version active, as `options` ask: with its update
+    /// hooks when it is applied over another, and committed at once in an
+    /// installation for everyone. Returns whether it was made active.
+    fn activate_installed(
+        &self,
+        hooks: &HookContext<'_>,
+        manifest: &xpack_core::Manifest,
+        options: &InstallOptions,
+        is_repair: bool,
+        update_hooks: bool,
+    ) -> Result<bool> {
+        let version = &manifest.application.version;
+        if update_hooks {
+            self.apply_with_hooks(hooks, manifest, version, options.allow_downgrade)?;
+            return Ok(true);
+        }
+        if !options.activate {
+            return Ok(false);
+        }
+        hooks.progress.report(&ProgressEvent::Activating { version: version.clone() });
+        // Re-activating the version that is already current is a no-op for
+        // the downgrade rule; a repair must be allowed to restore it.
+        let already_current = self.load_state()?.current_version.as_ref() == Some(version);
+        self.activate(version, options.allow_downgrade || (is_repair && already_current))?;
+        // Nothing can watch a machine-wide version start on its behalf: the
+        // launcher runs as a user, who cannot write here. So it is committed
+        // now, and the version before it is kept for an administrator to
+        // roll back to.
+        if options.scope == xpack_core::InstallScope::Machine {
+            self.commit_health()?;
+        }
+        Ok(true)
+    }
+
+    /// Refuses, and undoes, a first installation cut short while its hooks
+    /// ran (a power cut, a killed installer): its version's install moments
+    /// never all succeeded, and none of them will run again. Undone as a
+    /// failed install is, so the next run is a new installation.
+    fn refuse_unfinished_first_install(
+        &self,
+        state: &InstallState,
+        manifest: &xpack_core::Manifest,
+        options: &InstallOptions,
+    ) -> Result<()> {
+        if !self.unfinished_first_install(state)? {
+            return Ok(());
+        }
+        let name = &manifest.application.name;
+        // Only an installer undoes it. A run that only stages a version (the
+        // background updater) may be beside the application running: it
+        // refuses, and changes nothing.
+        if !options.activate {
+            return Err(Error::invalid(
+                "installation",
+                format!("the installation of {name} did not finish; run its installer again"),
+            ));
+        }
+        let entry = desktop_entry_for_removal(self.lock);
+        let commands = commands_for_removal(self.lock);
+        self.undo_first_install(entry.as_ref(), &commands, options);
+        Err(Error::invalid(
+            "installation",
+            format!(
+                "an earlier installation of {name} did not finish, and has been removed; run the \
+                 installer again"
+            ),
+        ))
+    }
+
+    /// Runs a first installation's hooks at `at`, and undoes the
+    /// installation if they fail: with the desktop `entry` and the commands
+    /// it wrote, when it has written them.
+    #[allow(clippy::too_many_arguments)]
+    fn run_or_undo(
+        &self,
+        hooks: &HookContext<'_>,
+        manifest: &xpack_core::Manifest,
+        scripts: &Path,
+        at: HookPoint,
+        entry: Option<&crate::integration::Entry>,
+        commands_written: bool,
+        options: &InstallOptions,
+    ) -> Result<()> {
+        let version = &manifest.application.version;
+        let Err(error) = hooks.run(self, manifest, scripts, at, None, Some(version), None) else {
+            return Ok(());
+        };
+        let commands = if commands_written {
+            crate::integration::command::Command::all_from_manifest(
+                manifest,
+                self.lock.paths(),
+                &self.binary_names(),
+            )
+        } else {
+            Vec::new()
+        };
+        self.undo_first_install(entry, &commands, options);
+        Err(error)
+    }
+
+    /// Parses every script of `manifest`, in `staging`, before any of them
+    /// runs, so one that cannot run is refused with nothing done; then, on
+    /// a first installation, runs `install.before` from staging, before the
+    /// version is in `versions/`: what it sees of the installation is what
+    /// was there.
+    fn ready_to_promote(
+        &self,
+        hooks: &HookContext<'_>,
+        manifest: &xpack_core::Manifest,
+        staging: &Path,
+        install_hooks: bool,
+    ) -> Result<()> {
+        let engine =
+            hooks.engine.ok_or_else(|| Error::invalid("hooks", "no program to run them with"))?;
+        crate::hooks::check_scripts(engine, manifest, staging)?;
+        if install_hooks {
+            let version = &manifest.application.version;
+            hooks.run(
+                self,
+                manifest,
+                staging,
+                point(Operation::Install, Moment::Before),
+                None,
+                Some(version),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The `xpack-hook` this install runs hooks with: the one supplied, or the
+    /// installation's own.
+    fn hook_engine(&self, options: &InstallOptions) -> Option<PathBuf> {
+        options.hook_engine.clone().filter(|engine| engine.is_file()).or_else(|| {
+            Some(self.lock.paths().hook_engine_file()).filter(|engine| engine.is_file())
+        })
+    }
+
+    /// Refuses, before anything is written, a package whose hooks could not
+    /// run: now, for want of a program to run them with, or later, because
+    /// the `xpack-hook` the installation is left with serves too old a hook
+    /// interface. The launcher and the uninstaller run that one.
+    fn ensure_hooks_can_run(
+        &self,
+        options: &InstallOptions,
+        manifest: &xpack_core::Manifest,
+        state: &InstallState,
+        replacing: &[Replacement],
+        run_now: bool,
+    ) -> Result<()> {
+        if manifest.hooks.is_empty() {
+            return Ok(());
+        }
+        let installed = self.lock.paths().hook_engine_file().is_file();
+        let supplied = options.hook_engine.as_ref().is_some_and(|engine| engine.is_file());
+        let replaced = replacing.iter().any(|r| r.slot == Slot::HookEngine);
+        let left_with = if supplied && (!installed || replaced) {
+            xpack_core::hooks::HOOK_INTERFACE
+        } else if installed {
+            state.hook_interface.unwrap_or(0)
+        } else {
+            0
+        };
+        let name = &manifest.application.name;
+        let version = &manifest.application.version;
+        if run_now && !supplied && !installed {
+            return Err(Error::invalid(
+                "hooks",
+                format!(
+                    "{name} {version} has hooks, and this installation has no program to run \
+                     them. Run the newest installer of {name}."
+                ),
+            ));
+        }
+        if left_with < xpack_core::hooks::HOOK_INTERFACE {
+            return Err(Error::invalid(
+                "hooks",
+                format!(
+                    "{name} {version} has hooks this installation's xPack cannot run. Run the \
+                     newest installer of {name}, which brings one that can."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Applies `version`, already installed, over the active one, with its
+    /// update hooks: `update.before`, activation, `update.after`, and for an
+    /// installation for everyone `update.confirmed` at once, since nothing
+    /// can watch its start on an administrator's behalf.
+    ///
+    /// A failed `update.before` leaves the active version as it was and
+    /// marks this one bad; a failed `update.after` rolls it back. Either
+    /// runs its rollback hooks, and the failure is returned.
+    fn apply_with_hooks(
+        &self,
+        hooks: &HookContext<'_>,
+        manifest: &xpack_core::Manifest,
+        version: &Version,
+        allow_downgrade: bool,
+    ) -> Result<()> {
+        let paths = self.lock.paths();
+        let scripts = paths.version_dir(version);
+        let previous = self.load_state()?.current_version;
+        // A cancel stops the update hook; it must not stop the rollback hooks
+        // that undo it, which run once and would then never run at all.
+        let undo = HookContext { cancel: None, ..*hooks };
+
+        if let Err(error) = hooks.run(
+            self,
+            manifest,
+            &scripts,
+            point(Operation::Update, Moment::Before),
+            previous.as_ref(),
+            Some(version),
+            None,
+        ) {
+            self.abandon_update(&undo, manifest, version, previous.as_ref(), &error)?;
+            return Err(error);
+        }
+
+        hooks.progress.report(&ProgressEvent::Activating { version: version.clone() });
+        self.activate(version, allow_downgrade)?;
+
+        if let Err(error) = hooks.run(
+            self,
+            manifest,
+            &scripts,
+            point(Operation::Update, Moment::After),
+            previous.as_ref(),
+            Some(version),
+            None,
+        ) {
+            self.roll_back_with_hooks(
+                &undo,
+                "hookFailed",
+                &format!("its update.after hook failed: {error}"),
+            )?;
+            return Err(error);
+        }
+
+        if hooks.scope == xpack_core::InstallScope::Machine {
+            self.commit_health()?;
+            hooks.run_and_carry_on(
+                self,
+                manifest,
+                &scripts,
+                point(Operation::Update, Moment::Confirmed),
+                previous.as_ref(),
+                Some(version),
+                None,
+            );
+        }
+        Ok(())
+    }
+
+    /// Gives up `version` after its `update.before` hook failed, before it
+    /// was ever active: it is marked bad, and its rollback hooks undo what
+    /// its update hooks did.
+    fn abandon_update(
+        &self,
+        hooks: &HookContext<'_>,
+        manifest: &xpack_core::Manifest,
+        version: &Version,
+        active: Option<&Version>,
+        error: &Error,
+    ) -> Result<()> {
+        let scripts = self.lock.paths().version_dir(version);
+        let cause = Some("hookFailed");
+        hooks.run_and_carry_on(
+            self,
+            manifest,
+            &scripts,
+            point(Operation::Rollback, Moment::Before),
+            Some(version),
+            active,
+            cause,
+        );
+        let mut state = self.load_state()?;
+        state.mark_bad(version, format!("its update.before hook failed: {error}"));
+        if state.update == (UpdatePhase::Staged { version: version.clone() }) {
+            state.update = UpdatePhase::Idle;
+        }
+        self.lock.save_state(&state)?;
+        hooks.run_and_carry_on(
+            self,
+            manifest,
+            &scripts,
+            point(Operation::Rollback, Moment::After),
+            Some(version),
+            active,
+            cause,
+        );
+        Ok(())
+    }
+
+    /// Rolls the active version back, marked bad for `reason`, running its
+    /// rollback hooks around it with `cause`, if its update hooks had
+    /// started: a version with none has nothing of its own to undo.
+    ///
+    /// What the launcher does when a version fails to start or its update
+    /// hook fails, and what an installer does when the version it applied
+    /// fails its `update.after` hook. A failed rollback hook is logged, and
+    /// the rollback carries on. Returns the version now active, as
+    /// [`Self::record_failure`] does.
+    pub fn roll_back_with_hooks(
+        &self,
+        hooks: &HookContext<'_>,
+        cause: &str,
+        reason: &str,
+    ) -> Result<Option<Version>> {
+        let paths = self.lock.paths();
+        let state = self.load_state()?;
+        let undone = state.active()?.clone();
+        let target = state.best_rollback_target(&undone);
+        let manifest = std::fs::read(paths.version_manifest_file(&undone))
+            .ok()
+            .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok());
+        let started = HookRecord::read(&paths.hook_record_file())
+            .is_ok_and(|record| record.any_started(&undone, Operation::Update));
+        let scripts = paths.version_dir(&undone);
+        if let (Some(manifest), true) = (&manifest, started) {
+            hooks.run_and_carry_on(
+                self,
+                manifest,
+                &scripts,
+                point(Operation::Rollback, Moment::Before),
+                Some(&undone),
+                target.as_ref(),
+                Some(cause),
+            );
+        }
+        let restored = self.record_failure(reason)?;
+        if let (Some(manifest), true) = (&manifest, started) {
+            hooks.run_and_carry_on(
+                self,
+                manifest,
+                &scripts,
+                point(Operation::Rollback, Moment::After),
+                Some(&undone),
+                restored.as_ref(),
+                Some(cause),
+            );
+        }
+        if let Some(to) = &restored {
+            hooks.progress.report(&ProgressEvent::RolledBack { from: undone, to: to.clone() });
+        }
+        Ok(restored)
+    }
+
+    /// Whether this installation is a first installation cut short while its
+    /// install hooks ran: one version, with install hooks, not every one of
+    /// whose points succeeded.
+    fn unfinished_first_install(&self, state: &InstallState) -> Result<bool> {
+        if state.versions.len() != 1 {
+            return Ok(false);
+        }
+        let Some(version) = state.versions.keys().next().and_then(|v| Version::parse(v).ok())
+        else {
+            return Ok(false);
+        };
+        let paths = self.lock.paths();
+        let Some(manifest) = std::fs::read(paths.version_manifest_file(&version))
+            .ok()
+            .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok())
+        else {
+            return Ok(false);
+        };
+        if manifest.hooks.install.is_empty() {
+            return Ok(false);
+        }
+        let record = HookRecord::read(&paths.hook_record_file())?;
+        // Only a version that was first-installed here: a version applied
+        // by an update declares the same install hooks and never ran them.
+        // A first installation records `install.before` before the version
+        // is recorded at all, so one cut short always has a start of its own.
+        if !record.any_started(&version, Operation::Install) {
+            return Ok(false);
+        }
+        let unfinished = Operation::Install.moments().iter().any(|moment| {
+            let point = HookPoint { operation: Operation::Install, moment: *moment };
+            let scripts: Vec<&str> = manifest.hooks.at(point).map(|h| h.script.as_str()).collect();
+            !scripts.is_empty() && !record.all_succeeded(&version, point, scripts)
+        });
+        Ok(unfinished)
+    }
+
+    /// Undoes a first installation whose hook failed: everything it wrote,
+    /// as an uninstall removes it, and what its hooks may have left in the
+    /// installation, its data, run directories and log included. Not the
+    /// lock in `state/`, nor the root: the caller does that with
+    /// [`finish_removal`] once the lock is released.
+    ///
+    /// Never runs a hook: this reverses an install, it is not an uninstall.
+    /// Never fails: what cannot be removed is logged, and the failure that
+    /// caused the undo is what the caller reports.
+    fn undo_first_install(
+        &self,
+        entry: Option<&crate::integration::Entry>,
+        commands: &[crate::integration::command::Command],
+        options: &InstallOptions,
+    ) {
+        let paths = self.lock.paths();
+        if let Err(error) = remove_contents(
+            self.lock,
+            entry,
+            commands,
+            options.desktop_roots.as_ref(),
+            options.command_roots.as_ref(),
+        ) {
+            tracing::error!(%error, "could not undo all of a failed installation");
+        }
+        for dir in [paths.data_dir(), paths.hook_runs_dir(), paths.logs_dir(), paths.staging_root()]
+        {
+            if let Err(error) = atomic::remove_dir_all_if_exists(&dir) {
+                tracing::error!(%error, dir = %dir.display(), "could not remove");
+            }
+        }
+        // Everything in `state/` but the lock, held until the caller lets go.
+        let lock_file = paths.lock_file();
+        for path in entries_in(&paths.state_dir()) {
+            if path == lock_file {
+                continue;
+            }
+            let removed = if path.is_dir() {
+                atomic::remove_dir_all_if_exists(&path)
+            } else {
+                atomic::remove_file_if_exists(&path)
+            };
+            if let Err(error) = removed {
+                tracing::error!(%error, path = %path.display(), "could not remove");
+            }
+        }
+        tracing::warn!(root = %paths.root().display(), "a failed installation was undone");
     }
 
     /// Records what the user declined of what the package asks for.
@@ -825,6 +1462,10 @@ impl<'lock> Installer<'lock> {
             } else {
                 place(&options.notifier, Self::install_notifier)?
             },
+            // In every installation, for everyone too: a hook of an
+            // installation for everyone runs in the installer, as the
+            // administrator, with the same program.
+            hook_engine: place(&options.hook_engine, Self::install_hook_engine)?,
         };
 
         if !replacing.is_empty() {
@@ -836,6 +1477,7 @@ impl<'lock> Installer<'lock> {
                     Slot::Updater => placed.updater = outcome,
                     Slot::Uninstaller => placed.uninstaller = outcome,
                     Slot::Notifier => placed.notifier = outcome,
+                    Slot::HookEngine => placed.hook_engine = outcome,
                     Slot::CommandCopy => {}
                 }
             }
@@ -887,6 +1529,7 @@ impl<'lock> Installer<'lock> {
             paths.updater_file_named(&names),
             paths.uninstaller_file_named(&names),
             paths.notifier_file_named(&names),
+            paths.hook_engine_file(),
         ]
         .iter()
         .any(|path| path.exists())
@@ -908,10 +1551,15 @@ impl<'lock> Installer<'lock> {
         let from = self.load_state()?.runtime_version;
         let programs: Vec<_> = replacing.iter().map(|r| r.program.clone()).collect();
         let launcher = replacing.iter().any(|r| r.slot == Slot::Launcher);
+        let engine = replacing.iter().any(|r| r.slot == Slot::HookEngine);
         crate::runtime::replace(self.lock.paths(), &programs, from, release.clone(), &mut || {
-            self.record_runtime(release, launcher)
+            self.record_runtime(release, launcher)?;
+            if engine { self.record_hook_interface() } else { Ok(()) }
         })?;
         state.runtime_version = Some(release.clone());
+        if engine {
+            state.hook_interface = Some(xpack_core::hooks::HOOK_INTERFACE);
+        }
         if launcher {
             state.launcher_format_version =
                 Some(xpack_core::manifest::MAX_SUPPORTED_FORMAT_VERSION);
@@ -959,6 +1607,7 @@ impl<'lock> Installer<'lock> {
             (Slot::Updater, &options.updater, paths.updater_file_named(&names), !shared),
             (Slot::Uninstaller, &options.uninstaller, paths.uninstaller_file_named(&names), true),
             (Slot::Notifier, &options.notifier, paths.notifier_file_named(&names), notifier_wanted),
+            (Slot::HookEngine, &options.hook_engine, paths.hook_engine_file(), true),
         ];
         let mut replacing: Vec<Replacement> = Vec::new();
         for (slot, source, destination, wanted) in candidates {
@@ -1316,6 +1965,24 @@ impl<'lock> Installer<'lock> {
         )
     }
 
+    /// Places the program that runs hooks in the installation root, and
+    /// records the hook interface it serves.
+    pub fn install_hook_engine(&self, source: &Path) -> Result<LauncherOutcome> {
+        let outcome =
+            Self::install_binary(source, &self.lock.paths().hook_engine_file(), "hook engine")?;
+        if outcome == LauncherOutcome::Installed {
+            self.record_hook_interface()?;
+        }
+        Ok(outcome)
+    }
+
+    /// Records that the installation's `xpack-hook` is this release's.
+    fn record_hook_interface(&self) -> Result<()> {
+        let mut state = self.load_state()?;
+        state.hook_interface = Some(xpack_core::hooks::HOOK_INTERFACE);
+        self.lock.save_state(&state)
+    }
+
     /// Places the uninstaller in the installation root.
     pub fn install_uninstaller(&self, source: &Path) -> Result<LauncherOutcome> {
         Self::install_binary(
@@ -1632,13 +2299,21 @@ struct Placed {
     updater: Option<LauncherOutcome>,
     uninstaller: Option<LauncherOutcome>,
     notifier: Option<LauncherOutcome>,
+    hook_engine: Option<LauncherOutcome>,
 }
 
 impl Placed {
     /// Whether any program was written where there was none.
     fn any_installed(&self) -> bool {
-        [self.launcher, self.gui_launcher, self.updater, self.uninstaller, self.notifier]
-            .contains(&Some(LauncherOutcome::Installed))
+        [
+            self.launcher,
+            self.gui_launcher,
+            self.updater,
+            self.uninstaller,
+            self.notifier,
+            self.hook_engine,
+        ]
+        .contains(&Some(LauncherOutcome::Installed))
     }
 }
 
@@ -1650,6 +2325,7 @@ enum Slot {
     Updater,
     Uninstaller,
     Notifier,
+    HookEngine,
     /// A command's copy of the console launcher, on Windows.
     CommandCopy,
 }
@@ -1837,7 +2513,30 @@ pub fn uninstall_into(
     // user's menu with no way to find it again.
     let desktop_entry = desktop_entry_for_removal(&lock);
     let commands = commands_for_removal(&lock);
+    let (desktop, desktop_shortcut, command) =
+        remove_contents(&lock, desktop_entry.as_ref(), &commands, desktop_roots, command_roots)?;
 
+    // Releases the lock and closes the handle to the file inside `state/`.
+    // Everything after this point runs unlocked, which is why it is ordered
+    // last and why the root removal cannot recurse.
+    drop(lock);
+    let (root_removed, remaining) = finish_removal(&paths)?;
+    tracing::info!(root = %root.display(), root_removed, "installation removed");
+    Ok(Removal { root, root_removed, remaining, desktop, desktop_shortcut, command })
+}
+
+/// Removes what is xPack's in an installation, under its lock: versions,
+/// programs, configuration, the desktop entry, shortcut and commands. What
+/// is in `state/`, where the lock lives, is left for [`finish_removal`].
+fn remove_contents(
+    lock: &InstallLock,
+    desktop_entry: Option<&crate::integration::Entry>,
+    commands: &[crate::integration::command::Command],
+    desktop_roots: Option<&crate::integration::Roots>,
+    command_roots: Option<&crate::integration::command::CommandRoots>,
+) -> Result<(crate::integration::Outcome, crate::integration::Outcome, crate::integration::Outcome)>
+{
+    let paths = lock.paths();
     // Cleared and persisted before anything is deleted, so an interruption
     // cannot leave state describing versions that no longer exist.
     let id = paths
@@ -1874,12 +2573,15 @@ pub fn uninstall_into(
         atomic::remove_file_if_exists(&paths.notifier_file_named(names))?;
         atomic::remove_file_if_exists(&paths.uninstaller_file_named(names))?;
     }
+    atomic::remove_file_if_exists(&paths.hook_engine_file())?;
+    // What a hook run that was cut short left behind.
+    atomic::remove_dir_all_if_exists(&paths.hook_runs_dir())?;
 
     // The icon copied into the root for the desktop entry, at the exact path
     // the manifest implies rather than anything matching `icon.*`. Globbing
     // would delete a user's own `icon.jpg` from the root, which this function
     // promises never to do — such a file is reported in `remaining` instead.
-    if let Some(icon) = desktop_entry.as_ref().and_then(|entry| entry.icon.clone()) {
+    if let Some(icon) = desktop_entry.and_then(|entry| entry.icon.clone()) {
         atomic::remove_file_if_exists(&icon)?;
     }
 
@@ -1890,7 +2592,7 @@ pub fn uninstall_into(
 
     // Before the lock is released, so it cannot race an install that starts
     // the moment the lock is free and recreates the entry we are removing.
-    let desktop = match &desktop_entry {
+    let desktop = match desktop_entry {
         Some(entry) => {
             let outcome =
                 match desktop_roots.cloned().or_else(|| crate::integration::roots_for(scope)) {
@@ -1905,7 +2607,7 @@ pub fn uninstall_into(
         None => crate::integration::Outcome::NothingToDo,
     };
     // By its record, which is in the state directory removed below.
-    let desktop_shortcut = crate::integration::desktop_shortcut::remove(&paths);
+    let desktop_shortcut = crate::integration::desktop_shortcut::remove(paths);
     desktop_shortcut.log("uninstall");
     let command = match (
         commands.is_empty(),
@@ -1913,7 +2615,7 @@ pub fn uninstall_into(
     ) {
         (true, _) => crate::integration::Outcome::NothingToDo,
         (false, Some(roots)) => {
-            let outcome = crate::integration::command::remove_all(&commands, &roots);
+            let outcome = crate::integration::command::remove_all(commands, &roots);
             outcome.log("uninstall");
             outcome
         }
@@ -1922,20 +2624,33 @@ pub fn uninstall_into(
         }
     };
 
-    // Releases the lock and closes the handle to the file inside `state/`.
-    // Everything after this point runs unlocked, which is why it is ordered
-    // last and why the root removal cannot recurse.
-    drop(lock);
+    Ok((desktop, desktop_shortcut, command))
+}
 
+/// Finishes removing an installation once its lock is released: its
+/// `state/` directory, then its root, if nothing else is left in it.
+///
+/// What [`uninstall_into`] ends with, and what a caller does after an
+/// install of a first installation fails (see [`Installer::install`]): the
+/// lock lives in `state/`, and Windows deletes no file that is open.
+/// Returns whether the root went, and what kept it if not: a user's own
+/// files are never removed.
+pub fn finish_removal(paths: &xpack_core::InstallPaths) -> Result<(bool, Vec<PathBuf>)> {
+    let root = paths.root();
+    // Only an installation that has nothing left: called by mistake on one
+    // that still has a version, on disk or in its state, it removes nothing.
+    let has_versions = paths.versions_dir().exists()
+        || InstallState::load(&paths.state_file()).is_ok_and(|s| !s.value.versions.is_empty());
+    if has_versions {
+        return Ok((false, entries_in(root)));
+    }
     atomic::remove_dir_all_if_exists(&paths.state_dir())?;
-
-    let root_removed = match std::fs::remove_dir(&root) {
+    let root_removed = match std::fs::remove_dir(root) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(_) => false,
     };
-
-    let remaining = if root_removed { Vec::new() } else { entries_in(&root) };
+    let remaining = if root_removed { Vec::new() } else { entries_in(root) };
     if !remaining.is_empty() {
         tracing::warn!(
             root = %root.display(),
@@ -1943,8 +2658,7 @@ pub fn uninstall_into(
             "installation root was not empty and was left in place"
         );
     }
-    tracing::info!(root = %root.display(), root_removed, "installation removed");
-    Ok(Removal { root, root_removed, remaining, desktop, desktop_shortcut, command })
+    Ok((root_removed, remaining))
 }
 
 /// Picks a launcher that actually exists for a desktop entry to point at.
