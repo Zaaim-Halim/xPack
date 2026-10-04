@@ -546,6 +546,13 @@ pub struct Request {
     /// field still reads every ordinary request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
+    /// Set by a runner that keeps `xpack-hook`'s standard input open for as
+    /// long as the hook runs. The request is then one line, and the input
+    /// closing means the runner has gone (killed, or crashed) and nothing
+    /// would stop the hook at its deadline or on a cancel: it stops, with
+    /// everything it started.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stop_with_runner: bool,
 }
 
 /// How a hook run under test is recorded, for one hook.
@@ -883,15 +890,35 @@ pub fn append(path: &Path, line: &HookRecordLine) -> Result<()> {
     text.push('\n');
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .map_err(|e| Error::io(path, e))?;
+    // A write cut short by a power cut leaves the last line without its line
+    // break. Glued onto it, this line could not be read, and reading would
+    // keep only the torn line's point: the hook this line starts could then
+    // run a second time.
+    if !ends_a_line(&mut file).map_err(|e| Error::io(path, e))? {
+        text.insert(0, '\n');
+    }
     file.write_all(text.as_bytes()).map_err(|e| Error::io(path, e))?;
     file.sync_all().map_err(|e| Error::io(path, e))?;
     if created && let Some(parent) = path.parent() {
         crate::atomic::sync_dir(parent)?;
     }
     Ok(())
+}
+
+/// Whether `file` is empty or its last byte is a line break.
+fn ends_a_line(file: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    if file.metadata()?.len() == 0 {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
 }
 
 #[cfg(test)]
@@ -928,6 +955,19 @@ mod tests {
 
     fn point(text: &str) -> HookPoint {
         text.parse().unwrap()
+    }
+
+    /// A user's installation names what it may use instead: the publisher is
+    /// told the rule that applies to them, not the one for everyone.
+    #[test]
+    fn a_place_outside_a_users_own_is_refused_naming_the_users_places() {
+        let error = hooks(
+            r#"{"install":"xpack/hooks/a.js","permissions":{"user":{"write":["/etc/example"]}}}"#,
+        )
+        .validate(&scripts())
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("under {home} or {tempDir}"), "{error}");
     }
 
     #[test]
@@ -1166,6 +1206,70 @@ mod tests {
         Version::parse(text).unwrap()
     }
 
+    /// Only a record that does not exist is an empty one. One that exists and
+    /// cannot be read says nothing about which hooks have run, and taking it
+    /// for empty would run them all again.
+    #[test]
+    fn a_record_that_exists_and_cannot_be_read_is_an_error_not_an_empty_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        assert!(HookRecord::read(&path).is_err());
+    }
+
+    fn request(scope: Scope) -> Request {
+        let root = if cfg!(windows) { PathBuf::from(r"C:\app") } else { PathBuf::from("/app") };
+        Request {
+            script: root.join("versions/1.0.0/xpack/hooks/a.js"),
+            point: point("install.after"),
+            cause: None,
+            from_version: None,
+            to_version: Some("1.0.0".into()),
+            scope,
+            application_dir: root.clone(),
+            version_dir: root.join("versions/1.0.0"),
+            data_dir: root.join("data"),
+            log_dir: root.join("state/logs"),
+            temp_dir: root.join("hook-runs/xpack-hook-1"),
+            home: (scope == Scope::User).then(|| root.join("home")),
+            program_data: (scope == Scope::Machine).then(|| root.join("programdata")),
+            environment: BTreeMap::new(),
+            permissions: ScopePermissions::default(),
+            timeout_seconds: 300,
+            plan: None,
+            stop_with_runner: false,
+        }
+    }
+
+    /// What the engine accepts, and each request it refuses before running
+    /// anything, one rule at a time.
+    #[test]
+    fn a_request_is_checked_rule_by_rule() {
+        for scope in [Scope::User, Scope::Machine] {
+            request(scope).check().unwrap();
+            // The runner runs a checked copy from the run's own directory.
+            let mut copy = request(scope);
+            copy.script = copy.temp_dir.join(".script/a.js");
+            copy.check().unwrap();
+
+            let mut elsewhere = request(scope);
+            elsewhere.script = elsewhere.data_dir.join("a.js");
+            assert!(elsewhere.check().unwrap_err().contains("neither"));
+            let mut relative = request(scope);
+            relative.log_dir = PathBuf::from("logs");
+            assert!(relative.check().unwrap_err().contains("logDir"));
+            let mut no_time = request(scope);
+            no_time.timeout_seconds = 0;
+            assert!(no_time.check().unwrap_err().contains("timeoutSeconds"));
+        }
+        let mut user = request(Scope::User);
+        user.program_data = Some(user.application_dir.join("programdata"));
+        assert!(user.check().unwrap_err().contains("programData"));
+        let mut everyone = request(Scope::Machine);
+        everyone.home = Some(everyone.application_dir.join("home"));
+        assert!(everyone.check().unwrap_err().contains("home"));
+    }
+
     #[test]
     fn no_record_is_an_empty_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -1245,6 +1349,35 @@ mod tests {
         assert_eq!(record.outcome(&v("1.0.0"), point("install.after")), Some(PointOutcome::Failed));
     }
 
+    /// After a power cut the torn line has no line break. The next hook's
+    /// start must not be glued onto it, where reading would keep only the torn
+    /// line's point and lose the new one, so that hook could run again.
+    #[test]
+    fn a_start_written_after_a_torn_line_is_still_read() {
+        // Cut anywhere after its point is named; cut before, the record is
+        // unreadable and no hook runs at all, so nothing is appended.
+        for cut in ["\"script\"", "\"sha256\"", "\"event\"", "\"at\""] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("hooks.jsonl");
+            let whole =
+                serde_json::to_string(&line("1.1.0", "update.after", HookEvent::Started)).unwrap();
+            let torn = &whole[..whole.find(cut).unwrap() + 3];
+            std::fs::write(&path, torn).unwrap();
+
+            append(&path, &line("1.1.0", "rollback.before", HookEvent::Started)).unwrap();
+
+            let record = HookRecord::read(&path).unwrap();
+            assert!(
+                record.has_run(&v("1.1.0"), point("rollback.before")),
+                "torn at {cut}: a hook that started would run again"
+            );
+            assert!(
+                record.has_run(&v("1.1.0"), point("update.after")),
+                "torn at {cut}: the torn start itself was lost"
+            );
+        }
+    }
+
     #[test]
     fn a_line_torn_by_a_power_cut_still_counts_as_a_start_when_it_names_its_point() {
         let dir = tempfile::tempdir().unwrap();
@@ -1311,9 +1444,11 @@ mod tests {
             permissions: ScopePermissions::default(),
             timeout_seconds: 300,
             plan: None,
+            stop_with_runner: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("plan"), "{json}");
+        assert!(!json.contains("stopWithRunner"), "{json}");
     }
 
     #[test]

@@ -64,7 +64,18 @@ impl Project {
     }
 
     fn run_with(&self, program: &Path, args: &[&str]) -> Output {
-        Command::new(program).current_dir(self.path()).args(args).output().unwrap()
+        self.command(program).args(args).output().unwrap()
+    }
+
+    /// `program`, run in the project with a home of its own: hooks under
+    /// test are told where the user's home is, and a test, or a bug in what
+    /// it tests, must never write into the real one.
+    fn command(&self, program: &Path) -> Command {
+        let home = self.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut command = Command::new(program);
+        command.current_dir(self.path()).env("HOME", &home).env("USERPROFILE", &home);
+        command
     }
 
     fn pack(&self) -> Output {
@@ -233,6 +244,56 @@ fn pack_warns_about_hooks_whose_work_nothing_undoes() {
         "{said}"
     );
     assert!(said.contains("warning: this package has update hooks and no rollback hook"), "{said}");
+}
+
+/// Each warning names a hook whose work is not undone, and only that: a
+/// package that undoes what it does, or does nothing to undo, is told nothing.
+#[test]
+fn pack_warns_only_where_a_hooks_work_is_left_undone() {
+    if !engine_is_built() {
+        return;
+    }
+    let a = "xpack/hooks/a.js";
+    let uninstall = "no uninstall hook";
+    let rollback = "no rollback hook";
+    let mandatory = "this release is mandatory";
+    let cases = [
+        (serde_json::json!({ "install": a, "uninstall": a }), false, vec![]),
+        (serde_json::json!({ "uninstall": a, "rollback": a }), false, vec![]),
+        (serde_json::json!({ "update": a, "rollback": a }), false, vec![]),
+        (serde_json::json!({ "update": a, "rollback": a }), true, vec![mandatory]),
+        (
+            serde_json::json!({ "update": [a, { "when": "confirmed", "script": a }], "rollback": a }),
+            true,
+            vec![],
+        ),
+        (
+            serde_json::json!({ "update": { "when": "before", "script": a }, "rollback": a }),
+            true,
+            vec![],
+        ),
+        (serde_json::json!({ "install": a }), false, vec![uninstall]),
+    ];
+    for (hooks, is_mandatory, expected) in cases {
+        let project = Project::new(&hooks, &[(a, MARK.as_bytes())]);
+        let config = serde_json::json!({
+            "application": { "id": "com.example.demo", "name": "Demo", "version": "1.0.0" },
+            "launch": { "executable": "bin/app" },
+            "update": { "mandatory": is_mandatory },
+            "hooks": hooks,
+        });
+        std::fs::write(project.path().join("xpack.json"), config.to_string()).unwrap();
+        let packed = project.pack();
+        assert!(packed.status.success(), "{}", stderr(&packed));
+        let said = stderr(&packed);
+        for warning in [uninstall, rollback, mandatory] {
+            assert_eq!(
+                said.contains(warning),
+                expected.contains(&warning),
+                "{hooks} (mandatory: {is_mandatory}), `{warning}`: {said}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -520,8 +581,8 @@ fn ctrl_c_stops_a_running_install_hook_and_the_install_is_undone() {
         )],
     );
     let root = project.root();
-    let child = Command::new(xpack())
-        .current_dir(project.path())
+    let child = project
+        .command(&xpack())
         .args([
             "--root",
             &root,
@@ -600,7 +661,8 @@ fn an_installer_whose_install_hook_fails_exits_seven_and_leaves_nothing() {
         project.path().join("Demo-installer")
     };
     let root = project.path().join("installed");
-    let ran = Command::new(&installer)
+    let ran = project
+        .command(&installer)
         .args(["--root", &root.to_string_lossy(), "--silent"])
         .output()
         .unwrap();
@@ -677,6 +739,10 @@ fn hooks_test_runs_every_hook_point_and_writes_a_report_bound_to_the_package() {
     assert_eq!(report["passed"], true, "{report:#}");
     assert_eq!(report["mode"], "plan");
     assert_eq!(report["version"], "2.0.0");
+    // What it prints says the same: every moment held, so none is said not to.
+    let printed = String::from_utf8_lossy(&ran.stdout);
+    assert!(printed.contains("install.after        succeeded"), "{printed}");
+    assert!(!printed.contains("did not hold"), "{printed}");
     for name in [
         "install.before",
         "install.afterFiles",
@@ -800,6 +866,60 @@ fn what_install_writes_outside_the_installation_must_be_gone_when_uninstall_is_d
     let (ran, report) = project.hooks_test(&cleans, &[]);
     assert!(ran.status.success(), "{report:#}");
     assert_eq!(report["leftBehind"], serde_json::json!([]));
+}
+
+/// What the report counts as left behind: what install and update hooks put
+/// outside the installation, by writing, copying or moving, and nothing took
+/// away. Not what they keep in the installation's data, nor what an
+/// uninstall hook writes, which nothing would remove after it.
+#[test]
+fn left_behind_counts_copies_and_moves_and_never_the_installations_own_files() {
+    if !engine_is_built() {
+        return;
+    }
+    let install = "export function main(ctx) {
+        const dir = ctx.path(ctx.home, '.config', 'demo-left');
+        ctx.file.write(ctx.path(ctx.dataDir, 'inside'), 'x');
+        ctx.file.copy(ctx.path(ctx.versionDir, 'xpack', 'hooks', 'i.js'), ctx.path(dir, 'copied.js'));
+        ctx.file.write(ctx.path(dir, 'to-move'), 'x');
+        ctx.file.move(ctx.path(dir, 'to-move'), ctx.path(dir, 'moved'));
+        ctx.log.info('settings kept');
+    }";
+    let uninstall = "export function main(ctx) {
+        ctx.file.write(ctx.path(ctx.home, '.config', 'demo-left', 'uninstall-log'), 'x');
+    }";
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({
+            "install": "xpack/hooks/i.js",
+            "uninstall": "xpack/hooks/u.js",
+            "permissions": { "user": { "write": ["{home}/.config"] } }
+        }),
+        &[("xpack/hooks/i.js", install), ("xpack/hooks/u.js", uninstall)],
+    );
+    let (ran, report) = project.hooks_test(&package, &[]);
+    // What a hook says is shown named by its point, and the report's actions
+    // are the hook's own: never how the engine said it ended.
+    assert!(stderr(&ran).contains("[install.after] settings kept"), "{}", stderr(&ran));
+    for point in report["points"].as_array().unwrap() {
+        assert!(
+            point["actions"].as_array().unwrap().iter().all(|a| a["kind"] != "ended"),
+            "{point}"
+        );
+    }
+    let left: Vec<String> = report["leftBehind"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{report:#}"))
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    for expected in ["copied.js", "moved"] {
+        assert!(left.iter().any(|p| p.ends_with(expected)), "{expected} not reported: {left:?}");
+    }
+    for unexpected in ["to-move", "uninstall-log", "inside"] {
+        assert!(!left.iter().any(|p| p.ends_with(unexpected)), "{unexpected} reported: {left:?}");
+    }
 }
 
 #[test]
@@ -1164,8 +1284,8 @@ fn a_sealed_package_is_tested_and_gated_like_any_other() {
     std::fs::write(project.path().join("payload/xpack/hooks/n.js"), NOTHING).unwrap();
     std::fs::write(project.path().join("xpack.json"), config.to_string()).unwrap();
     let with_password = |args: &[&str]| {
-        Command::new(xpack())
-            .current_dir(project.path())
+        project
+            .command(&xpack())
             .env("XPACK_PASSWORD", "correct horse battery staple")
             .args(args)
             .output()
@@ -1355,4 +1475,49 @@ fn a_report_of_the_other_scope_under_this_ones_name_does_not_count() {
     let built = project.installer(&package);
     assert!(!built.status.success());
     assert!(stderr(&built).contains("tested the other scope"), "{}", stderr(&built));
+}
+
+/// Every command that ships a version refuses each kind of report that does
+/// not count: none, one for another build of the same version, and a failed
+/// one. Each command finds and checks the report itself, so each is tried.
+#[test]
+fn installer_index_and_delta_each_refuse_every_report_that_does_not_count() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let failing =
+        "export function main(ctx) { if (ctx.operation === 'install') throw new Error('no'); }";
+    let cases: [(&str, &str, &str, bool); 3] = [
+        ("no report", NOTHING, "no report beside it", false),
+        ("another build", NOTHING, "for another build", true),
+        // Names the point that failed, and only that one.
+        ("a failed report", failing, "failed: install.after)", false),
+    ];
+    for (case, script, said, rebuild) in cases {
+        let project = Project::new(&serde_json::json!({}), &[]);
+        let base = project.pack_version("1.0.0", &serde_json::json!({}), &[]);
+        let package =
+            project.pack_version("1.1.0", &simple_hooks(), &[("xpack/hooks/n.js", script)]);
+        if case != "no report" {
+            project.hooks_test(&package, &[]);
+        }
+        if rebuild {
+            let again = project.pack_version(
+                "1.1.0",
+                &simple_hooks(),
+                &[("xpack/hooks/n.js", "export function main() { /* not what was tested */ }")],
+            );
+            assert_eq!(again, package);
+        }
+        let runs = [
+            ("installer", project.installer(&package)),
+            ("index", project.index(&package, &[])),
+            ("delta", project.run(&["delta", &base, &package, "--out", "d.xpkgd"])),
+        ];
+        for (command, output) in runs {
+            assert!(!output.status.success(), "{case}: xpack {command} shipped it");
+            assert!(stderr(&output).contains(said), "{case}: xpack {command}: {}", stderr(&output));
+        }
+        assert!(!project.path().join("d.xpkgd").exists(), "{case}: a delta was written");
+    }
 }

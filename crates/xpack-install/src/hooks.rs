@@ -284,7 +284,8 @@ impl HookRun<'_> {
 
         let version_dir = paths.version_dir(&self.manifest.application.version);
         let request = self.request(paths, point, hook, script, &version_dir, &data_dir, &temp_dir);
-        let input = serde_json::to_vec(&request).map_err(|e| fail(e.to_string()))?;
+        let mut input = serde_json::to_vec(&request).map_err(|e| fail(e.to_string()))?;
+        input.push(b'\n');
 
         let mut command = Command::new(self.engine);
         command.env_clear();
@@ -313,12 +314,19 @@ impl HookRun<'_> {
         let mut child = command
             .spawn()
             .map_err(|e| fail(format!("{} could not be started: {e}", self.engine.display())))?;
-        if let Some(mut stdin) = child.stdin.take() {
+        let mut stdin = child.stdin.take();
+        if let Some(stdin) = stdin.as_mut() {
             // A program that exits before reading its request is reported by
             // its exit code below; its broken pipe says nothing more.
             let _ = stdin.write_all(&input);
+            let _ = stdin.flush();
         }
-        self.watch(&mut child, point, hook.timeout())
+        // Held open until the hook has ended: if this process is killed, the
+        // operating system closes it, and `xpack-hook` stops the hook rather
+        // than run on with nothing to stop it.
+        let watched = self.watch(&mut child, point, hook.timeout());
+        drop(stdin);
+        watched
     }
 
     /// The script, read once, checked against its signed digest, and written
@@ -396,6 +404,7 @@ impl HookRun<'_> {
                 version: self.manifest.application.version.clone(),
                 script: hook.script.clone(),
             }),
+            stop_with_runner: true,
         }
     }
 

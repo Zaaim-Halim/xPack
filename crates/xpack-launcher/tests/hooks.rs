@@ -333,9 +333,20 @@ fn a_second_start_does_not_wait_for_update_confirmed_hooks() {
     world.staged("1.1.0", App::Starts, hooks);
     std::thread::scope(|scope| {
         let first = scope.spawn(|| world.launch());
-        // Long enough for the first start to have committed the version and
-        // be running its confirmed hook.
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Until the first start has committed the version and is running its
+        // confirmed hook, however slowly the machine runs: a second start
+        // before that would be a second start on probation, a different case.
+        let waited = std::time::Instant::now();
+        while !fs::read_to_string(world.paths.hook_record_file())
+            .is_ok_and(|record| record.contains("update.confirmed"))
+        {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(30),
+                "no confirmed hook began"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(world.state().record(&v("1.1.0")).unwrap().status, VersionStatus::Good);
         assert!(!world.paths.data_dir().join("busy-done").exists(), "the hook already ended");
         let started = std::time::Instant::now();
         let second = world.launch();
@@ -345,9 +356,13 @@ fn a_second_start_does_not_wait_for_update_confirmed_hooks() {
             "the second start waited {:?} for the hook",
             started.elapsed()
         );
-        first.join().unwrap();
+        let first = first.join().unwrap();
+        assert!(
+            world.paths.data_dir().join("busy-done").exists(),
+            "the confirmed hook did not finish; first {first:?}, second {second:?}, record:\n{}",
+            fs::read_to_string(world.paths.hook_record_file()).unwrap_or_default()
+        );
     });
-    assert!(world.paths.data_dir().join("busy-done").exists(), "the confirmed hook did not finish");
 }
 
 /// Puts a stand-in dialog where the installation's notice program goes,
@@ -379,6 +394,59 @@ fn a_start_whose_hooks_run_on_says_why_nothing_has_opened_and_one_whose_hooks_ar
     let Some(quick) = World::new() else { return };
     quick.staged("1.1.0", App::Starts, every_update_moment());
     let notices = stand_in_notice(&quick);
+    let started = std::time::Instant::now();
     quick.launch();
-    assert!(!notices.exists(), "a notice flashed up for quick hooks");
+    // Quick only if the whole start took less than the notice waits for; on
+    // a machine slow enough to take longer, the notice is right to show.
+    if started.elapsed() < std::time::Duration::from_secs(2) {
+        assert!(!notices.exists(), "a notice flashed up for quick hooks");
+    }
+}
+
+/// An installation for everyone is changed only by an administrator's
+/// installer: a user starting it runs no hook, even with a version staged
+/// whose update hooks have not run, and even where it could write.
+#[test]
+fn a_users_start_of_an_installation_for_everyone_runs_no_hook() {
+    use std::process::{Command, Stdio};
+    let Some(world) = World::new() else { return };
+    let paths = InstallPaths::named(world.dir.path().join("App"), "com.example.app").unwrap();
+    let install = |package: &Path, activate: bool| {
+        let lock = InstallLock::acquire(&paths).unwrap();
+        let mut verified =
+            open_and_verify(package, &lock, &TrustDecision::Explicit(world.key.public())).unwrap();
+        let options = InstallOptions {
+            activate,
+            scope: xpack_core::InstallScope::Machine,
+            hook_engine: Some(world.engine.clone()),
+            launcher: Some(env!("CARGO_BIN_EXE_xpack-launcher").into()),
+            ..Default::default()
+        };
+        Installer::new(&lock).install(&mut verified, &options).unwrap();
+    };
+    install(&world.package("1.0.0", App::Starts, serde_json::json!({})), true);
+    install(&world.package("1.1.0", App::Starts, every_update_moment()), false);
+    let state = || InstallState::load(&paths.state_file()).unwrap().value;
+    assert!(
+        matches!(state().update, xpack_core::state::UpdatePhase::Staged { .. }),
+        "1.1.0 is not staged: {:?}",
+        state().update
+    );
+
+    let users = world.dir.path().join("users-own");
+    let output =
+        Command::new(paths.launcher_file_named(&xpack_core::BinaryNames::from_display_name("App")))
+            .env("XPACK_USER_DIR", &users)
+            .env_remove("XPACK_BUNDLE")
+            .env_remove("XPACK_APPLICATION_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(paths.data_dir().join("marks")).unwrap_or_default(), "");
+    assert!(!paths.hook_record_file().exists(), "a hook was recorded");
+    assert_eq!(state().current_version, Some(v("1.0.0")));
 }

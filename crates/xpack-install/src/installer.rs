@@ -2812,6 +2812,7 @@ impl UninstallHooks {
     /// will need. None when it has no uninstall hooks, or cannot be read.
     fn prepare(lock: &InstallLock) -> Option<Self> {
         let paths = lock.paths();
+        remove_copies_left_aside(paths);
         let state = lock.load_state().ok()?.value;
         let version = state.current_version.clone().or_else(|| state.previous_version.clone())?;
         let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
@@ -2876,6 +2877,27 @@ impl UninstallHooks {
     }
 }
 
+/// How the copies an uninstall keeps beside the installation begin: named
+/// after the application, and ended by a character no application id has,
+/// so they are told apart from every other application's.
+fn kept_aside_prefix(paths: &xpack_core::InstallPaths) -> String {
+    format!(".xpack-uninstall-{}+", paths.application_id().unwrap_or("application"))
+}
+
+/// Removes the copies an uninstall of this application cut short left
+/// beside it. Under its lock, so no other uninstall of it is using one.
+fn remove_copies_left_aside(paths: &xpack_core::InstallPaths) {
+    let Some(beside) = paths.root().parent() else { return };
+    let prefix = kept_aside_prefix(paths);
+    for entry in std::fs::read_dir(beside).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && let Err(error) = atomic::remove_dir_all_if_exists(&entry.path())
+        {
+            tracing::warn!(%error, "could not remove what an earlier uninstall left");
+        }
+    }
+}
+
 /// The file name `xpack-hook` has on this platform.
 fn engine_name() -> String {
     format!("xpack-hook{}", std::env::consts::EXE_SUFFIX)
@@ -2891,7 +2913,7 @@ fn keep_for_after(
 ) -> Option<tempfile::TempDir> {
     let beside = paths.root().parent()?;
     let kept = tempfile::Builder::new()
-        .prefix(".xpack-uninstall-")
+        .prefix(&kept_aside_prefix(paths))
         .tempdir_in(beside)
         .map_err(|error| tracing::warn!(%error, "could not keep the uninstall.after hooks aside"))
         .ok()?;

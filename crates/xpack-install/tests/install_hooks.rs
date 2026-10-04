@@ -738,15 +738,24 @@ fn cancel_update_hook(when: &str) -> Option<String> {
         hooks,
         &[
             ("xpack/hooks/mark.js", MARK),
-            ("xpack/hooks/loop.js", "export function main() { for (;;) {} }"),
+            // Says it has started, so the cancel lands on it and on no
+            // earlier hook, however slowly the machine runs.
+            (
+                "xpack/hooks/loop.js",
+                "export function main(ctx) { ctx.file.write(ctx.path(ctx.dataDir, 'looping'), ''); for (;;) {} }",
+            ),
         ],
     );
+    let looping = fixture.paths().data_dir().join("looping");
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let options =
         InstallOptions { cancel: Some(cancel.clone()), ..fixture.options(InstallScope::User) };
     let error = std::thread::scope(|scope| {
         scope.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while !looping.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         fixture.install(&package, &options, &Moments::new(fixture.paths())).unwrap_err()
@@ -911,4 +920,125 @@ fn uninstalling_without_uninstall_hooks_never_starts_the_program_that_runs_them(
     let removal = uninstall(&fixture, &Moments::new(fixture.paths()));
     assert!(removal.root_removed);
     assert!(!marker.exists(), "uninstalling started xpack-hook for no hook");
+}
+
+/// An installation whose `xpack-hook` serves an older interface than the
+/// package's hooks are written for cannot run them: the version is refused
+/// before anything of it is written, and asks for a newer installer.
+#[test]
+fn hooks_newer_than_the_installations_engine_are_refused_before_anything_is_written() {
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(&fixture, &fixture.package("1.0.0", serde_json::json!({}), &[]));
+    let mut state = fixture.state();
+    assert_eq!(state.hook_interface, Some(xpack_core::hooks::HOOK_INTERFACE));
+    state.hook_interface = Some(xpack_core::hooks::HOOK_INTERFACE - 1);
+    state.save(&fixture.paths().state_file()).unwrap();
+
+    let package = fixture.package(
+        "1.1.0",
+        serde_json::json!({ "update": "xpack/hooks/mark.js" }),
+        &INSTALL_ALL,
+    );
+    let options = InstallOptions { hook_engine: None, ..fixture.options(InstallScope::User) };
+    let error = fixture.install(&package, &options, &Moments::new(fixture.paths())).unwrap_err();
+
+    assert!(error.to_string().contains("cannot run"), "{error}");
+    assert!(!fixture.paths().version_dir(&v("1.1.0")).exists(), "the version was written");
+    assert_eq!(fixture.state().current_version, Some(v("1.0.0")));
+    assert_eq!(fixture.marks(), "");
+}
+
+/// The hook record is kept apart from the state file. Putting back a state
+/// from before an update, as recovering from a damaged state file does, and
+/// installing the update again, runs none of its hooks a second time.
+#[test]
+fn putting_back_the_state_from_before_an_update_runs_none_of_its_hooks_again() {
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(&fixture, &fixture.package("1.0.0", serde_json::json!({}), &[]));
+    let state_file = fixture.paths().state_file();
+    let before_update = fs::read(&state_file).unwrap();
+    let hooks = serde_json::json!({
+        "update": [
+            { "when": "before", "script": "xpack/hooks/mark.js" },
+            { "when": "after", "script": "xpack/hooks/mark.js" }
+        ],
+        "rollback": [
+            { "when": "before", "script": "xpack/hooks/mark.js" },
+            { "when": "after", "script": "xpack/hooks/mark.js" }
+        ]
+    });
+    let package = fixture.package("1.1.0", hooks, &INSTALL_ALL);
+    fixture
+        .install(&package, &fixture.options(InstallScope::User), &Moments::new(fixture.paths()))
+        .unwrap();
+    assert_eq!(fixture.marks(), "update.before;update.after;");
+
+    fs::write(&state_file, &before_update).unwrap();
+    assert_eq!(fixture.state().current_version, Some(v("1.0.0")));
+    let again = fixture.install(
+        &package,
+        &fixture.options(InstallScope::User),
+        &Moments::new(fixture.paths()),
+    );
+
+    assert_eq!(
+        fixture.marks(),
+        "update.before;update.after;",
+        "a hook ran a second time: {again:?}"
+    );
+}
+
+/// A failed rollback hook is logged and the rollback carries on: the earlier
+/// version is active again and the rollback's later hook still runs.
+#[test]
+fn a_failed_rollback_hook_does_not_stop_the_rollback() {
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(&fixture, &fixture.package("1.0.0", serde_json::json!({}), &[]));
+    let hooks = serde_json::json!({
+        "update": { "when": "after", "script": "xpack/hooks/fail.js" },
+        "rollback": [
+            { "when": "before", "script": "xpack/hooks/fail.js" },
+            { "when": "after", "script": "xpack/hooks/mark.js" }
+        ]
+    });
+    let package = fixture.package(
+        "1.1.0",
+        hooks,
+        &[("xpack/hooks/mark.js", MARK), ("xpack/hooks/fail.js", FAIL)],
+    );
+    fixture
+        .install(&package, &fixture.options(InstallScope::User), &Moments::new(fixture.paths()))
+        .unwrap_err();
+
+    assert_eq!(fixture.state().current_version, Some(v("1.0.0")));
+    assert_eq!(fixture.marks(), "rollback.after(hookFailed);");
+    let record = xpack_core::hooks::HookRecord::read(&fixture.paths().hook_record_file()).unwrap();
+    assert_eq!(
+        record.outcome(&v("1.1.0"), "rollback.before".parse().unwrap()),
+        Some(xpack_core::hooks::PointOutcome::Failed)
+    );
+}
+
+/// An uninstall cut short leaves the copy it kept aside. The next uninstall
+/// of the same application removes it, and never another application's,
+/// which may be in the middle of its own.
+#[test]
+fn a_copy_kept_aside_by_an_uninstall_cut_short_is_removed_by_the_next() {
+    let Some(fixture) = Fixture::new() else { return };
+    // The version uninstalled has no uninstall hooks of its own: the copy is
+    // removed all the same.
+    install_then(&fixture, &fixture.package("1.0.0", serde_json::json!({}), &[]));
+    let beside = fixture.paths().root().parent().unwrap().to_path_buf();
+    let stale = beside.join(".xpack-uninstall-com.example.app+left");
+    let others = beside.join(".xpack-uninstall-com.example.app-other+busy");
+    for dir in [&stale, &others] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("xpack-hook"), "kept").unwrap();
+    }
+
+    let removal = uninstall(&fixture, &Moments::new(fixture.paths()));
+
+    assert!(removal.root_removed, "left: {:?}", removal.remaining);
+    assert!(!stale.exists(), "the copy an earlier uninstall left was not removed");
+    assert!(others.join("xpack-hook").is_file(), "another application's copy was removed");
 }

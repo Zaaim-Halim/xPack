@@ -987,3 +987,68 @@ fn a_single_payload_file_is_read_only_when_declared_and_within_the_limit() {
     assert!(verified.read_payload_file("../manifest.json", 1024).is_err());
     assert!(verified.read_payload_file("application/app.jar", 4).is_err(), "over the limit");
 }
+
+/// `xpack pack` refuses hooks that break its rules, but a publisher's key can
+/// sign a manifest that never went through it. Each such package, signed by
+/// a trusted key, must be refused when it is opened, before anything of it is
+/// installed, naming its hooks.
+#[test]
+fn a_signed_package_whose_hooks_skipped_pack_is_refused_when_opened() {
+    let script: &[u8] = b"export function main() {}\n";
+    let text: &[u8] = b"not a script\n";
+    let cases = [
+        ("leaves the payload", r#"{"install": "../evil.js"}"#),
+        ("absolute", r#"{"install": "/tmp/evil.js"}"#),
+        ("not a script", r#"{"install": "xpack/hooks/notes.txt"}"#),
+        ("not in the payload", r#"{"install": "xpack/hooks/missing.js"}"#),
+        (
+            "a moment its operation lacks",
+            r#"{"install": {"when": "confirmed", "script": "xpack/hooks/a.js"}}"#,
+        ),
+        ("no time at all", r#"{"install": {"script": "xpack/hooks/a.js", "timeoutSeconds": 0}}"#),
+        ("listed twice", r#"{"install": ["xpack/hooks/a.js", "xpack/hooks/a.js"]}"#),
+        ("permissions and no hook", r#"{"permissions": {"user": {"exec": ["git"]}}}"#),
+        (
+            "a user's hook elevating",
+            r#"{"install": "xpack/hooks/a.js", "permissions": {"user": {"exec": ["sudo"]}}}"#,
+        ),
+        (
+            "a user's hook writing machine-wide",
+            r#"{"install": "xpack/hooks/a.js", "permissions": {"user": {"write": ["/etc/example"]}}}"#,
+        ),
+    ];
+    for (what, hooks) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut manifest = template(host());
+        manifest.launch.executable = "xpack/hooks/a.js".into();
+        manifest.hooks = serde_json::from_str(hooks).unwrap();
+        manifest.format_version = manifest.required_format_version();
+        let file = |path: &str, bytes: &[u8]| xpack_core::PayloadFile {
+            path: path.into(),
+            size: bytes.len() as u64,
+            sha256: xpack_security::sha256(bytes),
+            mode: None,
+        };
+        manifest.payload = PayloadSpec {
+            total_size: (script.len() + text.len()) as u64,
+            files: vec![file("xpack/hooks/a.js", script), file("xpack/hooks/notes.txt", text)],
+        };
+        assert!(manifest.validate().is_err(), "{what}: the manifest is not actually invalid");
+
+        let pkg = pack_forged(
+            dir.path(),
+            &key,
+            &manifest,
+            &[("xpack/hooks/a.js", script), ("xpack/hooks/notes.txt", text)],
+        );
+        let error = match PackageReader::open(&pkg) {
+            Err(error) => error,
+            Ok(reader) => match reader.verify(&trusting(&key)) {
+                Err(error) => error,
+                Ok(_) => panic!("{what}: a package whose hooks skipped pack was accepted"),
+            },
+        };
+        assert!(error.to_string().contains("invalid hooks"), "{what}: {error}");
+    }
+}

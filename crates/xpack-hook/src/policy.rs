@@ -76,7 +76,8 @@ impl Policy {
         let allowed = if resolved.starts_with(&self.installation) {
             resolved.starts_with(&self.versions) || self.is_own(&resolved)
         } else {
-            self.is_own(&resolved) || self.is_declared(&resolved)
+            self.is_own(&resolved)
+                || (self.is_declared(&resolved) && !in_another_installation(&resolved))
         };
         if allowed { Ok(resolved) } else { Err(self.refusal(path, &resolved, "read")) }
     }
@@ -107,11 +108,18 @@ impl Policy {
             return Err(format!("{} names no entry", path.display()));
         };
         let entry = resolve(parent)?.join(name);
-        if self.writable(&entry) && !self.is_a_place(&entry) {
-            Ok(entry)
-        } else {
-            Err(self.refusal(path, &entry, "write"))
+        if !self.writable(&entry) || self.is_a_place(&entry) {
+            return Err(self.refusal(path, &entry, "write"));
         }
+        // A directory above this installation, or one holding another, would
+        // take an installation with it: its records, its programs, its data.
+        if self.installation.starts_with(&entry) || holds_an_installation(&entry) {
+            return Err(format!(
+                "{} holds an installation; no hook may remove or move it",
+                path.display()
+            ));
+        }
+        Ok(entry)
     }
 
     /// Where `path` is, if a directory may be made there: as for writing, and
@@ -133,7 +141,8 @@ impl Policy {
         if resolved.starts_with(&self.installation) {
             self.is_own(resolved)
         } else {
-            self.is_own(resolved) || self.is_declared(resolved)
+            self.is_own(resolved)
+                || (self.is_declared(resolved) && !in_another_installation(resolved))
         }
     }
 
@@ -155,6 +164,12 @@ impl Policy {
             if !readable {
                 return format!("{} belongs to xPack; no hook may {what} it", asked.display());
             }
+        }
+        if !resolved.starts_with(&self.installation) && in_another_installation(resolved) {
+            return format!(
+                "{} belongs to another application's installation; no hook may {what} it",
+                asked.display()
+            );
         }
         if self.is_a_place(resolved) {
             return format!("{} is a place this hook may write in, not replace", asked.display());
@@ -190,6 +205,37 @@ impl Policy {
         }
         Ok(file)
     }
+}
+
+/// Whether `resolved` is, or is inside, an installation xPack made: the other
+/// applications of this user beside this one in the home, or installed for
+/// everyone beside other software. A place a hook may write can contain
+/// them, `{home}` above all, and what they hold is theirs: their state,
+/// their programs, their data. One is known by its state file, which every
+/// installation has whatever its layout.
+fn in_another_installation(resolved: &Path) -> bool {
+    resolved.ancestors().any(|dir| InstallPaths::from_application_dir(dir).state_file().is_file())
+}
+
+/// Whether the directory `entry` is or contains an installation, looked for
+/// without following links, as removing it would not follow them either.
+fn holds_an_installation(entry: &Path) -> bool {
+    if !std::fs::symlink_metadata(entry).is_ok_and(|meta| meta.is_dir()) {
+        return false;
+    }
+    let mut pending = vec![entry.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if InstallPaths::from_application_dir(&dir).state_file().is_file() {
+            return true;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for child in entries.flatten() {
+            if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(child.path());
+            }
+        }
+    }
+    false
 }
 
 /// `path` absolute, with `.` and `..` taken out as written.

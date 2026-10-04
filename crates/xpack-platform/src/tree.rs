@@ -54,6 +54,37 @@ pub fn stop(child: &mut Child) -> io::Result<()> {
     child.wait().map(drop)
 }
 
+/// Ends this process and everything it started, when it was started with
+/// [`start_as_tree`]: for a program whose own starter has gone, so that
+/// nothing else would stop what it runs. Returns only if this process could
+/// not be ended so; the caller then exits.
+pub fn stop_own_tree() {
+    #[cfg(unix)]
+    {
+        let me = rustix::process::getpid();
+        // Only a group this process leads, which is what `start_as_tree`
+        // made: never the group of whatever started it otherwise.
+        if rustix::process::getpgrp() == me {
+            let _ = rustix::process::kill_process_group(me, rustix::process::Signal::KILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        use std::process::Stdio;
+        let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let mut command =
+            Command::new(std::path::Path::new(&system).join("System32\\taskkill.exe"));
+        command
+            .args(["/T", "/F", "/PID"])
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::without_a_console(&mut command);
+        let _ = command.status();
+    }
+}
+
 #[cfg(unix)]
 fn stop_descendants(child: &Child) {
     let group = rustix::process::Pid::from_child(child);

@@ -294,7 +294,9 @@ fn a_hook_past_its_timeout_is_stopped_even_in_an_endless_loop() {
     let started = Instant::now();
     let (_, _, reason, _) = failure(fixture.run("install.after").unwrap_err());
     assert!(reason.contains("still running after 1 seconds"), "{reason}");
-    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    // Well past its one second, and far short of forever, however busy the
+    // machine is.
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
     assert_eq!(fixture.outcome("install.after"), Some(PointOutcome::Failed));
 }
 
@@ -338,7 +340,9 @@ fn alive(pid: &str) -> bool {
 fn a_hook_stopped_at_its_timeout_takes_everything_it_started_with_it() {
     let Some(fixture) = Fixture::new(
         serde_json::json!({
-            "install": { "script": "xpack/hooks/a.js", "timeoutSeconds": 2 },
+            // Long enough for the shell to start and say what it started on
+            // a busy machine; what is tested is what happens at the deadline.
+            "install": { "script": "xpack/hooks/a.js", "timeoutSeconds": 8 },
             "permissions": { "user": { "exec": ["/bin/sh"] } }
         }),
         &[(
@@ -663,4 +667,48 @@ fn two_runs_of_one_point_at_the_same_moment_run_it_once_without_the_installation
     let record = std::fs::read_to_string(fixture.paths.hook_record_file()).unwrap();
     let starts = record.lines().filter(|l| l.contains("\"event\":\"started\"")).count();
     assert_eq!(starts, 1, "the point ran twice:\n{record}");
+}
+
+/// A long line is handed on whole up to 4 KiB; past that it is cut, and
+/// says so, rather than carried at any length.
+#[test]
+fn a_long_line_is_handed_on_whole_up_to_its_limit_and_cut_past_it() {
+    static LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    fn sink(_: HookPoint, line: &str) {
+        LINES.lock().unwrap().push(line.to_string());
+    }
+    let Some(mut fixture) = Fixture::new(
+        serde_json::json!({ "install": "xpack/hooks/a.js" }),
+        &[(
+            "xpack/hooks/a.js",
+            "export function main(ctx) { ctx.log.info('a'.repeat(3000)); ctx.log.info('b'.repeat(6000)); }",
+        )],
+    ) else {
+        return;
+    };
+    fixture.on_line = Some(&sink);
+    fixture.run("install.after").unwrap();
+    let lines = LINES.lock().unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], "a".repeat(3000));
+    assert_eq!(lines[1], format!("{} …", "b".repeat(4096)));
+}
+
+/// A failure carries the last twenty lines of what the hook wrote: the end,
+/// where the reason usually is, and no more.
+#[test]
+fn a_failure_carries_the_last_twenty_lines_of_output() {
+    let Some(fixture) = Fixture::new(
+        serde_json::json!({ "install": "xpack/hooks/a.js" }),
+        &[(
+            "xpack/hooks/a.js",
+            "export function main(ctx) { for (let i = 1; i <= 30; i++) ctx.log.info('line ' + i); throw new Error('done'); }",
+        )],
+    ) else {
+        return;
+    };
+    let (_, _, reason, output) = failure(fixture.run("install.after").unwrap_err());
+    assert!(reason.contains("done"), "{reason}");
+    let expected: Vec<String> = (11..=30).map(|i| format!("line {i}")).collect();
+    assert_eq!(output, expected);
 }

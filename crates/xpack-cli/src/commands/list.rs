@@ -205,5 +205,12 @@ mod tests {
         assert_eq!(utc(951_782_400), "2000-02-29 00:00:00 UTC");
         assert_eq!(utc(1_790_972_643), "2026-10-02 20:24:03 UTC");
         assert_eq!(utc(4_107_542_399), "2100-02-28 23:59:59 UTC");
+        // Each term of the century and era corrections, past the dates that
+        // need none of them.
+        assert_eq!(utc(946_684_799), "1999-12-31 23:59:59 UTC");
+        assert_eq!(utc(4_107_542_400), "2100-03-01 00:00:00 UTC");
+        assert_eq!(utc(7_263_259_200), "2200-03-01 12:00:00 UTC");
+        assert_eq!(utc(13_574_649_599), "2400-02-29 23:59:59 UTC");
+        assert_eq!(utc(13_574_649_600), "2400-03-01 00:00:00 UTC");
     }
 }

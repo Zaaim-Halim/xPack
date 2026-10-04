@@ -336,6 +336,11 @@ mod tests {
             "const m = await import('./other.js');",
             "x = require ('a')",
             "f(import(\"x\"))",
+            // A division is not a comment, and does not hide what follows it.
+            "const half = 6 / 3; const fs = require('fs');",
+            "const a = 1 /* note */ ; import('x')",
+            // A string ends, and what follows it is code again.
+            "const s = 'ab'; const fs = require('fs');",
         ] {
             assert!(reaches_for_another_file(code).is_some(), "{code}");
         }
@@ -346,6 +351,12 @@ mod tests {
             "const s = \"import('y')\";",
             "const t = `require(${a})`;",
             "ctx.required(1); myrequire(2); obj.import(3);",
+            // A comment ends only at `*/`, not at a lone `/` or `*` in it.
+            "/* see a/b * c and require('x') */ export function main() {}",
+            // A string ends at its own quote, not an escaped one or any other
+            // character.
+            "const s = 'it\\'s require(1)'; export function main() {}",
+            "const s = ' require(1)'; export function main() {}",
             "export function main(ctx) { ctx.log.info('ok'); }",
         ] {
             assert_eq!(reaches_for_another_file(not_code), None, "{not_code}");

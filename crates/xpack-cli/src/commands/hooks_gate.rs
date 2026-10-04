@@ -276,6 +276,23 @@ mod tests {
         assert!(found.differences.is_empty(), "{found:?}");
     }
 
+    /// A permission both releases have is neither new nor dropped; one only
+    /// the earlier had is named as dropped.
+    #[test]
+    fn a_permission_kept_is_no_change_and_one_dropped_is_named() {
+        let both =
+            r#"{"install":"a.js","permissions":{"user":{"exec":["git"],"write":["{home}/.a"]}}}"#;
+        let before = summary_of(both, &[("a.js", 1)]);
+        assert!(changes(Some(&before), Some(&before.clone())).is_empty());
+        let after = summary_of(r#"{"install":"a.js"}"#, &[("a.js", 1)]);
+        let found = changes(Some(&before), Some(&after));
+        assert_eq!(
+            found.differences,
+            ["user: may no longer run git", "user: may no longer write {home}/.a"]
+        );
+        assert!(found.new_permissions.is_empty(), "{found:?}");
+    }
+
     #[test]
     fn hooks_added_to_a_release_that_had_none_are_a_change() {
         let after = summary_of(r#"{"install":"a.js"}"#, &[("a.js", 1)]);

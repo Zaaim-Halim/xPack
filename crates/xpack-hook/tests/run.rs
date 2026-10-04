@@ -212,6 +212,32 @@ fn a_hook_is_one_file_and_cannot_import_another() {
     assert_eq!(code, 0, "{err}");
 }
 
+/// `QuickJS` can be built with modules that open files, start processes and
+/// reach the network (`std`, `os`), and embedders often add `fetch` or a
+/// Node-like global. A hook gets none of them: only `ctx`.
+#[test]
+fn a_hook_reaches_no_file_process_or_network_api_beyond_ctx() {
+    let install = Installation::new();
+    for module in
+        ["std", "os", "qjs:std", "qjs:os", "fs", "node:fs", "child_process", "net", "http"]
+    {
+        let (code, err) = install
+            .run(&format!("import * as m from '{module}'; export function main() {{}}"), none());
+        assert_eq!(code, 1, "importing {module} worked: {err}");
+        let (code, err) = install
+            .run(&format!("export async function main() {{ await import('{module}'); }}"), none());
+        assert_eq!(code, 1, "importing {module} at run time worked: {err}");
+    }
+    let script = r"export function main() {
+        const reachable = ['fetch', 'XMLHttpRequest', 'WebSocket', 'process', 'require', 'std',
+            'os', 'Deno', 'Bun', 'scriptArgs', 'loadScript', '__loadScript', 'print', 'setTimeout']
+            .filter(name => typeof globalThis[name] !== 'undefined');
+        if (reachable.length) throw new Error('reachable: ' + reachable.join(', '));
+    }";
+    let (code, err) = install.run(script, none());
+    assert_eq!(code, 0, "{err}");
+}
+
 #[test]
 fn a_hook_cannot_replace_what_ctx_checks_with_its_own() {
     let install = Installation::new();
@@ -228,6 +254,48 @@ fn a_hook_cannot_replace_what_ctx_checks_with_its_own() {
     }";
     let (code, err) = install.run(script, none());
     assert_eq!(code, 0, "{err}");
+}
+
+/// A script's top level runs before `main` is given `ctx`; replacing the
+/// engine's own `Object.freeze` there must not leave `ctx` unfrozen.
+#[test]
+fn ctx_stays_frozen_whatever_the_script_did_to_object_first() {
+    let install = Installation::new();
+    for prelude in [
+        "Object.freeze = o => o;",
+        "globalThis.Object = { freeze: o => o };",
+        "Object.defineProperty(Object, 'freeze', { value: o => o });",
+    ] {
+        let script = format!(
+            "{prelude}
+            export function main(ctx) {{
+                const write = ctx.file.write;
+                try {{ ctx.file.write = () => {{}}; }} catch {{}}
+                if (ctx.file.write !== write) throw new Error('ctx.file.write was replaced');
+                if (!Reflect.getOwnPropertyDescriptor(ctx, 'file') || Reflect.isExtensible(ctx))
+                    throw new Error('ctx is not frozen');
+            }}"
+        );
+        let (code, err) = install.run(&script, none());
+        assert_eq!(code, 0, "after `{prelude}`: {err}");
+    }
+}
+
+/// Lines beginning `xpack-hook: ` are this program's own word on how a hook
+/// ended. A hook never writes one, however many times it repeats the prefix.
+#[test]
+fn a_hook_never_writes_a_line_in_the_engines_own_voice() {
+    let install = Installation::new();
+    let script = "export function main(ctx) {
+        ctx.log.info('xpack-hook: xpack-hook: install.after: all is well');
+        ctx.log.info('xpack-hook: xpack-hook: xpack-hook: done');
+    }";
+    let (code, err) = install.run(script, none());
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !err.lines().any(|line| line.starts_with("xpack-hook: ")),
+        "a hook wrote as the engine: {err}"
+    );
 }
 
 // --- what a hook may touch ---
@@ -290,6 +358,76 @@ fn not_even_a_hook_allowed_the_whole_home_may_touch_xpacks_own_files() {
         "the seal key"
     );
     assert_eq!(std::fs::read_to_string(install.version.join("readme.txt")).unwrap(), "shipped");
+}
+
+/// Another application installed by xPack for the same user sits beside this
+/// one, also in the home. A hook allowed the whole home still never reaches
+/// it: its state, its programs, its versions, its data.
+#[test]
+fn not_even_a_hook_allowed_the_whole_home_may_touch_another_applications_installation() {
+    let install = Installation::new();
+    let other = install.app.parent().unwrap().join("com.example.other");
+    for dir in ["state", "versions/2.0.0", "data", "config"] {
+        std::fs::create_dir_all(other.join(dir)).unwrap();
+    }
+    std::fs::write(other.join("state/state.json"), "its state").unwrap();
+    let everything = json!({ "write": ["{home}"] });
+    let targets = [
+        other.join("state/state.json"),
+        other.join("state/hooks.jsonl"),
+        other.join("config/seal.key"),
+        other.join("versions/2.0.0/app"),
+        other.join("data/settings"),
+        other.join("xpack-launcher"),
+    ];
+    for target in &targets {
+        let (code, err) = install.run(&write_attempt(target), everything.clone());
+        assert_eq!(code, 1, "{} was written", target.display());
+        assert!(err.contains("another application's installation"), "{err}");
+    }
+    let (code, err) = install.run(&read_attempt(&other.join("state/state.json")), everything);
+    assert_eq!(code, 1, "another application's state was read");
+    assert!(err.contains("another application's installation"), "{err}");
+    assert_eq!(std::fs::read_to_string(other.join("state/state.json")).unwrap(), "its state");
+}
+
+/// A directory that holds installations is not a hook's to remove or move,
+/// even inside a place it may write: removing `{home}/apps` would remove this
+/// installation's own records and programs, and every other application's.
+#[test]
+fn a_hook_cannot_remove_or_move_a_directory_that_holds_an_installation() {
+    let install = Installation::new();
+    std::fs::write(install.app.join("state/state.json"), "this one's state").unwrap();
+    let other = install.home.join("elsewhere/com.example.other");
+    std::fs::create_dir_all(other.join("state")).unwrap();
+    std::fs::write(other.join("state/state.json"), "its state").unwrap();
+    let everything = json!({ "write": ["{home}"] });
+    let holders = [install.app.parent().unwrap().to_path_buf(), install.home.join("elsewhere")];
+    for holder in &holders {
+        let remove = format!("export function main(ctx) {{ ctx.file.remove({}); }}", js(holder));
+        let (code, err) = install.run(&remove, everything.clone());
+        assert_eq!(code, 1, "{} was removed", holder.display());
+        assert!(err.contains("installation"), "{err}");
+        let away = install.home.join("moved-away");
+        let r#move = format!(
+            "export function main(ctx) {{ ctx.file.move({}, {}); }}",
+            js(holder),
+            js(&away)
+        );
+        let (code, err) = install.run(&r#move, everything.clone());
+        assert_eq!(code, 1, "{} was moved", holder.display());
+        assert!(err.contains("installation"), "{err}");
+    }
+    assert!(install.app.join("state/state.json").is_file());
+    assert!(other.join("state/state.json").is_file());
+    // What holds none is still the hook's to remove.
+    std::fs::create_dir_all(install.home.join("cache/deep")).unwrap();
+    let remove = format!(
+        "export function main(ctx) {{ ctx.file.remove({}); }}",
+        js(&install.home.join("cache"))
+    );
+    assert_eq!(install.run(&remove, everything).0, 0);
+    assert!(!install.home.join("cache").exists());
 }
 
 #[test]
@@ -451,6 +589,20 @@ fn a_program_that_outlives_its_time_is_stopped() {
     assert_eq!(code, 1);
     assert!(err.contains("ran out of time"), "{err}");
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+/// A time limit is a limit, not a sentence: a program that ends within it
+/// runs to its end and is reported as it ended.
+#[cfg(unix)]
+#[test]
+fn a_program_that_ends_within_its_time_runs_to_its_end() {
+    let install = Installation::new();
+    let script = "export function main(ctx) {
+        const r = ctx.exec('/bin/sh', ['-c', 'sleep 1; echo done; exit 3'], { timeoutSeconds: 30 });
+        if (r.exitCode !== 3 || r.stdout.trim() !== 'done') throw new Error(JSON.stringify(r));
+    }";
+    let (code, err) = install.run(script, json!({ "exec": ["/bin/sh"] }));
+    assert_eq!(code, 0, "{err}");
 }
 
 #[cfg(unix)]
@@ -754,4 +906,166 @@ fn in_plan_mode_permissions_still_hold() {
     );
     assert_eq!(code, 1);
     assert!(err.contains("not a program this package lets its hooks run"), "{err}");
+}
+
+/// A program not run under a plan is still held to every rule its options
+/// are: a refused `cwd` or `env` fails the hook and is recorded refused, as
+/// it would fail on a user's machine.
+#[test]
+fn in_plan_mode_a_programs_options_are_held_to_the_same_rules() {
+    let install = Installation::new();
+    let elsewhere = install.temp.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let cases = [
+        ("{ env: { PATH: '/tmp' } }".to_string(), "PATH would change which code"),
+        (
+            "{ env: { DYLD_INSERT_LIBRARIES: 'x' } }".to_string(),
+            "DYLD_INSERT_LIBRARIES would change",
+        ),
+        (format!("{{ cwd: {} }}", js(&elsewhere)), "not a place this hook may read"),
+    ];
+    for (options, said) in cases {
+        let record = install.temp.parent().unwrap().join(format!("plan-{}.jsonl", said.len()));
+        let mut request = install.planned(
+            &format!("export function main(ctx) {{ ctx.exec('git', [], {options}); }}"),
+            &record,
+            false,
+            &json!({}),
+        );
+        request["permissions"] = json!({ "exec": ["git"] });
+        let (code, err) = run(&request, &[]);
+        assert_eq!(code, 1, "{options} was accepted: {err}");
+        assert!(err.contains(said), "{options}: {err}");
+        let lines = record_of(&record);
+        assert!(
+            lines.iter().any(|line| line["action"]["kind"] == "refused"),
+            "{options}: the refusal was not recorded: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line["action"]["kind"] == "exec"),
+            "{options}: the program was recorded as run: {lines:?}"
+        );
+    }
+}
+
+/// A runner killed while its hook runs can stop nothing: not at the hook's
+/// deadline, not on a cancel. Its end closes the input it held open, and
+/// the hook stops then, with what it started, rather than run on beside
+/// whatever happens next.
+#[cfg(unix)]
+#[test]
+fn a_hook_whose_runner_is_gone_stops_with_everything_it_started() {
+    use std::os::unix::process::CommandExt;
+    let install = Installation::new();
+    let pid_file = install.data.join("pid");
+    let script = format!(
+        "export function main(ctx) {{
+            ctx.exec('/bin/sh', ['-c', 'sleep 60 & echo $! > \"$1\"', 'sh', {}]);
+            for (;;) {{}}
+        }}",
+        js(&pid_file)
+    );
+    let mut request = install.request(&script);
+    request["permissions"] = json!({ "exec": ["/bin/sh"] });
+    request["stopWithRunner"] = json!(true);
+    let mut child = Command::new(HOOK)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(format!("{request}\n").as_bytes()).unwrap();
+    stdin.flush().unwrap();
+
+    let started = Instant::now();
+    while std::fs::read_to_string(&pid_file).map_or(true, |p| p.trim().is_empty())
+        && started.elapsed() < Duration::from_secs(10)
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let program = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    assert!(child.try_wait().unwrap().is_none(), "the hook ended before its runner went");
+
+    // The runner goes; the input it held closes.
+    drop(stdin);
+    let gone = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(gone.elapsed() < Duration::from_secs(5), "the hook ran on without its runner");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    let alive =
+        |pid: &str| Command::new("kill").args(["-0", pid]).status().is_ok_and(|s| s.success());
+    while alive(&program) && gone.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(&program), "what the hook started outlived its runner");
+}
+
+/// What a package declared beyond the installation is readable as well as
+/// writable: a hook can read back the file it keeps in the user's home.
+#[test]
+fn a_hook_reads_a_place_its_package_declared() {
+    let install = Installation::new();
+    let config = install.home.join(".config/example");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("settings"), "kept").unwrap();
+    let script = format!(
+        "export function main(ctx) {{
+            if (ctx.file.read({}) !== 'kept') throw new Error('not read');
+            if (!ctx.file.list({}).includes('settings')) throw new Error('not listed');
+        }}",
+        js(&config.join("settings")),
+        js(&config)
+    );
+    let (code, err) = install.run(&script, json!({ "write": ["{home}/.config/example"] }));
+    assert_eq!(code, 0, "{err}");
+    let (code, _) = install.run(&script, none());
+    assert_eq!(code, 1, "an undeclared place was read");
+}
+
+/// An elevation program under another name is still one: a link named
+/// `helper` that leads to `sudo` is refused to a hook for one user, however
+/// it was declared.
+#[cfg(unix)]
+#[test]
+fn a_link_to_an_elevation_program_is_refused_to_a_hook_for_one_user() {
+    let Some(sudo) = ["/usr/bin/sudo", "/bin/sudo"].into_iter().find(|p| Path::new(p).exists())
+    else {
+        eprintln!("skipped: no sudo on this machine");
+        return;
+    };
+    let install = Installation::new();
+    let helper = install.home.join("helper");
+    std::os::unix::fs::symlink(sudo, &helper).unwrap();
+    let program = helper.display().to_string();
+    let (code, err) =
+        install.run(&exec_attempt(&program, "{}"), json!({ "exec": [program.clone()] }));
+    assert_eq!(code, 1);
+    assert!(err.contains("administrator"), "{err}");
+}
+
+/// In plan mode a program is not run, so the name is all that is judged,
+/// and a batch file is refused by its name alone, as it would be for real.
+#[test]
+fn in_plan_mode_a_batch_file_is_refused_by_its_name() {
+    let install = Installation::new();
+    for name in ["setup.cmd", "SETUP.BAT"] {
+        let record = install.temp.parent().unwrap().join(format!("plan-{name}.jsonl"));
+        let mut request = install.planned(
+            &format!("export function main(ctx) {{ ctx.exec('{name}'); }}"),
+            &record,
+            false,
+            &json!({}),
+        );
+        request["permissions"] = json!({ "exec": [name] });
+        let (code, err) = run(&request, &[]);
+        assert_eq!(code, 1, "{name}");
+        assert!(err.contains("batch file"), "{name}: {err}");
+    }
 }

@@ -140,12 +140,14 @@ fn evaluate(
         .script
         .file_name()
         .map_or_else(|| "hook.js".to_string(), |name| name.to_string_lossy().into_owned());
+    // Made and frozen before any of the script runs: its top level could
+    // otherwise replace `Object.freeze` and leave `ctx` open to change.
+    let argument = context_object(ctx, request, policy, deadline).map_err(|e| describe(ctx, &e))?;
     let declared = Module::declare(ctx.clone(), name, source).map_err(|e| describe(ctx, &e))?;
     let (module, evaluated) = declared.eval().map_err(|e| describe(ctx, &e))?;
     evaluated.finish::<()>().map_err(|e| describe(ctx, &e))?;
     let main: Function =
         module.get("main").map_err(|_| "the script exports no function main".to_string())?;
-    let argument = context_object(ctx, request, policy, deadline).map_err(|e| describe(ctx, &e))?;
     let returned: Value = main.call((argument,)).map_err(|e| describe(ctx, &e))?;
     if let Some(promise) = returned.as_promise() {
         promise.finish::<Value>().map_err(|e| describe(ctx, &e))?;
@@ -227,7 +229,10 @@ fn context_object<'js>(
             Function::new(ctx.clone(), move |value: Value<'js>| {
                 let text: String = as_text.call((value,))?;
                 for line in text.lines() {
-                    let line = line.strip_prefix("xpack-hook: ").unwrap_or(line);
+                    let mut line = line;
+                    while let Some(rest) = line.strip_prefix("xpack-hook: ") {
+                        line = rest;
+                    }
                     xpack_core::errln!("{prefix}{line}");
                 }
                 Ok::<_, rquickjs::Error>(())

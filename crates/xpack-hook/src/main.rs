@@ -4,7 +4,7 @@
 //! `xpack-hook --check <script>...` parses each script and runs none: `0`
 //! when every one parses, `1` naming each that does not.
 
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::process::ExitCode;
 
 use xpack_hook::{Outcome, Request, check, exit, run};
@@ -20,18 +20,35 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(exit::BAD_REQUEST);
     }
+    // The request is its first line. A runner that keeps the input open
+    // after it says so in the request; one that closes it has sent all.
     let mut input = String::new();
-    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+    if let Err(error) = std::io::stdin().lock().read_line(&mut input) {
         xpack_core::errln!("xpack-hook: could not read the request: {error}");
         return ExitCode::from(exit::BAD_REQUEST);
     }
+    let mut rest = String::new();
     let request: Request = match serde_json::from_str(&input) {
         Ok(request) => request,
+        // Perhaps written over several lines by a runner that then closed
+        // the input: the whole of it is the request.
+        Err(_) if std::io::stdin().lock().read_to_string(&mut rest).is_ok() && !rest.is_empty() => {
+            match serde_json::from_str(&(input + &rest)) {
+                Ok(request) => request,
+                Err(error) => {
+                    xpack_core::errln!("xpack-hook: the request cannot be read: {error}");
+                    return ExitCode::from(exit::BAD_REQUEST);
+                }
+            }
+        }
         Err(error) => {
             xpack_core::errln!("xpack-hook: the request cannot be read: {error}");
             return ExitCode::from(exit::BAD_REQUEST);
         }
     };
+    if request.stop_with_runner {
+        stop_when_the_runner_goes();
+    }
     if let Err(problem) = request.check() {
         xpack_core::errln!("xpack-hook: {problem}");
         return ExitCode::from(exit::BAD_REQUEST);
@@ -54,6 +71,23 @@ fn main() -> ExitCode {
             ExitCode::from(exit::TIMED_OUT)
         }
     }
+}
+
+/// Watches the input the runner holds open: it closes when the runner ends,
+/// however it ends. One that was killed would never stop this hook at its
+/// deadline, so it stops now, with everything it started.
+fn stop_when_the_runner_goes() {
+    std::thread::spawn(|| {
+        let mut sink = [0_u8; 256];
+        loop {
+            match std::io::stdin().read(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        xpack_platform::tree::stop_own_tree();
+        std::process::exit(i32::from(exit::FAILED));
+    });
 }
 
 fn check_scripts(scripts: &[std::ffi::OsString]) -> ExitCode {
