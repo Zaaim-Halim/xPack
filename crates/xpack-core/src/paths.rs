@@ -277,6 +277,13 @@ impl InstallPaths {
         self.per_user_dir().join("running.lock")
     }
 
+    /// Held by whatever runs hooks, for as long as they run: guards the hook
+    /// record, so no hook point runs twice, without holding the installation
+    /// lock, which a start of the application needs.
+    pub fn hook_lock_file(&self) -> PathBuf {
+        self.state_dir().join("hooks.lock")
+    }
+
     /// The hook record: one line per hook run, appended and never rewritten.
     ///
     /// Apart from the state file on purpose: that is replaced whole and can

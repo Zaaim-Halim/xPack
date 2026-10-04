@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use xpack_core::progress::NoProgress;
 use xpack_core::state::UpdatePhase;
 use xpack_core::{Error, InstallPaths, Manifest, Result, UpdateSpec, Version};
-use xpack_install::Installer;
+use xpack_install::{HookContext, Installer};
 use xpack_platform::{InstallLock, LaunchRequest, launch, request_close};
 
 /// Where an application reports that it started. See
@@ -295,26 +296,49 @@ impl Launcher {
         // only means something while something watches the version start,
         // which is exactly what this process is about to do. Activating
         // from the updater instead would start a clock nobody is holding.
+        //
+        // With its update hooks around the activation. Whatever they decide,
+        // this start goes on with the version active afterwards: the old one,
+        // when a hook failed and the new one was given up or rolled back.
+        let engine = self.hook_engine();
+        let hooks = HookContext {
+            engine: engine.as_deref(),
+            scope: state.scope,
+            progress: &NoProgress,
+            cancel: None,
+        };
         let state = match &state.update {
             UpdatePhase::Staged { version } if installer.is_usable(version) => {
                 let staged = version.clone();
-                match installer.activate(&staged, false) {
-                    Ok(()) => {
-                        tracing::info!(version = %staged, "activating a staged version");
-                        lock.load_or_new_state(&application)?
-                    }
+                let applied = self.read_manifest(&staged).and_then(|manifest| {
+                    installer.apply_with_hooks(&hooks, &manifest, &staged, false)
+                });
+                match applied {
+                    Ok(()) => tracing::info!(version = %staged, "activated a staged version"),
                     // A staged version that cannot be activated is not a
                     // reason to refuse to start: the version already
                     // running is fine, and it is better to open the
                     // application and try again next time than to leave a
                     // user with nothing.
                     Err(error) => {
-                        tracing::warn!(version = %staged, %error, "could not activate the staged version");
-                        state
+                        tracing::warn!(version = %staged, %error, "could not apply the staged version");
                     }
                 }
+                lock.load_or_new_state(&application)?
             }
             _ => state,
+        };
+
+        // A version made active whose `update.after` hooks never finished
+        // (the machine stopped between the two) has them run now, or, if
+        // they were cut short, is rolled back as for any failed hook.
+        let state = if state.update.is_probation() {
+            if let Err(error) = installer.finish_update_hooks(&hooks) {
+                tracing::warn!(%error, "an update's hooks did not finish; it was rolled back");
+            }
+            lock.load_or_new_state(&application)?
+        } else {
+            state
         };
 
         let version = state.active()?.clone();
@@ -335,7 +359,11 @@ impl Launcher {
             let phase = installer.begin_attempt()?;
             if phase.attempts_exhausted() {
                 tracing::error!(%version, "version has used its startup attempts");
-                let rolled_back = installer.record_failure("exhausted its startup attempts")?;
+                let rolled_back = installer.roll_back_with_hooks(
+                    &hooks,
+                    "failedToStart",
+                    "exhausted its startup attempts",
+                )?;
                 return Ok(Prepared::Finished(Outcome {
                     version,
                     startup: Some(StartupResult::FailedToStart { code: None }),
@@ -437,9 +465,20 @@ impl Launcher {
     fn record(&self, version: &Version, startup: &StartupResult) -> Result<Option<Version>> {
         let lock = self.lock()?;
         let installer = Installer::new(&lock);
+        let engine = self.hook_engine();
+        let scope = lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope);
+        let hooks =
+            HookContext { engine: engine.as_deref(), scope, progress: &NoProgress, cancel: None };
 
         if startup.is_healthy() {
-            installer.commit_health()?;
+            let confirmation = installer.commit_for_confirmation()?;
+            // The application is already running: `update.confirmed` runs
+            // beside it, with the installation let go of, so neither the
+            // application nor another start of it waits on the hook.
+            drop(lock);
+            if let Some(confirmation) = confirmation {
+                confirmation.run(&self.paths, &hooks);
+            }
             tracing::info!(%version, "version started successfully and is now committed");
             return Ok(None);
         }
@@ -453,13 +492,18 @@ impl Launcher {
             }
             _ => "failed during startup".to_string(),
         };
-        let rolled_back = installer.record_failure(reason)?;
+        let rolled_back = installer.roll_back_with_hooks(&hooks, "failedToStart", &reason)?;
         if let Some(target) = &rolled_back {
             tracing::warn!(%version, %target, "rolled back after a failed start");
         } else {
             tracing::error!(%version, "start failed and there is nothing to roll back to");
         }
         Ok(rolled_back)
+    }
+
+    /// The installation's `xpack-hook`, if it has one.
+    fn hook_engine(&self) -> Option<PathBuf> {
+        Some(self.paths.hook_engine_file()).filter(|engine| engine.is_file())
     }
 
     /// Takes the installation lock, waiting for a brief holder.

@@ -31,7 +31,7 @@ use xpack_core::hooks::{
     Hook, HookEvent, HookPoint, HookRecord, HookRecordLine, Request, Scope, append,
 };
 use xpack_core::{Error, InstallPaths, InstallScope, Manifest, Result, Sha256Digest, Version};
-use xpack_platform::InstallLock;
+use xpack_platform::HookLock;
 
 /// How long `xpack-hook` is given past a hook's own timeout to stop by
 /// itself. The runner stops it, and everything it started, at the timeout;
@@ -113,12 +113,18 @@ impl HookRun<'_> {
     /// The first failure stops the rest, which are recorded *skipped* so they
     /// never run later either, and is returned as [`Error::HookFailed`]. A
     /// hook record that cannot be read runs nothing and is an error.
-    pub fn run(&self, lock: &InstallLock, point: HookPoint) -> Result<()> {
+    ///
+    /// Holds the installation's [`HookLock`] throughout, which is what keeps
+    /// two processes from both running a point: the record is read and
+    /// written only under it. The installation lock is not needed, so
+    /// `update.confirmed` can run without keeping a start of the application
+    /// waiting.
+    pub fn run(&self, paths: &InstallPaths, point: HookPoint) -> Result<()> {
         let hooks: Vec<&Hook> = self.manifest.hooks.at(point).collect();
         if hooks.is_empty() {
             return Ok(());
         }
-        let paths = lock.paths();
+        let _held = HookLock::acquire(paths)?;
         let version = &self.manifest.application.version;
         let record_file = paths.hook_record_file();
         let record = HookRecord::read(&record_file)?;

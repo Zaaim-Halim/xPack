@@ -113,7 +113,7 @@ impl Fixture {
             on_line: self.on_line,
             cancel,
         };
-        run.run(&lock, point.parse::<HookPoint>().unwrap())
+        run.run(lock.paths(), point.parse::<HookPoint>().unwrap())
     }
 
     fn run(&self, point: &str) -> xpack_core::Result<()> {
@@ -619,4 +619,46 @@ fn a_hook_runs_a_system_program_with_the_environment_it_is_given() {
         return;
     };
     fixture.run("install.after").unwrap();
+}
+
+#[test]
+fn two_runs_of_one_point_at_the_same_moment_run_it_once_without_the_installation_lock() {
+    let Some(fixture) = Fixture::new(
+        serde_json::json!({ "update": { "when": "confirmed", "script": "xpack/hooks/a.js" } }),
+        &[(
+            "xpack/hooks/a.js",
+            "export function main(ctx) {
+                const file = ctx.path(ctx.dataDir, 'marks');
+                const before = ctx.file.exists(file) ? ctx.file.read(file) : '';
+                const end = Date.now() + 500; while (Date.now() < end) {}
+                ctx.file.write(file, before + 'a');
+            }",
+        )],
+    ) else {
+        return;
+    };
+    let point: HookPoint = "update.confirmed".parse().unwrap();
+    let run = || {
+        HookRun {
+            engine: &fixture.engine,
+            scope: InstallScope::User,
+            manifest: &fixture.manifest,
+            scripts: &fixture.paths.version_dir(&fixture.manifest.application.version),
+            from_version: None,
+            to_version: Some(&fixture.manifest.application.version),
+            cause: None,
+            on_line: None,
+            cancel: None,
+        }
+        .run(&fixture.paths, point)
+    };
+    std::thread::scope(|scope| {
+        let one = scope.spawn(run);
+        let two = scope.spawn(run);
+        one.join().unwrap().unwrap();
+        two.join().unwrap().unwrap();
+    });
+    let record = std::fs::read_to_string(fixture.paths.hook_record_file()).unwrap();
+    let starts = record.lines().filter(|l| l.contains("\"event\":\"started\"")).count();
+    assert_eq!(starts, 1, "the point ran twice:\n{record}");
 }

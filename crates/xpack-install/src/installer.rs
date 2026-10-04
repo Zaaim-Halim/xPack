@@ -208,7 +208,7 @@ impl<'a> HookContext<'a> {
     #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
-        installer: &Installer<'_>,
+        paths: &xpack_core::InstallPaths,
         manifest: &xpack_core::Manifest,
         scripts: &Path,
         point: HookPoint,
@@ -244,7 +244,7 @@ impl<'a> HookContext<'a> {
             on_line: Some(&sink),
             cancel: self.cancel,
         }
-        .run(installer.lock, point)
+        .run(paths, point)
     }
 
     /// As [`Self::run`], for the points whose failure changes nothing: it is
@@ -252,7 +252,7 @@ impl<'a> HookContext<'a> {
     #[allow(clippy::too_many_arguments)]
     fn run_and_carry_on(
         &self,
-        installer: &Installer<'_>,
+        paths: &xpack_core::InstallPaths,
         manifest: &xpack_core::Manifest,
         scripts: &Path,
         point: HookPoint,
@@ -261,10 +261,36 @@ impl<'a> HookContext<'a> {
         cause: Option<&str>,
     ) {
         if let Err(error) =
-            self.run(installer, manifest, scripts, point, from_version, to_version, cause)
+            self.run(paths, manifest, scripts, point, from_version, to_version, cause)
         {
             tracing::warn!(%point, %error, "a hook failed; carrying on, as for every {point} hook");
         }
+    }
+}
+
+/// A version just committed after a good start, whose `update.confirmed`
+/// hooks are still to run; see [`Installer::commit_for_confirmation`].
+#[derive(Debug, Clone)]
+pub struct Confirmation {
+    manifest: xpack_core::Manifest,
+    version: Version,
+    previous: Option<Version>,
+}
+
+impl Confirmation {
+    /// Runs the hooks, without the installation lock: the hook record is
+    /// guarded by the hook lock alone. Their failure is logged; the version
+    /// stays, as it already works.
+    pub fn run(&self, paths: &xpack_core::InstallPaths, hooks: &HookContext<'_>) {
+        hooks.run_and_carry_on(
+            paths,
+            &self.manifest,
+            &paths.version_dir(&self.version),
+            point(Operation::Update, Moment::Confirmed),
+            self.previous.as_ref(),
+            Some(&self.version),
+            None,
+        );
     }
 }
 
@@ -536,7 +562,11 @@ impl<'lock> Installer<'lock> {
         let hooks = HookContext::of(engine.as_deref(), options, progress);
         let dir = paths.version_dir(&version);
 
-        if (install_hooks || update_hooks)
+        // Parsed whenever the version has hooks, staged only too: the
+        // background updater refuses a version whose script cannot run when
+        // it downloads it, rather than at the start that would apply it.
+        if has_hooks
+            && !is_repair
             && let Err(error) = self.ready_to_promote(&hooks, &manifest, &staging, install_hooks)
         {
             let _ = atomic::remove_dir_all_if_exists(&staging);
@@ -789,7 +819,9 @@ impl<'lock> Installer<'lock> {
         options: &InstallOptions,
     ) -> Result<()> {
         let version = &manifest.application.version;
-        let Err(error) = hooks.run(self, manifest, scripts, at, None, Some(version), None) else {
+        let Err(error) =
+            hooks.run(self.lock.paths(), manifest, scripts, at, None, Some(version), None)
+        else {
             return Ok(());
         };
         let commands = if commands_written {
@@ -823,7 +855,7 @@ impl<'lock> Installer<'lock> {
         if install_hooks {
             let version = &manifest.application.version;
             hooks.run(
-                self,
+                self.lock.paths(),
                 manifest,
                 staging,
                 point(Operation::Install, Moment::Before),
@@ -899,7 +931,10 @@ impl<'lock> Installer<'lock> {
     /// A failed `update.before` leaves the active version as it was and
     /// marks this one bad; a failed `update.after` rolls it back. Either
     /// runs its rollback hooks, and the failure is returned.
-    fn apply_with_hooks(
+    ///
+    /// What the launcher does with a version the background updater staged,
+    /// and an installer with one it applies over another.
+    pub fn apply_with_hooks(
         &self,
         hooks: &HookContext<'_>,
         manifest: &xpack_core::Manifest,
@@ -914,7 +949,7 @@ impl<'lock> Installer<'lock> {
         let undo = HookContext { cancel: None, ..*hooks };
 
         if let Err(error) = hooks.run(
-            self,
+            self.lock.paths(),
             manifest,
             &scripts,
             point(Operation::Update, Moment::Before),
@@ -930,7 +965,7 @@ impl<'lock> Installer<'lock> {
         self.activate(version, allow_downgrade)?;
 
         if let Err(error) = hooks.run(
-            self,
+            self.lock.paths(),
             manifest,
             &scripts,
             point(Operation::Update, Moment::After),
@@ -949,7 +984,7 @@ impl<'lock> Installer<'lock> {
         if hooks.scope == xpack_core::InstallScope::Machine {
             self.commit_health()?;
             hooks.run_and_carry_on(
-                self,
+                self.lock.paths(),
                 manifest,
                 &scripts,
                 point(Operation::Update, Moment::Confirmed),
@@ -959,6 +994,71 @@ impl<'lock> Installer<'lock> {
             );
         }
         Ok(())
+    }
+
+    /// Finishes applying the active version, on probation, if its
+    /// `update.after` hooks never finished: the machine stopped between its
+    /// activation and their end. Run at each start on probation; once they
+    /// have succeeded it does nothing.
+    ///
+    /// A run of them cut short is a failure, as every hook cut short is: the
+    /// version is rolled back with its rollback hooks, and the failure is
+    /// returned. One that never started runs now.
+    pub fn finish_update_hooks(&self, hooks: &HookContext<'_>) -> Result<()> {
+        let state = self.load_state()?;
+        let UpdatePhase::PendingVerification { version, rollback_to, .. } = &state.update else {
+            return Ok(());
+        };
+        let paths = self.lock.paths();
+        let Some(manifest) = std::fs::read(paths.version_manifest_file(version))
+            .ok()
+            .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok())
+        else {
+            return Ok(());
+        };
+        let scripts = paths.version_dir(version);
+        let at = point(Operation::Update, Moment::After);
+        let Err(error) = hooks.run(
+            self.lock.paths(),
+            &manifest,
+            &scripts,
+            at,
+            Some(rollback_to),
+            Some(version),
+            None,
+        ) else {
+            return Ok(());
+        };
+        let undo = HookContext { cancel: None, ..*hooks };
+        self.roll_back_with_hooks(
+            &undo,
+            "hookFailed",
+            &format!("its update.after hook failed: {error}"),
+        )?;
+        Err(error)
+    }
+
+    /// Commits the active version, on probation, as having started well,
+    /// and returns what runs its `update.confirmed` hooks: once, after the
+    /// start that succeeds, never after a failed one.
+    ///
+    /// Run them with [`Confirmation::run`] once the installation lock is let
+    /// go: they run beside the application, for as long as they take, and a
+    /// second start of it must not wait on them.
+    pub fn commit_for_confirmation(&self) -> Result<Option<Confirmation>> {
+        let before = self.load_state()?;
+        let (version, previous) = match &before.update {
+            UpdatePhase::PendingVerification { version, rollback_to, .. } => {
+                (version.clone(), Some(rollback_to.clone()))
+            }
+            _ => (before.active()?.clone(), before.previous_version.clone()),
+        };
+        self.commit_health()?;
+        let paths = self.lock.paths();
+        let manifest = std::fs::read(paths.version_manifest_file(&version))
+            .ok()
+            .and_then(|bytes| xpack_core::Manifest::from_slice(&bytes).ok());
+        Ok(manifest.map(|manifest| Confirmation { manifest, version, previous }))
     }
 
     /// Gives up `version` after its `update.before` hook failed, before it
@@ -975,7 +1075,7 @@ impl<'lock> Installer<'lock> {
         let scripts = self.lock.paths().version_dir(version);
         let cause = Some("hookFailed");
         hooks.run_and_carry_on(
-            self,
+            self.lock.paths(),
             manifest,
             &scripts,
             point(Operation::Rollback, Moment::Before),
@@ -990,7 +1090,7 @@ impl<'lock> Installer<'lock> {
         }
         self.lock.save_state(&state)?;
         hooks.run_and_carry_on(
-            self,
+            self.lock.paths(),
             manifest,
             &scripts,
             point(Operation::Rollback, Moment::After),
@@ -1028,7 +1128,7 @@ impl<'lock> Installer<'lock> {
         let scripts = paths.version_dir(&undone);
         if let (Some(manifest), true) = (&manifest, started) {
             hooks.run_and_carry_on(
-                self,
+                self.lock.paths(),
                 manifest,
                 &scripts,
                 point(Operation::Rollback, Moment::Before),
@@ -1040,7 +1140,7 @@ impl<'lock> Installer<'lock> {
         let restored = self.record_failure(reason)?;
         if let (Some(manifest), true) = (&manifest, started) {
             hooks.run_and_carry_on(
-                self,
+                self.lock.paths(),
                 manifest,
                 &scripts,
                 point(Operation::Rollback, Moment::After),

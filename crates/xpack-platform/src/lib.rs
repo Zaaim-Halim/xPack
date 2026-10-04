@@ -35,7 +35,7 @@ pub mod windows_manifest;
 
 pub use environment::announce_environment_change;
 pub use link::{LinkOutcome, update_current_link};
-pub use lock::{DownloadLease, InstallLock, InstanceLock, PresenceLock};
+pub use lock::{DownloadLease, HookLock, InstallLock, InstanceLock, PresenceLock};
 pub use privilege::{Elevated, is_elevated, restrict_new_files, run_elevated};
 pub use process::{LaunchRequest, launch, request_close, resolve_executable, without_a_console};
 pub use replace::{program_in_use, rename_when_free};

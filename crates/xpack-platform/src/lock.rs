@@ -288,6 +288,45 @@ impl Drop for DownloadLease {
     }
 }
 
+/// Held while a package's hooks run, by whatever runs them.
+///
+/// The hook record says which hook points have run, and a point must run at
+/// most once, so it is read and appended under this lock. Apart from the
+/// installation lock on purpose: `update.confirmed` runs beside the
+/// application after it has started, for as long as its hook takes, and a
+/// second start of the application must not wait on it.
+///
+/// Taken after the installation lock when both are held, never the other
+/// way round, so the two cannot deadlock.
+#[derive(Debug)]
+pub struct HookLock {
+    /// Holding this handle holds the lock; dropping it releases.
+    file: File,
+}
+
+impl HookLock {
+    /// Takes the lock, waiting for another holder to finish.
+    pub fn acquire(paths: &InstallPaths) -> Result<Self> {
+        xpack_core::atomic::create_dir_all(&paths.state_dir())?;
+        let path = paths.hook_lock_file();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| Error::io(&path, e))?;
+        file.lock().map_err(|e| Error::io(&path, e))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for HookLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 /// Held for as long as the application runs, by the launcher that started it.
 ///
 /// A launcher that cannot take it knows a copy of the application is already

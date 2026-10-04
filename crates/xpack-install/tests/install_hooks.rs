@@ -774,3 +774,24 @@ fn running_the_same_installer_twice_runs_its_hooks_once() {
     assert!(error.to_string().contains("already installed"), "{error}");
     assert_eq!(fixture.marks(), "install.before;install.afterFiles;install.after;");
 }
+
+#[test]
+fn a_version_whose_script_cannot_run_is_refused_when_it_is_staged() {
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(&fixture, &fixture.package("1.0.0", serde_json::json!({}), &[]));
+    let package = fixture.package(
+        "1.1.0",
+        serde_json::json!({ "update": "xpack/hooks/broken.js" }),
+        &[("xpack/hooks/broken.js", "export function main( {")],
+    );
+    // What the background updater does with what it downloaded.
+    let options = InstallOptions {
+        activate: false,
+        hook_engine: None,
+        ..fixture.options(InstallScope::User)
+    };
+    let error = fixture.install(&package, &options, &Moments::new(fixture.paths())).unwrap_err();
+    assert!(error.to_string().contains("cannot run"), "{error}");
+    assert!(!fixture.paths().version_dir(&v("1.1.0")).exists(), "it was staged");
+    assert_eq!(fixture.state().current_version, Some(v("1.0.0")));
+}
