@@ -20,6 +20,11 @@ pub(crate) struct Args {
     /// Emit machine-readable JSON.
     #[arg(long)]
     json: bool,
+
+    /// Print the hook record instead: which hook points ran, for which
+    /// version, with which script, when, for how long, and how they ended.
+    #[arg(long)]
+    hooks: bool,
 }
 
 /// One row of the listing.
@@ -69,6 +74,9 @@ fn if_present(path: PathBuf) -> Option<PathBuf> {
 /// Runs `xpack list`.
 pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let lock = context.lock(&args.application)?;
+    if args.hooks {
+        return list_hooks(&lock.paths().hook_record_file(), args.json);
+    }
     let installer = Installer::new(&lock);
     let state = lock.load_or_new_state(&args.application)?;
     let active = state.current_version.clone();
@@ -115,4 +123,87 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         xpack_core::errln!("note: {}", state.update.describe());
     }
     super::success()
+}
+
+/// Prints the hook record, a line per event, as written: read as it is, a
+/// line that cannot be read included, never repaired or summarised.
+fn list_hooks(record: &Path, json: bool) -> Result<ExitCode> {
+    let text = match std::fs::read_to_string(record) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(xpack_core::Error::io(record, error)),
+    };
+    let lines: Vec<std::result::Result<xpack_core::hooks::HookRecordLine, &str>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|_| line))
+        .collect();
+    if json {
+        let values: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| match line {
+                Ok(line) => serde_json::to_value(line).unwrap_or(serde_json::Value::Null),
+                Err(raw) => serde_json::json!({ "unreadable": raw }),
+            })
+            .collect();
+        return crate::output::json(&values).map(|()| ExitCode::SUCCESS);
+    }
+    if lines.is_empty() {
+        xpack_core::outln!("no hook has run");
+        return super::success();
+    }
+    for line in &lines {
+        match line {
+            Ok(line) => {
+                let took = line.seconds.map(|s| format!(" ({s} s)")).unwrap_or_default();
+                let event = format!("{:?}", line.event).to_lowercase();
+                xpack_core::outln!(
+                    "{:<12} {:<20} {:<10} {}  {}{took}",
+                    line.version,
+                    line.point.to_string(),
+                    event,
+                    line.script,
+                    utc(line.at)
+                );
+            }
+            Err(_) => xpack_core::outln!("(a line that cannot be read)"),
+        }
+    }
+    super::success()
+}
+
+/// `seconds` since the Unix epoch, as a UTC date and time a person reads.
+fn utc(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX);
+    let rest = seconds % 86_400;
+    // Days to a civil date, after Howard Hinnant's algorithm.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc;
+
+    #[test]
+    fn epoch_seconds_read_as_a_date() {
+        assert_eq!(utc(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(utc(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(utc(1_790_972_643), "2026-10-02 20:24:03 UTC");
+        assert_eq!(utc(4_107_542_399), "2100-02-28 23:59:59 UTC");
+    }
 }

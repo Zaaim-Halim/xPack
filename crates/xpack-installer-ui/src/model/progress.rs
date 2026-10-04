@@ -124,6 +124,16 @@ mod tests {
         Texts::new(Flavour::Mac, facts, BTreeMap::new())
     }
 
+    #[test]
+    fn while_hooks_run_the_status_says_so_and_then_shows_the_hooks_own_words() {
+        let mut progress = Progress::default();
+        let point: xpack_core::hooks::HookPoint = "install.after".parse().unwrap();
+        progress.observe(&ProgressEvent::RunningHooks { point });
+        assert_eq!(progress.status(), "Setting up");
+        progress.observe(&ProgressEvent::HookOutput { point, line: "creating the service".into() });
+        assert_eq!(progress.status(), "creating the service");
+    }
+
     fn extraction(files: usize, bytes: u64) -> ProgressEvent {
         ProgressEvent::ExtractionProgress {
             files_completed: files,

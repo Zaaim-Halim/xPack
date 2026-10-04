@@ -35,7 +35,10 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
 
     // Consumes the lock: the lock file sits inside the tree being removed, so
     // it has to be released partway through.
-    let removal = xpack_install::uninstall(lock)?;
+    // Its hooks' output shown as it arrives. Nothing cancels them: a half
+    // removed application is worse than either outcome.
+    let removal =
+        xpack_install::uninstall_reporting(lock, None, None, &crate::progress::HookLines)?;
 
     crate::output::field("application", &args.application);
     crate::output::field("root", removal.root.display());

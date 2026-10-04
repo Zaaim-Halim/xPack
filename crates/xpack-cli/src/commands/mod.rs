@@ -81,6 +81,45 @@ pub(crate) fn public_key(value: &str) -> Result<xpack_security::PublicKey> {
     })
 }
 
+/// A flag a running hook is stopped by, set when the person at the terminal
+/// presses Ctrl-C.
+///
+/// `xpack-hook` runs in a process group of its own, so a terminal's interrupt
+/// no longer reaches it; without this, `xpack` would die and the hook run on
+/// to its timeout. The first Ctrl-C stops the hook, which undoes the
+/// operation as for any failed hook; a second quits at once. Installed only
+/// by an operation that runs hooks, so everything else keeps the ordinary
+/// Ctrl-C.
+pub(crate) fn cancel_on_interrupt() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
+    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    Arc::clone(FLAG.get_or_init(|| {
+        let flag = Arc::new(AtomicBool::new(false));
+        let set = Arc::clone(&flag);
+        let installed = ctrlc::set_handler(move || {
+            if set.swap(true, Ordering::SeqCst) {
+                std::process::exit(130);
+            }
+            xpack_core::errln!(
+                "stopping the running hook; what it began is undone. Press Ctrl-C again to quit \
+                 at once."
+            );
+        });
+        if let Err(error) = installed {
+            tracing::warn!(%error, "Ctrl-C will not stop a running hook");
+        }
+        flag
+    }))
+}
+
+/// The `xpack-hook` an operation on an installation runs hooks with: the
+/// installation's own, which serves the hook interface it was installed
+/// for, or the one beside `xpack` when it has none.
+pub(crate) fn hook_engine_for(paths: &InstallPaths) -> Option<PathBuf> {
+    Some(paths.hook_engine_file()).filter(|engine| engine.is_file()).or_else(default_hook_engine)
+}
+
 /// The `xpack-launcher` binary sitting beside this executable, if there is one.
 ///
 /// Shared by the commands that can create an installation. Both default to it

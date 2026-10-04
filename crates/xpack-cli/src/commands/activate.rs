@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Args as ClapArgs;
 use xpack_core::{Result, Version};
-use xpack_install::Installer;
+use xpack_install::{HookContext, Installer};
 
 use super::Context;
 
@@ -31,7 +31,20 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     let installer = Installer::new(&lock);
 
     installer.recover()?;
-    installer.activate(&version, args.allow_downgrade)?;
+    // A newer version is applied with its update hooks, which Ctrl-C may
+    // stop and so undo; an older one undoes the active version by request,
+    // with its rollback hooks.
+    let engine = super::hook_engine_for(lock.paths());
+    let state = lock.load_state()?.value;
+    let newer = state.current_version.as_ref().is_some_and(|active| &version > active);
+    let cancel = newer.then(super::cancel_on_interrupt);
+    let hooks = HookContext {
+        engine: engine.as_deref(),
+        scope: state.scope,
+        progress: &crate::progress::HookLines,
+        cancel: cancel.as_deref(),
+    };
+    installer.activate_with_hooks(&hooks, &version, args.allow_downgrade)?;
 
     crate::output::field("active", &version);
     super::success()

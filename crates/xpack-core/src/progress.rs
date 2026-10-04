@@ -186,8 +186,10 @@ impl ProgressEvent {
             Self::Activating { version } => format!("Activating {version}"),
             Self::Completed { version } => format!("Updated to {version}"),
             Self::RolledBack { from, to } => format!("{from} failed; restored {to}"),
-            Self::RunningHooks { point } => format!("Running the {point} hooks"),
-            Self::HookOutput { point, line } => format!("[{point}] {line}"),
+            // What an installer window shows: the step, then the hook's own
+            // latest words. A terminal adds the hook point itself.
+            Self::RunningHooks { .. } => "Setting up".to_string(),
+            Self::HookOutput { line, .. } => line.clone(),
             Self::Failed { reason } => format!("Failed: {reason}"),
         }
     }

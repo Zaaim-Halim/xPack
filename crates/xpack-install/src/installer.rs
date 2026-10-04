@@ -174,6 +174,16 @@ pub struct Installed {
     pub recovery: RecoveryReport,
 }
 
+/// The verified manifest an installed version came with.
+fn read_manifest_of(
+    paths: &xpack_core::InstallPaths,
+    version: &Version,
+) -> Result<xpack_core::Manifest> {
+    let file = paths.version_manifest_file(version);
+    let bytes = std::fs::read(&file).map_err(|e| Error::io(&file, e))?;
+    xpack_core::Manifest::from_slice(&bytes)
+}
+
 /// The hook point of `operation` at `moment`.
 const fn point(operation: Operation, moment: Moment) -> HookPoint {
     HookPoint { operation, moment }
@@ -1099,6 +1109,98 @@ impl<'lock> Installer<'lock> {
             active,
             cause,
         );
+        Ok(())
+    }
+
+    /// Undoes the active version because someone asked (`xpack rollback`):
+    /// back to the newest earlier version that has proved it starts, with
+    /// the undone version's rollback hooks around the switch, cause
+    /// `requested`. Not marked bad: it can be activated again, and then runs
+    /// none of its hooks a second time. Returns the version now active, or
+    /// None when there is none to go back to, and nothing changed.
+    pub fn roll_back_on_request(&self, hooks: &HookContext<'_>) -> Result<Option<Version>> {
+        let state = self.load_state()?;
+        let undone = state.active()?.clone();
+        let Some(target) = state.best_rollback_target(&undone) else {
+            return Ok(None);
+        };
+        if !self.is_usable(&target) {
+            return Err(Error::invalid(
+                "rollback",
+                format!("{target} is recorded but its files are missing"),
+            ));
+        }
+        self.leave_with_hooks(hooks, &undone, &target, "requested", || {
+            let mut state = self.load_state()?;
+            state.previous_version = Some(undone.clone());
+            state.current_version = Some(target.clone());
+            state.update = UpdatePhase::Idle;
+            self.lock.save_state(&state)?;
+            xpack_platform::update_current_link(self.lock.paths(), &target).log();
+            tracing::info!(from = %undone, to = %target, "rolled back on request");
+            Ok(())
+        })?;
+        Ok(Some(target))
+    }
+
+    /// Makes `version` active as `xpack activate` asks, with the hooks that
+    /// move means: a newer version is applied with its update hooks, as an
+    /// update is; an older one undoes the active version by request, with
+    /// its rollback hooks, cause `requested`. The same version, or a first
+    /// activation, runs none.
+    pub fn activate_with_hooks(
+        &self,
+        hooks: &HookContext<'_>,
+        version: &Version,
+        allow_downgrade: bool,
+    ) -> Result<()> {
+        let Some(active) = self.load_state()?.current_version else {
+            return self.activate(version, allow_downgrade);
+        };
+        if version > &active {
+            let manifest = read_manifest_of(self.lock.paths(), version)?;
+            return self.apply_with_hooks(hooks, &manifest, version, allow_downgrade);
+        }
+        if version < &active {
+            return self.leave_with_hooks(hooks, &active, version, "requested", || {
+                self.activate(version, allow_downgrade)
+            });
+        }
+        self.activate(version, allow_downgrade)
+    }
+
+    /// Leaves `undone` for `target` by `switch`, with `undone`'s rollback
+    /// hooks around it with `cause`, if its update hooks had started. A
+    /// failed rollback hook is logged, and the move carries on.
+    fn leave_with_hooks(
+        &self,
+        hooks: &HookContext<'_>,
+        undone: &Version,
+        target: &Version,
+        cause: &str,
+        switch: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let paths = self.lock.paths();
+        let manifest = read_manifest_of(paths, undone).ok();
+        let started = HookRecord::read(&paths.hook_record_file())
+            .is_ok_and(|record| record.any_started(undone, Operation::Update));
+        let scripts = paths.version_dir(undone);
+        let run = |moment| {
+            if let (Some(manifest), true) = (&manifest, started) {
+                hooks.run_and_carry_on(
+                    paths,
+                    manifest,
+                    &scripts,
+                    point(Operation::Rollback, moment),
+                    Some(undone),
+                    Some(target),
+                    Some(cause),
+                );
+            }
+        };
+        run(Moment::Before);
+        switch()?;
+        run(Moment::After);
         Ok(())
     }
 

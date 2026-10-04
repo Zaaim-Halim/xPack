@@ -83,6 +83,10 @@ serde_json.workspace = true
 tracing.workspace = true
 xpack-log.workspace = true
 zeroize.workspace = true
+# Ctrl-C while a hook runs. `xpack-hook` runs in a process group of its own,
+# so a terminal's interrupt no longer reaches it: this catches it and stops
+# the hook, which undoes the operation. Safe on Unix and Windows alike.
+ctrlc = "3.5.2"
 
 [dev-dependencies]
 # The branding test reads back what was written with the same reader that

@@ -149,6 +149,12 @@ impl ProgressReporter for TerminalProgress {
                 }
             }
 
+            // A hook's own words, named by where it runs.
+            ProgressEvent::HookOutput { point, line } => {
+                self.set_bar(None);
+                self.line(&format!("[{point}] {line}"));
+            }
+
             // Everything else is a stage change, which reads better as a line.
             other => {
                 if matches!(other, ProgressEvent::Installing { .. }) && self.interactive {
@@ -220,5 +226,18 @@ impl Progress {
     /// prose in the middle of it breaks the parser reading it.
     pub(crate) fn wants_human_output(&self) -> bool {
         !matches!(self, Self::Json(_))
+    }
+}
+
+/// What a command that runs hooks shows of them in a terminal: each line a
+/// hook writes, on standard error, named by its hook point:
+/// `[install.after] service created`.
+pub(crate) struct HookLines;
+
+impl xpack_core::ProgressReporter for HookLines {
+    fn report(&self, event: &ProgressEvent) {
+        if let ProgressEvent::HookOutput { point, line } = event {
+            xpack_core::errln!("[{point}] {line}");
+        }
     }
 }

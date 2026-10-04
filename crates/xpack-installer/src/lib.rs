@@ -61,6 +61,9 @@ pub mod exit {
     /// changed. Kept apart from [`BUSY`] because the remedy differs: that one
     /// is waited out, this one needs the application closed.
     pub const APPLICATION_OPEN: u8 = 6;
+    /// A hook of the package failed, and the installation was undone: on a
+    /// first installation nothing of it is left, log included.
+    pub const HOOK_FAILED: u8 = 7;
 }
 
 /// Maps a failure to the exit code a script should branch on.
@@ -75,6 +78,7 @@ pub fn exit_code_for(error: &Error) -> u8 {
     match error {
         Error::Locked(_) => exit::BUSY,
         Error::ApplicationRunning(_) => exit::APPLICATION_OPEN,
+        Error::HookFailed { .. } => exit::HOOK_FAILED,
         _ => exit::FAILED,
     }
 }
@@ -653,6 +657,13 @@ impl VerifiedPayload {
         if everyone {
             let _ = std::fs::remove_file(&package);
         }
+        // A failed first install has undone everything it wrote but the lock
+        // and its directory; with the lock let go, those go too. Nothing of
+        // an installation that still has a version is touched.
+        if result.is_err() {
+            drop(lock);
+            let _ = xpack_install::finish_removal(&paths);
+        }
         result
     }
 
@@ -915,6 +926,18 @@ mod tests {
         let paths = InstallPaths::new(dir.path(), "com.example.app").unwrap();
         let _launcher = xpack_platform::InstanceLock::acquire(&paths).unwrap().unwrap();
         assert!(ask_to_close(&paths).is_err());
+    }
+
+    #[test]
+    fn a_failed_hook_has_its_own_exit_code() {
+        let failed = Error::HookFailed {
+            point: "install.after".into(),
+            script: "xpack/hooks/a.js".into(),
+            reason: "refused".into(),
+            output: Vec::new(),
+        };
+        assert_eq!(exit_code_for(&failed), exit::HOOK_FAILED);
+        assert_eq!(exit::HOOK_FAILED, 7);
     }
 
     #[test]

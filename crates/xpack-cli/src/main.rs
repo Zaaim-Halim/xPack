@@ -206,6 +206,9 @@ fn exit_code_for(error: &Error) -> std::process::ExitCode {
     match error {
         Error::Locked(_) => std::process::ExitCode::from(4),
         Error::ApplicationRunning(_) => std::process::ExitCode::from(6),
+        // A package's hook failed, and what it began was undone: a script
+        // can tell that from the install itself failing.
+        Error::HookFailed { .. } => std::process::ExitCode::from(7),
         _ => std::process::ExitCode::FAILURE,
     }
 }

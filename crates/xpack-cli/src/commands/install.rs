@@ -128,53 +128,67 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
     // For every user: the checks an elevated install makes before it writes,
     // and the package copied where the user cannot change it, which is the
     // file verified and unpacked from here on.
-    let (lock, (installed, decision, signed_by)) = if args.all_users {
-        if context.root.is_some() {
-            return Err(xpack_core::Error::invalid(
-                "--all-users",
-                "an installation for every user goes where other programs do; --root does not apply",
-            ));
-        }
-        let paths = xpack_install::integration::machine::prepare(&application_id, &name)?;
-        let lock = xpack_platform::InstallLock::acquire(&paths)?;
-        let copy = xpack_install::integration::machine::bring_in(&args.package, &paths)?;
-        // Sealed, it is opened here, in the installation, from the copy the
-        // user cannot change; never from the one opened in their directory.
-        let package = match &peeked.key {
-            Some(key) => {
-                let opened = copy.with_extension("opened");
-                let result =
-                    xpack_install::open_if_sealed(&copy, &opened, &application_id, Some(key));
-                let _ = std::fs::remove_file(&copy);
-                result?
+    let cleanup_paths = cleanup_paths(args, context, &application_id, &name);
+    let installing = (|| -> Result<_> {
+        Ok(if args.all_users {
+            if context.root.is_some() {
+                return Err(xpack_core::Error::invalid(
+                    "--all-users",
+                    "an installation for every user goes where other programs do; --root does not apply",
+                ));
             }
-            None => copy,
-        };
-        let installed = install_from(args, &lock, &package, scope, seal_key);
-        let _ = std::fs::remove_file(&package);
-        (lock, installed?)
-    } else {
-        // Refused with nothing changed while the application is open and its
-        // programs are to be replaced, so tried again while it closes; the
-        // lock is taken afresh for each try, never held while waiting.
-        let paths = context.paths(&application_id)?;
-        xpack_installer::wait_while_open(
-            std::time::Duration::from_secs(args.wait_for_close),
-            args.close_running.then_some(&paths),
-            &mut || {
-                let asking = if args.close_running { "; asking it to close" } else { "" };
-                xpack_core::errln!(
-                    "{name} is open and needs to be closed for this install{asking}; waiting \
+            let paths = xpack_install::integration::machine::prepare(&application_id, &name)?;
+            let lock = xpack_platform::InstallLock::acquire(&paths)?;
+            let copy = xpack_install::integration::machine::bring_in(&args.package, &paths)?;
+            // Sealed, it is opened here, in the installation, from the copy the
+            // user cannot change; never from the one opened in their directory.
+            let package = match &peeked.key {
+                Some(key) => {
+                    let opened = copy.with_extension("opened");
+                    let result =
+                        xpack_install::open_if_sealed(&copy, &opened, &application_id, Some(key));
+                    let _ = std::fs::remove_file(&copy);
+                    result?
+                }
+                None => copy,
+            };
+            let installed = install_from(args, &lock, &package, scope, seal_key);
+            let _ = std::fs::remove_file(&package);
+            (lock, installed?)
+        } else {
+            // Refused with nothing changed while the application is open and its
+            // programs are to be replaced, so tried again while it closes; the
+            // lock is taken afresh for each try, never held while waiting.
+            let paths = context.paths(&application_id)?;
+            xpack_installer::wait_while_open(
+                std::time::Duration::from_secs(args.wait_for_close),
+                args.close_running.then_some(&paths),
+                &mut || {
+                    let asking = if args.close_running { "; asking it to close" } else { "" };
+                    xpack_core::errln!(
+                        "{name} is open and needs to be closed for this install{asking}; waiting \
                      up to {} seconds",
-                    args.wait_for_close
-                );
-            },
-            &mut || {
-                let lock = context.lock(&application_id)?;
-                let installed = install_from(args, &lock, &peeked.path, scope, seal_key.clone())?;
-                Ok((lock, installed))
-            },
-        )?
+                        args.wait_for_close
+                    );
+                },
+                &mut || {
+                    let lock = context.lock(&application_id)?;
+                    let installed =
+                        install_from(args, &lock, &peeked.path, scope, seal_key.clone())?;
+                    Ok((lock, installed))
+                },
+            )?
+        })
+    })();
+    // A failed first install has undone everything it wrote but the lock
+    // and its directory; with the lock let go, those go too. Nothing of an
+    // installation that still has a version is touched.
+    let (lock, (installed, decision, signed_by)) = match installing {
+        Ok(done) => done,
+        Err(error) => {
+            let _ = cleanup_paths.map(|paths| xpack_install::finish_removal(&paths));
+            return Err(error);
+        }
     };
 
     if !installed.recovery.is_empty() {
@@ -270,10 +284,33 @@ fn install_from(
         // the entry points, and a package's hooks still need the program that
         // runs them. The installation's own when there is none beside `xpack`.
         hook_engine: super::default_hook_engine(),
-        cancel: None,
+        // Ctrl-C stops a running hook, and the install is undone, only where
+        // the package has hooks: everywhere else it keeps its ordinary meaning.
+        cancel: (!verified.manifest().hooks.is_empty()).then(super::cancel_on_interrupt),
     };
-    let installed = Installer::new(lock).install(&mut verified, &options)?;
+    let installed = Installer::new(lock).install_with_progress(
+        &mut verified,
+        &options,
+        &crate::progress::HookLines,
+    )?;
     Ok((installed, decision, signed_by))
+}
+
+/// Where a failed first install is finished off, once its lock is let go:
+/// the installation this install would have made.
+fn cleanup_paths(
+    args: &Args,
+    context: &Context,
+    application_id: &str,
+    name: &str,
+) -> Option<xpack_core::InstallPaths> {
+    if args.all_users {
+        xpack_install::integration::machine_application_dir(application_id, name)
+            .ok()
+            .and_then(|dir| xpack_core::InstallPaths::named(&dir, application_id).ok())
+    } else {
+        context.paths(application_id).ok()
+    }
 }
 
 /// Decides which launcher binary, if any, to place in the installation.
