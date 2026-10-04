@@ -1,6 +1,7 @@
 package io.xpack;
 
 import io.xpack.internal.Layout;
+import io.xpack.internal.ManifestWriter;
 import io.xpack.internal.Target;
 import java.io.File;
 import java.io.IOException;
@@ -58,6 +59,23 @@ public class PayloadMojo extends AbstractXPackMojo {
             for (Artifact dependency : dependencies) {
                 Path file = dependency.getFile().toPath();
                 copy(file, application.resolve(file.getFileName().toString()));
+            }
+
+            // Emptied first, so a script removed from the project is not left
+            // in the next build's payload.
+            Path hooksInPayload = layout.payload(target).resolve(ManifestWriter.HOOKS_IN_PAYLOAD);
+            deleteRecursively(hooksInPayload);
+            boolean hasDirectory = hooksDirectory != null && hooksDirectory.isDirectory();
+            if (!hooks.isEmpty()) {
+                if (!hasDirectory) {
+                    throw new MojoExecutionException("hooks are configured, and there is no "
+                            + "hooks directory at " + hooksDirectory);
+                }
+                copyTree(hooksDirectory.toPath(), hooksInPayload);
+            } else if (hasDirectory) {
+                // Scripts nothing runs would ship to every user for nothing.
+                getLog().warn("xpack: " + hooksDirectory + " is not shipped: no <hooks> are "
+                        + "configured");
             }
 
             if (payloadResources != null) {

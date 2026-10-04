@@ -140,6 +140,22 @@ public final class XPackCli {
         }
     }
 
+    /**
+     * Runs a subcommand whose report goes to standard output, and shows it
+     * whether it succeeds or fails: a failed {@code xpack hooks test} says
+     * which hook failed there, not on standard error.
+     */
+    public void runReporting(String subcommand, List<String> arguments)
+            throws MojoExecutionException {
+        Processes.Result result = Processes.run(command(subcommand, arguments), log, timeoutMinutes);
+        result.logDiagnostics(log);
+        result.stdout().lines().forEach(log::info);
+        if (result.exitCode() != 0) {
+            throw new MojoExecutionException("xpack " + subcommand + " " + arguments.get(0)
+                    + " did not pass (exit code " + result.exitCode() + "); see above");
+        }
+    }
+
     private String jsonText(String subcommand, List<String> arguments)
             throws MojoExecutionException {
         if (!isMachineReadable(subcommand)) {
@@ -168,7 +184,9 @@ public final class XPackCli {
         command.add(executable.toString());
         command.add(subcommand);
         command.addAll(arguments);
-        if (passwordEnv != null && READS_PACKAGES.contains(subcommand)) {
+        boolean testsPackages = "hooks".equals(subcommand) && !arguments.isEmpty()
+                && "test".equals(arguments.get(0));
+        if (passwordEnv != null && (READS_PACKAGES.contains(subcommand) || testsPackages)) {
             command.add("--password-env");
             command.add(passwordEnv);
         }

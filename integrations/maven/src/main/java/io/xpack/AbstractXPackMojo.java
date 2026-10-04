@@ -2,6 +2,7 @@ package io.xpack;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.HooksSpec;
 import io.xpack.config.ProtectionSpec;
 import io.xpack.config.RuntimeSpec;
 import io.xpack.config.UpdateSpec;
@@ -180,6 +181,24 @@ public abstract class AbstractXPackMojo extends AbstractMojo {
      */
     @Parameter
     protected ProtectionSpec protection = new ProtectionSpec();
+
+    /**
+     * Scripts the packages run at moments of an installation's life:
+     * {@code <install>}, {@code <update>}, {@code <rollback>} and
+     * {@code <uninstall>}, each a list of {@code <hook>} with a
+     * {@code <script>} under {@link #hooksDirectory}, and optionally
+     * {@code <when>} and {@code <timeoutSeconds>}; {@code <permissions>} with
+     * {@code <user>} and {@code <machine>} blocks of {@code <exec>} programs
+     * and {@code <write>} places. Passed to {@code xpack pack}, which checks
+     * every rule. A release with hooks ships only once
+     * {@code xpack:hooks-test} has passed for it.
+     */
+    @Parameter
+    protected HooksSpec hooks = new HooksSpec();
+
+    /** Where the hook scripts are; copied into the payload at {@code xpack/hooks/}. */
+    @Parameter(property = "xpack.hooksDirectory", defaultValue = "${project.basedir}/src/xpack/hooks")
+    protected File hooksDirectory;
 
     // --------------------------------------------------------------- targets
 

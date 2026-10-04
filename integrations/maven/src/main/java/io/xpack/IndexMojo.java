@@ -62,6 +62,23 @@ public class IndexMojo extends AbstractXPackMojo {
     @Parameter
     private List<File> deltas = new ArrayList<>();
 
+    /**
+     * The update tree already published, as a directory or an {@code https}
+     * URL laid out as this goal writes it: what a release's hooks are
+     * compared with, and what tells whether installations update to it from
+     * an earlier release. A build writes its index afresh, so without it a
+     * release with hooks is published with nothing compared, and a warning.
+     */
+    @Parameter(property = "xpack.index.current")
+    private String currentIndex;
+
+    /**
+     * Publish a release whose hooks differ from the published one's. The
+     * differences are printed either way.
+     */
+    @Parameter(property = "xpack.index.acceptHookChanges", defaultValue = "false")
+    private boolean acceptHookChanges;
+
     @Override
     public void execute() throws MojoExecutionException {
         if (skip) {
@@ -102,6 +119,13 @@ public class IndexMojo extends AbstractXPackMojo {
         if (packageUrl != null && !packageUrl.isBlank()) {
             arguments.add("--package-url");
             arguments.add(packageUrl);
+        }
+        if (currentIndex != null && !currentIndex.isBlank()) {
+            arguments.add("--current");
+            arguments.add(currentIndex.trim());
+        }
+        if (acceptHookChanges) {
+            arguments.add("--accept-hook-changes");
         }
         for (Path delta : deltasToPublish()) {
             arguments.add("--delta");

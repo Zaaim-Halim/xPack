@@ -64,6 +64,7 @@ public class ManifestMojo extends AbstractXPackMojo {
                         .singleInstance(singleInstance)
                         .alongside(singleInstanceAlongside)
                         .protection(protection)
+                        .hooks(hooks)
                         .toJson();
             } catch (IllegalArgumentException | IllegalStateException e) {
                 throw new MojoExecutionException(e.getMessage(), e);

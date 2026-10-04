@@ -25,6 +25,7 @@ place for a security fix to be missed.
 | `xpack:payload` | `package` | Copies the jar and its runtime dependencies into the payload |
 | `xpack:manifest` | `package` | Writes `xpack.json` |
 | `xpack:pack` | `package` | Builds a signed `.xpkg` |
+| `xpack:hooks-test` | `integration-test` | Runs the release's hooks with `xpack hooks test` and leaves the report beside each package |
 | `xpack:delta` | `verify` | Builds differential updates against releases in the repository |
 | `xpack:index` | `deploy` | Writes the documents an update server publishes |
 | `xpack:installer` | — | Builds the artefact a user runs on a bare machine |
@@ -40,6 +41,7 @@ thing:
 
 ```
 xpack:runtime → jar:jar → xpack:payload → xpack:manifest → xpack:pack
+                                        → xpack:hooks-test  (integration-test)
                                         → xpack:delta  (verify)
                                         → xpack:index  (deploy)
 ```
@@ -293,6 +295,63 @@ earlier releases with the same password. Changing the password, or turning
 `<packages>` on for an application already released, cuts existing
 installations off from their updates. See
 [Locking an application with a password](../../README.md#locking-an-application-with-a-password).
+
+## Hooks
+
+```xml
+<hooks>
+  <install>
+    <hook><script>install-service.js</script><when>after</when></hook>
+  </install>
+  <update>
+    <hook><script>stop.js</script><when>before</when></hook>
+    <hook><script>start.js</script><when>after</when><timeoutSeconds>600</timeoutSeconds></hook>
+  </update>
+  <permissions>
+    <user>
+      <exec><program>systemctl</program></exec>
+      <write><place>{home}/.config/systemd/user</place></write>
+    </user>
+  </permissions>
+</hooks>
+```
+
+Scripts live in `src/xpack/hooks/` (`<hooksDirectory>` moves it), which
+`xpack:payload` copies into the payload at `xpack/hooks/`, so `<script>` names
+a file relative to that directory. `<when>` is the moment it runs at:
+
+| Operation | Allowed | Left out |
+| --- | --- | --- |
+| `install` | `before`, `afterFiles`, `after` | `after` |
+| `update` | `before`, `after`, `confirmed` | `after` |
+| `rollback` | `before`, `after` | `after` |
+| `uninstall` | `before`, `after` | `before` |
+
+`before` runs before anything changes; `afterFiles` once the files are in
+place, before the version is active; `confirmed` once the updated version has
+started well. Everything is passed to `xpack pack`,
+which checks every rule and names what is wrong; the plugin checks none.
+
+A release with hooks ships only once they have passed: `xpack:installer`,
+`xpack:delta` and `xpack:index` refuse a package without a passing
+`xpack hooks test` report for that exact build beside it. `xpack:hooks-test`
+writes that report, at `integration-test`, so an ordinary `mvn verify` or
+`mvn deploy` tests before it ships. It runs:
+
+- in plan mode, doing nothing the hooks ask for, unless
+  `-Dxpack.hooks.real=true`: for a disposable machine of the target platform,
+  such as a CI runner, never your own. A mandatory release needs a real run.
+- the update scenario over the latest release in the repository, or
+  `<previousVersion>`, or `<previousFiles>` named directly.
+- for an installation for everyone too, when `<installerUi><allUsers>` is
+  `offer` or `always`.
+
+A profile that builds the installer at `package` declares `hooks-test` in the
+same phase, before `installer`, as the sample's `installer` profile does.
+
+`xpack:index` compares a release's hooks with the published one's when given
+`-Dxpack.index.current=<directory or https URL>`, the update tree as
+published, and refuses changes unless `-Dxpack.index.acceptHookChanges=true`.
 
 ## One running copy
 

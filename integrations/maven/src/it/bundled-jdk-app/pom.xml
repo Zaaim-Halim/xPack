@@ -187,6 +187,38 @@
           <!-- Leave the installed version inactive: for staging installs. -->
           <noActivate>false</noActivate>
 
+          <!-- Hooks: scripts under src/xpack/hooks/ (or <hooksDirectory>), run
+               once each at a moment of an installation's life, in xpack-hook,
+               with only what <permissions> allows. These run no program and
+               write only in the installation's own data directory, so they
+               need none. A release with hooks ships only once
+               xpack:hooks-test has passed for it.
+
+               <script> is a path relative to the hooks directory:
+               `welcome.js` is src/xpack/hooks/welcome.js, `services/start.js`
+               is src/xpack/hooks/services/start.js. The directory is copied
+               into the package at xpack/hooks/, and the manifest names
+               xpack/hooks/welcome.js. `..` and absolute paths are refused.
+
+               <when> is the moment a hook runs at:
+                 install    before | afterFiles | after       (default after)
+                 update     before | after | confirmed        (default after)
+                 rollback   before | after                    (default after)
+                 uninstall  before | after                    (default before)
+               `before` runs before anything changes, `afterFiles` once the
+               files are in place but before the version is active,
+               `confirmed` once the updated version has started well. -->
+          <hooks>
+            <install>
+              <!-- Once the new installation is active. -->
+              <hook><script>welcome.js</script><when>after</when></hook>
+            </install>
+            <uninstall>
+              <!-- While the application is still there to be removed. -->
+              <hook><script>goodbye.js</script><when>before</when></hook>
+            </uninstall>
+          </hooks>
+
         </configuration>
         <executions>
           <execution>
@@ -198,6 +230,10 @@
               <goal>payload</goal>
               <goal>manifest</goal>
               <goal>pack</goal>
+              <!-- At integration-test: after pack, before delta and index,
+                   which ship a package with hooks only once its report is
+                   there. -->
+              <goal>hooks-test</goal>
               <goal>delta</goal>
               <goal>index</goal>
             </goals>
@@ -222,6 +258,15 @@
             <groupId>io.xpack</groupId>
             <artifactId>xpack-maven-plugin</artifactId>
             <executions>
+              <!-- The installer ships the package's hooks too, so they are
+                   tested first, in the same phase and declared before it. -->
+              <execution>
+                <id>hooks-test-before-installer</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>hooks-test</goal>
+                </goals>
+              </execution>
               <execution>
                 <id>installer</id>
                 <!-- After pack, which also runs at package: goals bound to one

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -41,12 +42,23 @@ class XPackCliTest {
 
     @Test
     void the_password_variable_is_passed_only_to_commands_that_read_a_package() {
-        XPackCli cli = new XPackCli(java.nio.file.Path.of("xpack"),
+        XPackCli cli = new XPackCli(Path.of("xpack"),
                 new org.apache.maven.plugin.logging.SystemStreamLog(), 1, "RELEASE_PASSWORD");
         org.junit.jupiter.api.Assertions.assertEquals(
                 List.of("xpack", "pack", "payload", "--password-env", "RELEASE_PASSWORD"),
                 cli.commandFor("pack", List.of("payload")));
         org.junit.jupiter.api.Assertions.assertEquals(
                 List.of("xpack", "list"), cli.commandFor("list", List.of()));
+    }
+
+    /**
+     * A sealed package is tested from its opened copy, so `hooks test` needs
+     * the password; `hooks check` reads no package and refuses the flag.
+     */
+    @Test
+    void the_password_goes_to_hooks_test_and_not_hooks_check() {
+        XPackCli cli = new XPackCli(Path.of("xpack"), null, 1, "RELEASE_PASSWORD");
+        assertTrue(cli.commandFor("hooks", List.of("test", "demo.xpkg")).contains("--password-env"));
+        assertFalse(cli.commandFor("hooks", List.of("check", "payload")).contains("--password-env"));
     }
 }

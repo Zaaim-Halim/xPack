@@ -2,8 +2,11 @@ package io.xpack.internal;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.HookSpec;
+import io.xpack.config.HooksSpec;
 import io.xpack.config.ProtectionSpec;
 import io.xpack.config.PromptSpec;
+import io.xpack.config.ScopePermissionsSpec;
 import io.xpack.config.UpdateSpec;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -52,6 +55,10 @@ public final class ManifestWriter {
     private boolean singleInstance;
     private List<String> alongside = new ArrayList<>();
     private ProtectionSpec protection;
+    private HooksSpec hooks;
+
+    /** Where the plugin puts the project's hooks directory in the payload. */
+    public static final String HOOKS_IN_PAYLOAD = "xpack/hooks/";
 
     public ManifestWriter id(String value) {
         this.id = value;
@@ -159,6 +166,16 @@ public final class ManifestWriter {
     }
 
     /** The command a terminal starts the application by; blank is none. */
+    /**
+     * The hooks, passed through as they stand: each script named relative to
+     * the hooks directory, which the payload holds at
+     * {@link #HOOKS_IN_PAYLOAD}. Every rule is the command line's to check.
+     */
+    public ManifestWriter hooks(HooksSpec value) {
+        this.hooks = value;
+        return this;
+    }
+
     public ManifestWriter command(String value) {
         this.command = blankToNull(value);
         return this;
@@ -296,7 +313,40 @@ public final class ManifestWriter {
                                 .put("single", singleInstance ? Boolean.TRUE : null)
                                 .putIfAny("alongside", alongside))
                 .putIfAny("protection", protectionObject())
+                .putIfAny("hooks", hooksObject())
                 .toString();
+    }
+
+    private Json.Obj hooksObject() {
+        // Nothing configured is an empty object, which the caller leaves out.
+        Json.Obj object = new Json.Obj();
+        if (hooks == null) {
+            return object;
+        }
+        object.putIfAny("install", hookList(hooks.getInstall()))
+                .putIfAny("update", hookList(hooks.getUpdate()))
+                .putIfAny("rollback", hookList(hooks.getRollback()))
+                .putIfAny("uninstall", hookList(hooks.getUninstall()))
+                .putIfAny("permissions", new Json.Obj()
+                        .putIfAny("user", scopeObject(hooks.getPermissions().getUser()))
+                        .putIfAny("machine", scopeObject(hooks.getPermissions().getMachine())));
+        return object;
+    }
+
+    private static List<Object> hookList(List<HookSpec> declared) {
+        List<Object> list = new ArrayList<>();
+        for (HookSpec hook : declared) {
+            String script = hook.getScript() == null ? "" : hook.getScript().trim();
+            list.add(new Json.Obj()
+                    .put("script", HOOKS_IN_PAYLOAD + script)
+                    .put("when", blankToNull(hook.getWhen()))
+                    .put("timeoutSeconds", hook.getTimeoutSeconds()));
+        }
+        return list;
+    }
+
+    private static Json.Obj scopeObject(ScopePermissionsSpec scope) {
+        return new Json.Obj().putIfAny("exec", scope.getExec()).putIfAny("write", scope.getWrite());
     }
 
     private Json.Obj protectionObject() {

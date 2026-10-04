@@ -7,7 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.xpack.config.DesktopSpec;
 import io.xpack.config.HealthSpec;
+import io.xpack.config.HookSpec;
+import io.xpack.config.HooksSpec;
 import io.xpack.config.PromptSpec;
+import io.xpack.config.ScopePermissionsSpec;
 import io.xpack.config.UpdateSpec;
 import java.util.List;
 import java.util.Map;
@@ -174,6 +177,59 @@ class ManifestWriterTest {
     void writes_no_protection_unless_asked_for() {
         String json = minimal().protection(new io.xpack.config.ProtectionSpec()).toJson();
         assertFalse(json.contains("\"protection\""), json);
+        assertEquals(minimal().toJson(), json);
+    }
+
+    private static HookSpec hook(String script, String when, Integer timeout) {
+        HookSpec hook = new HookSpec();
+        hook.setScript(script);
+        hook.setWhen(when);
+        hook.setTimeoutSeconds(timeout);
+        return hook;
+    }
+
+    @Test
+    void passes_hooks_through_with_their_scripts_where_the_payload_holds_them() {
+        HooksSpec hooks = new HooksSpec();
+        hooks.setInstall(List.of(hook("install-service.js", null, null)));
+        hooks.setUpdate(List.of(hook("stop.js", "before", null), hook("start.js", "after", 600)));
+        hooks.setUninstall(List.of(hook("remove-service.js", "before", null)));
+        ScopePermissionsSpec user = new ScopePermissionsSpec();
+        user.setExec(List.of("systemctl"));
+        user.setWrite(List.of("{home}/.config/systemd/user"));
+        HooksSpec.PermissionsSpec permissions =
+                new HooksSpec.PermissionsSpec();
+        permissions.setUser(user);
+        ScopePermissionsSpec machine = new ScopePermissionsSpec();
+        machine.setExec(List.of("launchctl"));
+        permissions.setMachine(machine);
+        hooks.setPermissions(permissions);
+
+        Map<String, Object> manifest = Json.parseObject(minimal().hooks(hooks).toJson());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> written = (Map<String, Object>) manifest.get("hooks");
+        assertEquals(List.of(Map.of("script", "xpack/hooks/install-service.js")),
+                written.get("install"));
+        assertEquals(List.of(
+                Map.of("script", "xpack/hooks/stop.js", "when", "before"),
+                Map.of("script", "xpack/hooks/start.js", "when", "after", "timeoutSeconds", 600L)),
+                written.get("update"));
+        assertEquals(List.of(Map.of("script", "xpack/hooks/remove-service.js", "when", "before")),
+                written.get("uninstall"));
+        assertFalse(written.containsKey("rollback"), written.toString());
+        assertEquals(Map.of(
+                "user", Map.of(
+                        "exec", List.of("systemctl"),
+                        "write", List.of("{home}/.config/systemd/user")),
+                "machine", Map.of("exec", List.of("launchctl"))),
+                written.get("permissions"));
+    }
+
+    @Test
+    void writes_no_hooks_unless_some_are_configured() {
+        String json = minimal().hooks(new HooksSpec()).toJson();
+        assertFalse(json.contains("\"hooks\""), json);
         assertEquals(minimal().toJson(), json);
     }
 
