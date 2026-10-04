@@ -603,6 +603,7 @@ fn rollback_hooks_run_only_for_a_version_whose_update_hooks_started() {
         scope: InstallScope::User,
         progress: &progress,
         cancel: None,
+        test: None,
     };
     let restored = Installer::new(&lock)
         .roll_back_with_hooks(&hooks, "failedToStart", "it did not start")

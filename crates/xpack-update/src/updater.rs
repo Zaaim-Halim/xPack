@@ -766,6 +766,7 @@ fn install_options(lock: &InstallLock, options: &UpdateOptions) -> InstallOption
         // run with the installation's own.
         hook_engine: None,
         cancel: None,
+        hook_test: None,
     }
 }
 

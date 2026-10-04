@@ -598,3 +598,316 @@ fn an_installer_whose_install_hook_fails_exits_seven_and_leaves_nothing() {
     assert_eq!(ran.status.code(), Some(7), "{}", stderr(&ran));
     assert!(!root.join("com.example.demo").exists(), "the failed install left something behind");
 }
+
+// --- xpack hooks test ---
+
+impl Project {
+    fn hooks_test(&self, package: &str, extra: &[&str]) -> (Output, serde_json::Value) {
+        let mut args = vec!["hooks", "test", package];
+        args.extend_from_slice(extra);
+        let ran = self.run(&args);
+        let report_file = self.path().join(package.replace(".xpkg", ".hooks-report.json"));
+        let report = std::fs::read(&report_file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::Value::Null);
+        (ran, report)
+    }
+}
+
+fn point<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    report["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["point"] == name)
+        .unwrap_or_else(|| panic!("{name} is not in the report: {report}"))
+}
+
+/// Every hook point, each marking the data directory and running a program
+/// that this machine does not have.
+fn every_point() -> serde_json::Value {
+    let all = |moments: &[&str]| -> serde_json::Value {
+        moments
+            .iter()
+            .map(|m| serde_json::json!({ "when": m, "script": "xpack/hooks/t.js" }))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    serde_json::json!({
+        "install": all(&["before", "afterFiles", "after"]),
+        "update": all(&["before", "after", "confirmed"]),
+        "rollback": all(&["before", "after"]),
+        "uninstall": all(&["before", "after"]),
+        "permissions": { "user": { "exec": ["agentctl"] } }
+    })
+}
+
+const TOUCH_AND_RUN: &str = "export function main(ctx) {
+    const r = ctx.exec('agentctl', ['--' + ctx.operation]);
+    if (r.exitCode !== 0) throw new Error('exit ' + r.exitCode);
+    ctx.file.write(ctx.path(ctx.dataDir, ctx.operation + '-' + ctx.when), 'x');
+}";
+
+#[test]
+fn hooks_test_runs_every_hook_point_and_writes_a_report_bound_to_the_package() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let previous = project.pack_version("1.0.0", &serde_json::json!({}), &[]);
+    let package =
+        project.pack_version("2.0.0", &every_point(), &[("xpack/hooks/t.js", TOUCH_AND_RUN)]);
+    let (ran, report) = project.hooks_test(&package, &["--previous", &previous]);
+    assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
+    assert_eq!(report["passed"], true, "{report:#}");
+    assert_eq!(report["mode"], "plan");
+    assert_eq!(report["version"], "2.0.0");
+    for name in [
+        "install.before",
+        "install.afterFiles",
+        "install.after",
+        "update.before",
+        "update.after",
+        "update.confirmed",
+        "rollback.before",
+        "rollback.after",
+        "uninstall.before",
+        "uninstall.after",
+    ] {
+        let p = point(&report, name);
+        assert_eq!(p["result"], "succeeded", "{name}: {p}");
+        assert_eq!(p["momentHeld"], true, "{name}: {p}");
+        assert!(
+            p["actions"].as_array().unwrap().iter().any(|a| a["kind"] == "exec"),
+            "{name}: {p}"
+        );
+    }
+    assert!(
+        report["programs"].as_array().unwrap().iter().any(|p| p == "agentctl --install"),
+        "{report}"
+    );
+    // Bound to this exact package.
+    let inspected = project.run(&["inspect", &package, "--json"]);
+    assert!(inspected.status.success());
+    assert_eq!(report["manifestSha256"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn hooks_test_without_a_previous_release_says_the_update_scenario_did_not_run() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package =
+        project.pack_version("2.0.0", &every_point(), &[("xpack/hooks/t.js", TOUCH_AND_RUN)]);
+    let (ran, report) = project.hooks_test(&package, &[]);
+    assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
+    let update =
+        report["scenarios"].as_array().unwrap().iter().find(|s| s["name"] == "update").unwrap();
+    assert_eq!(update["ran"], false);
+    assert_eq!(point(&report, "update.after")["result"], "not run");
+    assert!(point(&report, "rollback.after")["reason"].as_str().unwrap().contains("--previous"));
+}
+
+#[test]
+fn a_failing_hook_fails_the_report_and_says_why() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({ "install": "xpack/hooks/f.js", "uninstall": "xpack/hooks/f.js" }),
+        &[("xpack/hooks/f.js", "export function main(ctx) { if (ctx.operation === 'install') throw new Error('no such service'); }")],
+    );
+    let (ran, report) = project.hooks_test(&package, &[]);
+    assert_eq!(ran.status.code(), Some(1), "{}", stderr(&ran));
+    assert_eq!(report["passed"], false);
+    let install = point(&report, "install.after");
+    assert_eq!(install["result"], "failed");
+    assert!(install["reason"].as_str().unwrap().contains("no such service"), "{install}");
+}
+
+#[test]
+fn a_hook_that_catches_a_refusal_still_fails_the_report() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({ "install": "xpack/hooks/r.js", "uninstall": "xpack/hooks/r.js" }),
+        &[(
+            "xpack/hooks/r.js",
+            "export function main(ctx) { try { ctx.exec('undeclared'); } catch {} }",
+        )],
+    );
+    let (ran, report) = project.hooks_test(&package, &[]);
+    assert_eq!(ran.status.code(), Some(1));
+    assert_eq!(point(&report, "install.after")["result"], "refused", "{report:#}");
+}
+
+#[test]
+fn what_install_writes_outside_the_installation_must_be_gone_when_uninstall_is_done() {
+    if !engine_is_built() {
+        return;
+    }
+    let writes = "export function main(ctx) {
+        ctx.file.makeDir(ctx.path(ctx.home, '.config', 'demo-test-app'));
+        ctx.file.write(ctx.path(ctx.home, '.config', 'demo-test-app', 'settings'), 'x');
+    }";
+    let removes = "export function main(ctx) {
+        ctx.file.remove(ctx.path(ctx.home, '.config', 'demo-test-app'));
+    }";
+    let permissions = serde_json::json!({ "user": { "write": ["{home}/.config"] } });
+    let project = Project::new(&serde_json::json!({}), &[]);
+
+    let leaves = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({ "install": "xpack/hooks/w.js", "uninstall": "xpack/hooks/u.js", "permissions": permissions }),
+        &[("xpack/hooks/w.js", writes), ("xpack/hooks/u.js", "export function main() {}")],
+    );
+    let (ran, report) = project.hooks_test(&leaves, &[]);
+    assert_eq!(ran.status.code(), Some(1), "{report:#}");
+    let left: Vec<String> = report["leftBehind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    assert!(left.iter().any(|p| p.ends_with("settings")), "{left:?}");
+
+    let cleans = project.pack_version(
+        "1.1.0",
+        &serde_json::json!({ "install": "xpack/hooks/w.js", "uninstall": "xpack/hooks/u.js", "permissions": permissions }),
+        &[("xpack/hooks/w.js", writes), ("xpack/hooks/u.js", removes)],
+    );
+    let (ran, report) = project.hooks_test(&cleans, &[]);
+    assert!(ran.status.success(), "{report:#}");
+    assert_eq!(report["leftBehind"], serde_json::json!([]));
+}
+
+#[test]
+fn hooks_test_in_real_mode_does_what_the_hooks_do() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({ "install": "xpack/hooks/m.js", "uninstall": "xpack/hooks/m.js" }),
+        &[("xpack/hooks/m.js", MARKS)],
+    );
+    let (ran, report) = project.hooks_test(&package, &["--real"]);
+    assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
+    assert_eq!(report["mode"], "real");
+    let write = &point(&report, "install.after")["actions"][0];
+    assert_eq!(write["kind"], "write");
+}
+
+#[test]
+fn a_package_for_another_platform_is_tested_where_it_will_run() {
+    if !engine_is_built() {
+        return;
+    }
+    let other = if cfg!(target_os = "linux") { "windows-x64" } else { "linux-x64" };
+    let project = Project::new(
+        &serde_json::json!({ "install": "xpack/hooks/m.js", "uninstall": "xpack/hooks/m.js" }),
+        &[("xpack/hooks/m.js", MARKS.as_bytes())],
+    );
+    let packed = project.run(&[
+        "pack",
+        "payload",
+        "--key",
+        "signing.json",
+        "--out",
+        "other.xpkg",
+        "--platform",
+        other,
+    ]);
+    assert!(packed.status.success(), "{}", stderr(&packed));
+    let (ran, _) = project.hooks_test("other.xpkg", &[]);
+    assert!(!ran.status.success());
+    assert!(stderr(&ran).contains(&format!("tested on {other}")), "{}", stderr(&ran));
+}
+
+#[test]
+fn hooks_test_tests_the_scope_the_permissions_are_written_for() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({
+            "install": "xpack/hooks/s.js",
+            "uninstall": "xpack/hooks/s.js",
+            "permissions": { "machine": { "exec": ["sc.exe"] } }
+        }),
+        &[("xpack/hooks/s.js", "export function main(ctx) { ctx.exec('sc.exe', ['query']); }")],
+    );
+    let (ran, report) = project.hooks_test(&package, &[]);
+    assert_eq!(ran.status.code(), Some(1), "{report:#}");
+    assert_eq!(report["scope"], "user");
+    assert!(
+        point(&report, "install.after")["reason"].as_str().unwrap().contains("not a program"),
+        "{report:#}"
+    );
+
+    let (ran, report) = project.hooks_test(&package, &["--all-users"]);
+    assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
+    assert_eq!(report["scope"], "machine");
+}
+
+#[cfg(unix)]
+#[test]
+fn only_real_mode_runs_the_programs_a_hook_runs() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let marker = project.path().join("touched");
+    let script = format!(
+        "export function main(ctx) {{ ctx.exec('/usr/bin/touch', [{}]); }}",
+        serde_json::to_string(&marker.display().to_string()).unwrap()
+    );
+    let package = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({
+            "install": "xpack/hooks/t.js",
+            "uninstall": "xpack/hooks/n.js",
+            "permissions": { "user": { "exec": ["/usr/bin/touch"] } }
+        }),
+        &[("xpack/hooks/t.js", &script), ("xpack/hooks/n.js", "export function main() {}")],
+    );
+    let (ran, _) = project.hooks_test(&package, &[]);
+    assert!(ran.status.success(), "{}", stderr(&ran));
+    assert!(!marker.exists(), "plan mode ran a program");
+    let (ran, _) = project.hooks_test(&package, &["--real"]);
+    assert!(ran.status.success(), "{}", stderr(&ran));
+    assert!(marker.exists(), "real mode did not run the program");
+}
+
+#[test]
+fn the_previous_releases_own_hooks_are_not_counted_against_this_package() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    // The previous release's install hook is refused something, and
+    // carries on: its business, not this package's.
+    let previous = project.pack_version(
+        "1.0.0",
+        &serde_json::json!({ "install": "xpack/hooks/p.js" }),
+        &[(
+            "xpack/hooks/p.js",
+            "export function main(ctx) { try { ctx.exec('undeclared'); } catch {} }",
+        )],
+    );
+    let package =
+        project.pack_version("2.0.0", &every_point(), &[("xpack/hooks/t.js", TOUCH_AND_RUN)]);
+    let (ran, report) = project.hooks_test(&package, &["--previous", &previous]);
+    assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
+    assert_eq!(point(&report, "install.after")["result"], "succeeded", "{report:#}");
+}

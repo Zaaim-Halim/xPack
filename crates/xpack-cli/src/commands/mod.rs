@@ -4,6 +4,7 @@ pub(crate) mod activate;
 pub(crate) mod autoupdate;
 pub(crate) mod delta;
 pub(crate) mod hooks;
+pub(crate) mod hooks_test;
 pub(crate) mod index;
 pub(crate) mod inspect;
 pub(crate) mod install;

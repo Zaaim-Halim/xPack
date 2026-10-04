@@ -112,6 +112,7 @@ impl Fixture {
             cause: None,
             on_line: self.on_line,
             cancel,
+            test: None,
         };
         run.run(lock.paths(), point.parse::<HookPoint>().unwrap())
     }
@@ -649,6 +650,7 @@ fn two_runs_of_one_point_at_the_same_moment_run_it_once_without_the_installation
             cause: None,
             on_line: None,
             cancel: None,
+            test: None,
         }
         .run(&fixture.paths, point)
     };

@@ -541,6 +541,118 @@ pub struct Request {
     pub permissions: ScopePermissions,
     /// How long the hook may run.
     pub timeout_seconds: u32,
+    /// Set by `xpack hooks test`: record what the hook does, and perhaps do
+    /// none of it. Never sent otherwise, so an `xpack-hook` older than this
+    /// field still reads every ordinary request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
+}
+
+/// How a hook run under test is recorded, for one hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Plan {
+    /// Where each thing the hook does, or tries to, is appended as a line of
+    /// JSON, a [`PlanLine`].
+    pub record: PathBuf,
+    /// Whether to do it too. Without, programs are not run and nothing is
+    /// written, moved or removed: what would be is recorded.
+    pub perform: bool,
+    /// What a program answers when it is not run, by the name the hook runs
+    /// it by. One without an answer succeeds with no output.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub answers: BTreeMap<String, ProgramAnswer>,
+    /// The version whose hook this is, for the record.
+    pub version: Version,
+    /// The script, as the manifest names it, for the record.
+    pub script: String,
+}
+
+/// What a program not run under test answers, as `ctx.exec` returns it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramAnswer {
+    /// Its exit code.
+    #[serde(default)]
+    pub exit_code: i32,
+    /// What it wrote to standard output.
+    #[serde(default)]
+    pub stdout: String,
+    /// What it wrote to standard error.
+    #[serde(default)]
+    pub stderr: String,
+}
+
+/// One thing a hook did, or would have done, or was refused, under test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanLine {
+    /// The version whose hook it is.
+    pub version: Version,
+    /// Where it ran.
+    pub point: HookPoint,
+    /// The script, as the manifest names it.
+    pub script: String,
+    /// What it was.
+    pub action: PlanAction,
+    /// Whether it was done, rather than only recorded.
+    pub performed: bool,
+}
+
+/// What a hook did, or tried to do, through `ctx`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PlanAction {
+    /// Ran a program.
+    Exec {
+        /// The program, as the hook named it.
+        program: String,
+        /// Its arguments.
+        args: Vec<String>,
+    },
+    /// Wrote a file, whole.
+    Write {
+        /// Where.
+        path: PathBuf,
+    },
+    /// Copied a file.
+    Copy {
+        /// From where.
+        from: PathBuf,
+        /// To where.
+        to: PathBuf,
+    },
+    /// Moved or renamed a file or directory.
+    Move {
+        /// From where.
+        from: PathBuf,
+        /// To where.
+        to: PathBuf,
+    },
+    /// Removed a file or directory.
+    Remove {
+        /// What.
+        path: PathBuf,
+    },
+    /// Made a directory.
+    MakeDir {
+        /// Where.
+        path: PathBuf,
+    },
+    /// Was refused something its permissions do not allow.
+    Refused {
+        /// What it asked for, and why it was refused.
+        reason: String,
+    },
+    /// The hook ended: written by what ran it, so the test knows how each
+    /// hook ended even once the installation that ran it is gone.
+    Ended {
+        /// Whether it succeeded.
+        succeeded: bool,
+        /// Why it failed, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 impl Request {
@@ -1177,6 +1289,31 @@ mod tests {
             .unwrap();
         let error = HookRecord::read(&path).unwrap_err().to_string();
         assert!(error.contains("no hook runs until it is repaired"), "{error}");
+    }
+
+    #[test]
+    fn an_ordinary_request_says_nothing_of_a_plan_so_an_older_engine_still_reads_it() {
+        let request = Request {
+            script: PathBuf::from("/app/versions/1.0.0/a.js"),
+            point: point("install.after"),
+            cause: None,
+            from_version: None,
+            to_version: Some("1.0.0".into()),
+            scope: Scope::User,
+            application_dir: PathBuf::from("/app"),
+            version_dir: PathBuf::from("/app/versions/1.0.0"),
+            data_dir: PathBuf::from("/app/data"),
+            log_dir: PathBuf::from("/app/state/logs"),
+            temp_dir: PathBuf::from("/tmp/run"),
+            home: None,
+            program_data: None,
+            environment: BTreeMap::new(),
+            permissions: ScopePermissions::default(),
+            timeout_seconds: 300,
+            plan: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("plan"), "{json}");
     }
 
     #[test]

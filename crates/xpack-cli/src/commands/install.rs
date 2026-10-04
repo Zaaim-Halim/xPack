@@ -287,6 +287,7 @@ fn install_from(
         // Ctrl-C stops a running hook, and the install is undone, only where
         // the package has hooks: everywhere else it keeps its ordinary meaning.
         cancel: (!verified.manifest().hooks.is_empty()).then(super::cancel_on_interrupt),
+        hook_test: None,
     };
     let installed = Installer::new(lock).install_with_progress(
         &mut verified,

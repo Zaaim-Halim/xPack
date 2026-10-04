@@ -624,3 +624,134 @@ fn a_script_copied_into_the_runs_own_directory_may_run_and_one_elsewhere_may_not
     request["script"] = json!(elsewhere);
     assert_eq!(run(&request, &[]).0, 3);
 }
+
+// --- under test: recorded, and in plan mode not done ---
+
+impl Installation {
+    /// A request for `script` under test, recording into `record`.
+    fn planned(&self, script: &str, record: &Path, perform: bool, answers: &Value) -> Value {
+        let mut request = self.request(script);
+        request["plan"] = json!({
+            "record": record,
+            "perform": perform,
+            "answers": answers,
+            "version": "1.0.0",
+            "script": "xpack/hooks/a.js",
+        });
+        request
+    }
+}
+
+fn record_of(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn in_plan_mode_programs_are_not_run_and_files_not_changed_only_recorded() {
+    let install = Installation::new();
+    let record = install.temp.parent().unwrap().join("plan.jsonl");
+    let target = install.home.join(".config/app.conf");
+    let script = format!(
+        "export function main(ctx) {{
+            const r = ctx.exec('not-on-this-machine', ['--enable', 'agent']);
+            if (r.exitCode !== 0) throw new Error('exit ' + r.exitCode);
+            ctx.file.makeDir({});
+            ctx.file.write({}, 'x');
+        }}",
+        js(&install.home.join(".config")),
+        js(&target)
+    );
+    let mut request = install.planned(&script, &record, false, &json!({}));
+    request["permissions"] =
+        json!({ "exec": ["not-on-this-machine"], "write": ["{home}/.config"] });
+    let (code, err) = run(&request, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!target.exists(), "plan mode wrote a file");
+    let lines = record_of(&record);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0]["action"]["kind"], "exec");
+    assert_eq!(lines[0]["action"]["program"], "not-on-this-machine");
+    assert_eq!(lines[0]["action"]["args"], json!(["--enable", "agent"]));
+    assert_eq!(lines[0]["performed"], false);
+    assert_eq!(lines[0]["point"], "install.after");
+    assert_eq!(lines[0]["script"], "xpack/hooks/a.js");
+    assert_eq!(lines[2]["action"]["kind"], "write");
+    assert!(lines[2]["action"]["path"].as_str().unwrap().ends_with("app.conf"));
+}
+
+#[test]
+fn in_plan_mode_a_program_answers_what_the_test_says() {
+    let install = Installation::new();
+    let record = install.temp.parent().unwrap().join("plan.jsonl");
+    // By the name it is run by, or by its file name when run by its path.
+    let script = "export function main(ctx) {
+        const r = ctx.exec('systemctl', ['is-active', 'x']);
+        if (r.exitCode !== 3 || r.stdout !== 'inactive') throw new Error(JSON.stringify(r));
+        const p = ctx.exec('/usr/bin/systemctl', ['is-active', 'x']);
+        if (p.exitCode !== 3) throw new Error('by path: ' + JSON.stringify(p));
+    }";
+    let answers = json!({ "systemctl": { "exitCode": 3, "stdout": "inactive" } });
+    let mut request = install.planned(script, &record, false, &answers);
+    request["permissions"] = json!({ "exec": ["systemctl", "/usr/bin/systemctl"] });
+    let (code, err) = run(&request, &[]);
+    assert_eq!(code, 0, "{err}");
+}
+
+#[test]
+fn a_refusal_is_recorded_even_when_the_hook_catches_it() {
+    let install = Installation::new();
+    let record = install.temp.parent().unwrap().join("plan.jsonl");
+    let script = format!(
+        "export function main(ctx) {{
+            try {{ ctx.exec('undeclared'); }} catch {{}}
+            try {{ ctx.file.write({}, 'x'); }} catch {{}}
+            try {{ ctx.exec('sudo'); }} catch {{}}
+        }}",
+        js(&install.home.join(".bashrc"))
+    );
+    for perform in [false, true] {
+        let _ = std::fs::remove_file(&record);
+        let mut request = install.planned(&script, &record, perform, &json!({}));
+        request["permissions"] = json!({ "exec": ["sudo"] });
+        let (code, err) = run(&request, &[]);
+        assert_eq!(code, 0, "{err}");
+        let lines = record_of(&record);
+        let refused = lines.iter().filter(|l| l["action"]["kind"] == "refused").count();
+        assert_eq!(refused, 3, "perform {perform}: {lines:?}");
+    }
+}
+
+#[test]
+fn performed_under_test_it_is_done_and_recorded_as_done() {
+    let install = Installation::new();
+    let record = install.temp.parent().unwrap().join("plan.jsonl");
+    let target = install.data.join("done.txt");
+    let script = format!("export function main(ctx) {{ ctx.file.write({}, 'x'); }}", js(&target));
+    let (code, err) = run(&install.planned(&script, &record, true, &json!({})), &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(target.is_file());
+    let lines = record_of(&record);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["performed"], true);
+}
+
+#[test]
+fn in_plan_mode_permissions_still_hold() {
+    let install = Installation::new();
+    let record = install.temp.parent().unwrap().join("plan.jsonl");
+    let (code, err) = run(
+        &install.planned(
+            "export function main(ctx) { ctx.exec('undeclared'); }",
+            &record,
+            false,
+            &json!({}),
+        ),
+        &[],
+    );
+    assert_eq!(code, 1);
+    assert!(err.contains("not a program this package lets its hooks run"), "{err}");
+}

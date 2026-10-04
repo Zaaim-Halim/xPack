@@ -32,6 +32,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         scope,
         progress: &crate::progress::HookLines,
         cancel: None,
+        test: None,
     };
     if let Some(version) = installer.roll_back_on_request(&hooks)? {
         crate::output::field("active", &version);

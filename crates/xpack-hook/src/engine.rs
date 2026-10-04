@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use rquickjs::function::{Opt, Rest};
 use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Runtime, Value};
-use xpack_core::hooks::Scope;
+use xpack_core::hooks::{PlanAction, Scope};
 
 use crate::policy::Policy;
+use crate::recorder::{Recorder, recorded};
 use crate::request::{Request, program_environment, steers_programs};
 
 /// The most memory a hook's script may use. Generous for a script; a hook
@@ -236,9 +237,11 @@ fn context_object<'js>(
     freeze(ctx, &log)?;
     object.set("log", log)?;
 
+    let recorder = Recorder::of(request).map(Rc::new);
     let environment = program_environment(request);
     let version_dir = request.version_dir.clone();
     let exec_policy = Rc::clone(policy);
+    let exec_recorder = recorder.clone();
     object.set(
         "exec",
         Function::new(
@@ -252,12 +255,13 @@ fn context_object<'js>(
                     environment: &environment,
                     version_dir: &version_dir,
                     deadline,
+                    recorder: exec_recorder.as_deref(),
                 };
                 run.call(&ctx, &program, args.0.unwrap_or_default(), options.0)
             },
         )?,
     )?;
-    object.set("file", file_object(ctx, policy)?)?;
+    object.set("file", file_object(ctx, policy, recorder.as_ref())?)?;
     freeze(ctx, &object)?;
     Ok(object)
 }
@@ -268,6 +272,9 @@ struct Exec<'a> {
     environment: &'a BTreeMap<String, String>,
     version_dir: &'a Path,
     deadline: Instant,
+    /// Under test: what records each program run, and in plan mode answers
+    /// for it.
+    recorder: Option<&'a Recorder>,
 }
 
 impl Exec<'_> {
@@ -279,7 +286,26 @@ impl Exec<'_> {
         args: Vec<String>,
         options: Option<Object<'js>>,
     ) -> rquickjs::Result<Object<'js>> {
-        let throw = |message: String| Exception::throw_message(ctx, &message);
+        let throw = |message: String| {
+            let message = match self.recorder {
+                Some(recorder) => recorder.refused(message),
+                None => message,
+            };
+            Exception::throw_message(ctx, &message)
+        };
+        let recorded = PlanAction::Exec { program: program.to_string(), args: args.clone() };
+        if let Some(recorder) = self.recorder.filter(|recorder| !recorder.performs()) {
+            // Not run: declared is all that can be known of it here.
+            self.policy.may_name(program).map_err(throw)?;
+            self.check_options(ctx, program, options.as_ref()).map_err(throw)?;
+            recorder.note(recorded, false).map_err(|e| Exception::throw_message(ctx, &e))?;
+            let answer = recorder.answer(program);
+            let result = Object::new(ctx.clone())?;
+            result.set("exitCode", answer.exit_code)?;
+            result.set("stdout", answer.stdout)?;
+            result.set("stderr", answer.stderr)?;
+            return Ok(result);
+        }
         let file = self.policy.program(program).map_err(throw)?;
         let mut command = Command::new(&file);
         command.args(args).env_clear().envs(self.environment);
@@ -330,11 +356,45 @@ impl Exec<'_> {
         // its output open; the deadline holds for that wait too.
         let stdout = collect(&stdout, limit).ok_or_else(out_of_time)?;
         let stderr = collect(&stderr, limit).ok_or_else(out_of_time)?;
+        if let Some(recorder) = self.recorder {
+            recorder.note(recorded, true).map_err(|e| Exception::throw_message(ctx, &e))?;
+        }
         let result = Object::new(ctx.clone())?;
         result.set("exitCode", status.code())?;
         result.set("stdout", stdout)?;
         result.set("stderr", stderr)?;
         Ok(result)
+    }
+}
+
+impl Exec<'_> {
+    /// The rules `options` are held to, for a program that is not run: the
+    /// same refusals as for one that is.
+    fn check_options(
+        &self,
+        ctx: &Ctx<'_>,
+        program: &str,
+        options: Option<&Object<'_>>,
+    ) -> Result<(), String> {
+        let Some(options) = options else { return Ok(()) };
+        let lookup = |e: rquickjs::Error| {
+            let _ = ctx.catch();
+            e.to_string()
+        };
+        if let Some(dir) = options.get::<_, Option<String>>("cwd").map_err(lookup)? {
+            self.policy.may_read(Path::new(&dir))?;
+        }
+        if let Some(extra) = options.get::<_, Option<Object<'_>>>("env").map_err(lookup)? {
+            for key in extra.keys::<String>() {
+                let key = key.map_err(lookup)?;
+                if steers_programs(&key) {
+                    return Err(format!(
+                        "{key} would change which code {program} runs; a hook may not set it"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -364,75 +424,99 @@ fn collect(output: &mpsc::Receiver<String>, limit: Instant) -> Option<String> {
 
 /// `ctx.file`: file operations, each held to the policy, each acting on the
 /// path the policy checked rather than the one it was given.
-fn file_object<'js>(ctx: &Ctx<'js>, policy: &Rc<Policy>) -> rquickjs::Result<Object<'js>> {
+fn file_object<'js>(
+    ctx: &Ctx<'js>,
+    policy: &Rc<Policy>,
+    recorder: Option<&Rc<Recorder>>,
+) -> rquickjs::Result<Object<'js>> {
     let object = Object::new(ctx.clone())?;
+    let files = Rc::new(Files { policy: Rc::clone(policy), recorder: recorder.cloned() });
     let fail = |ctx: &Ctx<'js>, message: String| Exception::throw_message(ctx, &message);
 
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "exists",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String| {
-            let path = p.may_read(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
+            let path = f.allowed(f.policy.may_read(Path::new(&path))).map_err(|r| fail(&ctx, r))?;
             Ok::<_, rquickjs::Error>(path.exists())
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "read",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String| {
-            let resolved = p.may_read(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
+            let resolved =
+                f.allowed(f.policy.may_read(Path::new(&path))).map_err(|r| fail(&ctx, r))?;
             std::fs::read_to_string(&resolved).map_err(|e| fail(&ctx, format!("{path}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "write",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, text: String| {
-            let resolved = p.may_write(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
-            std::fs::write(&resolved, text).map_err(|e| fail(&ctx, format!("{path}: {e}")))
+            let resolved =
+                f.allowed(f.policy.may_write(Path::new(&path))).map_err(|r| fail(&ctx, r))?;
+            let action = PlanAction::Write { path: recorded(&resolved) };
+            f.change(action, || std::fs::write(&resolved, text))
+                .map_err(|e| fail(&ctx, format!("{path}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "copy",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, from: String, to: String| {
-            let source = p.may_read(Path::new(&from)).map_err(|r| fail(&ctx, r))?;
-            let target = p.may_write(Path::new(&to)).map_err(|r| fail(&ctx, r))?;
-            std::fs::copy(&source, &target)
-                .map(|_| ())
+            let source =
+                f.allowed(f.policy.may_read(Path::new(&from))).map_err(|r| fail(&ctx, r))?;
+            let target =
+                f.allowed(f.policy.may_write(Path::new(&to))).map_err(|r| fail(&ctx, r))?;
+            let action = PlanAction::Copy { from: recorded(&source), to: recorded(&target) };
+            f.change(action, || std::fs::copy(&source, &target).map(drop))
                 .map_err(|e| fail(&ctx, format!("{from} → {to}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "move",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, from: String, to: String| {
-            let source = p.may_change_entry(Path::new(&from)).map_err(|r| fail(&ctx, r))?;
-            let target = p.may_change_entry(Path::new(&to)).map_err(|r| fail(&ctx, r))?;
-            std::fs::rename(&source, &target).map_err(|e| fail(&ctx, format!("{from} → {to}: {e}")))
+            let source = f
+                .allowed(f.policy.may_change_entry(Path::new(&from)))
+                .map_err(|r| fail(&ctx, r))?;
+            let target =
+                f.allowed(f.policy.may_change_entry(Path::new(&to))).map_err(|r| fail(&ctx, r))?;
+            let action = PlanAction::Move { from: recorded(&source), to: recorded(&target) };
+            f.change(action, || std::fs::rename(&source, &target))
+                .map_err(|e| fail(&ctx, format!("{from} → {to}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "remove",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String| {
-            let entry = p.may_change_entry(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
-            remove_entry(&entry).map_err(|e| fail(&ctx, format!("{path}: {e}")))
+            let entry = f
+                .allowed(f.policy.may_change_entry(Path::new(&path)))
+                .map_err(|r| fail(&ctx, r))?;
+            let action = PlanAction::Remove { path: recorded(&entry) };
+            f.change(action, || remove_entry(&entry))
+                .map_err(|e| fail(&ctx, format!("{path}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "makeDir",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String| {
-            let resolved = p.may_make_dir(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
-            std::fs::create_dir_all(&resolved).map_err(|e| fail(&ctx, format!("{path}: {e}")))
+            let resolved =
+                f.allowed(f.policy.may_make_dir(Path::new(&path))).map_err(|r| fail(&ctx, r))?;
+            let action = PlanAction::MakeDir { path: recorded(&resolved) };
+            f.change(action, || std::fs::create_dir_all(&resolved))
+                .map_err(|e| fail(&ctx, format!("{path}: {e}")))
         })?,
     )?;
-    let p = Rc::clone(policy);
+    let f = Rc::clone(&files);
     object.set(
         "list",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String| {
-            let resolved = p.may_read(Path::new(&path)).map_err(|r| fail(&ctx, r))?;
+            let resolved =
+                f.allowed(f.policy.may_read(Path::new(&path))).map_err(|r| fail(&ctx, r))?;
             let mut names: Vec<String> = std::fs::read_dir(&resolved)
                 .map_err(|e| fail(&ctx, format!("{path}: {e}")))?
                 .filter_map(Result::ok)
@@ -444,6 +528,39 @@ fn file_object<'js>(ctx: &Ctx<'js>, policy: &Rc<Policy>) -> rquickjs::Result<Obj
     )?;
     freeze(ctx, &object)?;
     Ok(object)
+}
+
+/// What `ctx.file` acts with: the policy, and under test the recorder.
+struct Files {
+    policy: Rc<Policy>,
+    recorder: Option<Rc<Recorder>>,
+}
+
+impl Files {
+    /// The policy's answer, a refusal recorded under test.
+    fn allowed(&self, answer: Result<PathBuf, String>) -> Result<PathBuf, String> {
+        answer.map_err(|reason| match &self.recorder {
+            Some(recorder) => recorder.refused(reason),
+            None => reason,
+        })
+    }
+
+    /// Makes a change, and records it under test; in plan mode only
+    /// records it.
+    fn change(
+        &self,
+        action: PlanAction,
+        make: impl FnOnce() -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        match &self.recorder {
+            Some(recorder) if !recorder.performs() => recorder.note(action, false),
+            Some(recorder) => {
+                make().map_err(|e| e.to_string())?;
+                recorder.note(action, true)
+            }
+            None => make().map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// Removes the entry at `path`: a directory with everything in it, or a file,

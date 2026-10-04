@@ -49,12 +49,12 @@ pub mod recovery;
 pub mod runtime;
 pub mod trust;
 
-pub use hooks::HookRun;
+pub use hooks::{HookRun, HookTest};
 pub use inspect::{Existing, inspect};
 pub use installer::{
     Confirmation, DeltaSource, HookContext, InstallOptions, InstallSource, Installed, Installer,
     LauncherOutcome, Removal, SPACE_MARGIN, finish_removal, kept_seal_key, open_if_sealed,
-    uninstall, uninstall_into, uninstall_reporting, uninstall_with_roots,
+    uninstall, uninstall_into, uninstall_reporting, uninstall_under_test, uninstall_with_roots,
 };
 pub use integration::{Entry as DesktopEntry, Outcome as DesktopOutcome};
 pub use recovery::RecoveryReport;

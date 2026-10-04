@@ -43,6 +43,7 @@ pub(crate) fn run(args: &Args, context: &Context) -> Result<ExitCode> {
         scope: state.scope,
         progress: &crate::progress::HookLines,
         cancel: cancel.as_deref(),
+        test: None,
     };
     installer.activate_with_hooks(&hooks, &version, args.allow_downgrade)?;
 

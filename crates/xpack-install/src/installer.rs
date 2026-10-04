@@ -128,6 +128,9 @@ pub struct InstallOptions {
     /// is stopped with everything it started, has failed, and the install is
     /// undone as for any failed hook.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Under `xpack hooks test`: how what this install's hooks do is
+    /// recorded, and whether it is done.
+    pub hook_test: Option<crate::hooks::HookTest>,
 }
 
 /// What installing a launcher did.
@@ -202,6 +205,8 @@ pub struct HookContext<'a> {
     pub progress: &'a dyn ProgressReporter,
     /// Set by someone else to stop the running hook; it has then failed.
     pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
+    /// Under `xpack hooks test`: how what the hooks do is recorded.
+    pub test: Option<&'a crate::hooks::HookTest>,
 }
 
 impl<'a> HookContext<'a> {
@@ -212,7 +217,13 @@ impl<'a> HookContext<'a> {
         options: &'a InstallOptions,
         progress: &'a dyn ProgressReporter,
     ) -> Self {
-        Self { engine, scope: options.scope, progress, cancel: options.cancel.as_deref() }
+        Self {
+            engine,
+            scope: options.scope,
+            progress,
+            cancel: options.cancel.as_deref(),
+            test: options.hook_test.as_ref(),
+        }
     }
 
     /// Runs `manifest`'s hooks at `point`, its scripts found in `scripts`.
@@ -254,6 +265,7 @@ impl<'a> HookContext<'a> {
             cause,
             on_line: Some(&sink),
             cancel: self.cancel,
+            test: self.test,
         }
         .run(paths, point)
     }
@@ -2731,6 +2743,18 @@ pub fn uninstall_reporting(
     command_roots: Option<&crate::integration::command::CommandRoots>,
     progress: &dyn ProgressReporter,
 ) -> Result<Removal> {
+    uninstall_under_test(lock, desktop_roots, command_roots, progress, None)
+}
+
+/// Removes an installation as [`uninstall_reporting`] does, its hooks run
+/// under `xpack hooks test` as `test` says.
+pub fn uninstall_under_test(
+    lock: InstallLock,
+    desktop_roots: Option<&crate::integration::Roots>,
+    command_roots: Option<&crate::integration::command::CommandRoots>,
+    progress: &dyn ProgressReporter,
+    test: Option<&crate::hooks::HookTest>,
+) -> Result<Removal> {
     let paths = lock.paths().clone();
     let root = paths.root().to_path_buf();
 
@@ -2742,7 +2766,7 @@ pub fn uninstall_reporting(
     let desktop_entry = desktop_entry_for_removal(&lock);
     let commands = commands_for_removal(&lock);
     let hooks = UninstallHooks::prepare(&lock);
-    let context = hooks.as_ref().map(|hooks| hooks.context(progress));
+    let context = hooks.as_ref().map(|hooks| HookContext { test, ..hooks.context(progress) });
     if let (Some(hooks), Some(context)) = (&hooks, &context) {
         hooks.run_before(&paths, context);
     }
@@ -2806,7 +2830,13 @@ impl UninstallHooks {
     }
 
     fn context<'a>(&'a self, progress: &'a dyn ProgressReporter) -> HookContext<'a> {
-        HookContext { engine: self.engine.as_deref(), scope: self.scope, progress, cancel: None }
+        HookContext {
+            engine: self.engine.as_deref(),
+            scope: self.scope,
+            progress,
+            cancel: None,
+            test: None,
+        }
     }
 
     fn run_before(&self, paths: &xpack_core::InstallPaths, context: &HookContext<'_>) {

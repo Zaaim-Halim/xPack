@@ -168,20 +168,8 @@ impl Policy {
     /// anything else can change it: the child's environment, which a hook
     /// sets, never chooses which program runs.
     pub(crate) fn program(&self, program: &str) -> Result<PathBuf, Refusal> {
-        if self.scope == Scope::User && asks_for_administrator(program) {
-            return Err(elevation(program));
-        }
+        self.may_name(program)?;
         let path_like = program.contains(['/', '\\']);
-        let declared = self.programs.iter().any(|allowed| {
-            if allowed.contains(['/', '\\']) {
-                allowed == program
-            } else {
-                !path_like && same_program_name(allowed, program)
-            }
-        });
-        if !declared {
-            return Err(format!("{program} is not a program this package lets its hooks run"));
-        }
         let file = if path_like {
             PathBuf::from(program)
         } else {
@@ -220,6 +208,35 @@ fn lexical(path: &Path) -> Result<PathBuf, Refusal> {
         }
     }
     Ok(lexical)
+}
+
+impl Policy {
+    /// Whether `program`, as a hook names it, may be run at all: declared,
+    /// never an elevation program for one user, never a batch file. All a
+    /// test that runs nothing needs: where the program is, and whether this
+    /// machine has it, are the user's machine's business.
+    pub(crate) fn may_name(&self, program: &str) -> Result<(), Refusal> {
+        if self.scope == Scope::User && asks_for_administrator(program) {
+            return Err(elevation(program));
+        }
+        let path_like = program.contains(['/', '\\']);
+        let declared = self.programs.iter().any(|allowed| {
+            if allowed.contains(['/', '\\']) {
+                allowed == program
+            } else {
+                !path_like && same_program_name(allowed, program)
+            }
+        });
+        if !declared {
+            return Err(format!("{program} is not a program this package lets its hooks run"));
+        }
+        let extension = Path::new(program).extension().and_then(|e| e.to_str());
+        if extension.is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"))
+        {
+            return Err(format!("{program} is a batch file, which runs through a shell"));
+        }
+        Ok(())
+    }
 }
 
 fn elevation(program: &str) -> Refusal {

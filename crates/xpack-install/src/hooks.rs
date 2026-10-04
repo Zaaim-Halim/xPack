@@ -76,6 +76,19 @@ const ENGINE_ENVIRONMENT: [&str; 11] = [
 /// started it; its hooks must never write into that user's home.
 const USER_ENVIRONMENT: [&str; 2] = ["HOME", "USERPROFILE"];
 
+/// How hooks run under `xpack hooks test`: what they do is recorded in
+/// `record`, and done only with `perform`; a program not run answers as
+/// `answers` say.
+#[derive(Debug, Clone, Default)]
+pub struct HookTest {
+    /// Where every hook's actions are appended, one line of JSON each.
+    pub record: PathBuf,
+    /// Whether what the hooks do is done, rather than only recorded.
+    pub perform: bool,
+    /// What a program not run answers, by the name a hook runs it by.
+    pub answers: std::collections::BTreeMap<String, xpack_core::hooks::ProgramAnswer>,
+}
+
 /// Receives each line of a hook's output as it arrives, with the hook point:
 /// to print it to a terminal, or show it on an installer's progress page.
 pub type LineSink<'a> = &'a (dyn Fn(HookPoint, &str) + Sync);
@@ -104,6 +117,8 @@ pub struct HookRun<'a> {
     /// Set by someone else to cancel: the hook running is stopped, with
     /// everything it started, and has failed.
     pub cancel: Option<&'a AtomicBool>,
+    /// Under test: how what the hooks do is recorded.
+    pub test: Option<&'a HookTest>,
 }
 
 impl HookRun<'_> {
@@ -156,6 +171,7 @@ impl HookRun<'_> {
             let started = Instant::now();
             let outcome = self.run_one(paths, point, hook, digest);
             let seconds = Some(started.elapsed().as_secs());
+            self.note_end(point, hook, &outcome);
             match outcome {
                 Ok(()) => {
                     append(
@@ -185,6 +201,33 @@ impl HookRun<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Under test, how `hook` ended, in the test's record.
+    fn note_end(&self, point: HookPoint, hook: &Hook, outcome: &std::result::Result<(), Failure>) {
+        let Some(test) = self.test else { return };
+        let line = xpack_core::hooks::PlanLine {
+            version: self.manifest.application.version.clone(),
+            point,
+            script: hook.script.clone(),
+            action: xpack_core::hooks::PlanAction::Ended {
+                succeeded: outcome.is_ok(),
+                reason: outcome.as_ref().err().map(|failure| failure.reason.clone()),
+            },
+            performed: true,
+        };
+        let written = serde_json::to_string(&line).ok().and_then(|mut text| {
+            text.push('\n');
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&test.record)
+                .and_then(|mut file| file.write_all(text.as_bytes()))
+                .ok()
+        });
+        if written.is_none() {
+            tracing::warn!(%point, "could not record how a hook ended");
+        }
     }
 
     fn digest_of(&self, hook: &Hook) -> Result<Sha256Digest> {
@@ -346,6 +389,13 @@ impl HookRun<'_> {
                 .timeout_seconds
                 .unwrap_or(xpack_core::hooks::DEFAULT_TIMEOUT_SECONDS)
                 .saturating_add(ENGINE_GRACE_SECONDS),
+            plan: self.test.map(|test| xpack_core::hooks::Plan {
+                record: test.record.clone(),
+                perform: test.perform,
+                answers: test.answers.clone(),
+                version: self.manifest.application.version.clone(),
+                script: hook.script.clone(),
+            }),
         }
     }
 

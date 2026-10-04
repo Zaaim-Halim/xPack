@@ -22,6 +22,36 @@ pub(crate) struct Args {
 enum HooksCommand {
     /// Check a project's hooks as `xpack pack` does, without building.
     Check(CheckArgs),
+    /// Run a package's hooks in throwaway installations, and write a report.
+    Test(TestArgs),
+}
+
+/// Arguments for `xpack hooks test`.
+#[derive(ClapArgs)]
+struct TestArgs {
+    /// The package whose hooks are tested.
+    #[arg(value_name = "PACKAGE")]
+    package: PathBuf,
+
+    /// The release before it, so its update and rollback hooks run too.
+    #[arg(long, value_name = "PACKAGE")]
+    previous: Option<PathBuf>,
+
+    /// Do what the hooks do: run their programs, write their files. For a
+    /// disposable machine of the target platform, never your own. Without
+    /// it, what they would do is recorded and nothing is done.
+    #[arg(long)]
+    real: bool,
+
+    /// What programs answer when they are not run: a JSON object from a
+    /// program's name to `{ "exitCode", "stdout", "stderr" }`.
+    #[arg(long, value_name = "FILE")]
+    answers: Option<PathBuf>,
+
+    /// Test an installation for everyone, with the package's `machine`
+    /// permissions, rather than one user's.
+    #[arg(long)]
+    all_users: bool,
 }
 
 /// Arguments for `xpack hooks check`.
@@ -39,6 +69,7 @@ struct CheckArgs {
 /// Runs `xpack hooks`.
 pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     match &args.command {
+        HooksCommand::Test(test) => run_test(test),
         HooksCommand::Check(check) => {
             let config = ProjectConfig::load(&check.config)?;
             let manifest = config.to_manifest(Platform::host()?);
@@ -49,6 +80,54 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
             super::success()
         }
     }
+}
+
+/// Runs `xpack hooks test`, writes its report beside the package, and says
+/// how each hook point did.
+fn run_test(args: &TestArgs) -> Result<ExitCode> {
+    let engine = super::sibling_binary_required("xpack-hook")?;
+    let answers = match &args.answers {
+        Some(file) => xpack_core::atomic::read_json(file)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let test = super::hooks_test::Test {
+        package: &args.package,
+        previous: args.previous.as_deref(),
+        real: args.real,
+        answers,
+        scope: if args.all_users {
+            xpack_core::InstallScope::Machine
+        } else {
+            xpack_core::InstallScope::User
+        },
+        engine,
+    };
+    let report = super::hooks_test::run(&test)?;
+    let path = super::hooks_test::report_path(&args.package);
+    let json = serde_json::to_vec_pretty(&report).map_err(|e| Error::json("report", e))?;
+    xpack_core::atomic::write(&path, &json)?;
+
+    for scenario in &report.scenarios {
+        let ran = if scenario.ran { "ran" } else { "not run" };
+        let note = scenario.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default();
+        xpack_core::outln!("{:<10} {ran}{note}", scenario.name);
+    }
+    for point in &report.points {
+        let reason = point.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+        let moment =
+            if point.moment_held == Some(false) { "; its moment did not hold" } else { "" };
+        xpack_core::outln!("{:<20} {}{reason}{moment}", point.point, point.result);
+    }
+    for path in &report.left_behind {
+        xpack_core::outln!("left behind: {}", path.display());
+    }
+    for program in &report.programs {
+        xpack_core::outln!("ran: {program}");
+    }
+    crate::output::field("report", path.display());
+    crate::output::field("mode", &report.mode);
+    crate::output::field("passed", report.passed);
+    Ok(if report.passed { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 /// Prints what [`check_hooks`] warned about, on standard error.

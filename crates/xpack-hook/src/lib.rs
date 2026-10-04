@@ -11,6 +11,7 @@
 
 mod engine;
 mod policy;
+mod recorder;
 mod request;
 
 pub use engine::{Outcome, check, run};

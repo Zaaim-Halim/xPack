@@ -310,6 +310,7 @@ impl Launcher {
             scope: state.scope,
             progress: &NoProgress,
             cancel: None,
+            test: None,
         };
         // Up while this start's hooks run, if they run for more than a
         // moment: whoever clicked the icon is told why nothing has opened.
@@ -475,8 +476,13 @@ impl Launcher {
         let installer = Installer::new(&lock);
         let engine = self.hook_engine();
         let scope = lock.load_state().map_or(xpack_core::InstallScope::User, |s| s.value.scope);
-        let hooks =
-            HookContext { engine: engine.as_deref(), scope, progress: &NoProgress, cancel: None };
+        let hooks = HookContext {
+            engine: engine.as_deref(),
+            scope,
+            progress: &NoProgress,
+            cancel: None,
+            test: None,
+        };
 
         if startup.is_healthy() {
             let confirmation = installer.commit_for_confirmation()?;

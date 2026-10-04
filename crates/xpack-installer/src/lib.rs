@@ -706,6 +706,7 @@ impl VerifiedPayload {
             } else {
                 None
             },
+            hook_test: None,
         };
 
         let installed =
