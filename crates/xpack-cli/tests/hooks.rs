@@ -67,14 +67,19 @@ impl Project {
         self.command(program).args(args).output().unwrap()
     }
 
-    /// `program`, run in the project with a home of its own: hooks under
-    /// test are told where the user's home is, and a test, or a bug in what
-    /// it tests, must never write into the real one.
+    /// `program`, run in the project with a home of its own on Unix: hooks
+    /// under test are told where the user's home is, and a test, or a bug in
+    /// what it tests, must never write into the real one. Windows takes the
+    /// home from the system's known folders, not the environment, and
+    /// redirecting `USERPROFILE` only breaks the folders found beside it.
     fn command(&self, program: &Path) -> Command {
-        let home = self.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
         let mut command = Command::new(program);
-        command.current_dir(self.path()).env("HOME", &home).env("USERPROFILE", &home);
+        command.current_dir(self.path());
+        if cfg!(unix) {
+            let home = self.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            command.env("HOME", &home);
+        }
         command
     }
 
@@ -945,7 +950,15 @@ fn a_package_for_another_platform_is_tested_where_it_will_run() {
     if !engine_is_built() {
         return;
     }
-    let other = if cfg!(target_os = "linux") { "windows-x64" } else { "linux-x64" };
+    // The other architecture of this system, which every host can build: a
+    // Windows host cannot build for a system that needs Unix permissions.
+    let host = xpack_core::Platform::host().unwrap();
+    let other_arch = match host.arch {
+        xpack_core::platform::Arch::X64 => xpack_core::platform::Arch::Arm64,
+        xpack_core::platform::Arch::Arm64 => xpack_core::platform::Arch::X64,
+    };
+    let other = xpack_core::Platform::new(host.os, other_arch).to_string();
+    let other = other.as_str();
     let project = Project::new(
         &serde_json::json!({ "install": "xpack/hooks/m.js", "uninstall": "xpack/hooks/m.js" }),
         &[("xpack/hooks/m.js", MARKS.as_bytes())],

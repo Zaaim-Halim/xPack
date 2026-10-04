@@ -448,7 +448,7 @@ impl<'lock> Installer<'lock> {
     /// A package's install hooks run on a first installation, its update
     /// hooks when it is applied over another version; see
     /// [`InstallOptions::hook_engine`]. A failed hook is
-    /// [`Error::HookFailed`](xpack_core::Error::HookFailed). On a first
+    /// [`Error::HookFailed`]. On a first
     /// installation everything the install wrote has then been undone but the
     /// lock and its directory: release the lock, then call
     /// [`finish_removal`], which leaves nothing. It is safe to call after

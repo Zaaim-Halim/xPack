@@ -382,7 +382,9 @@ impl HookRun<'_> {
             log_dir: absolute(&paths.logs_dir()),
             temp_dir: temp_dir.to_path_buf(),
             home: if user {
-                directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
+                // The home alone: `BaseDirs` also needs the data folders,
+                // and on Windows gives nothing when one cannot be found.
+                directories::UserDirs::new().map(|d| d.home_dir().to_path_buf())
             } else {
                 None
             },
