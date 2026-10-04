@@ -1521,16 +1521,24 @@ impl<'lock> Installer<'lock> {
     //
     // The launcher decides *when* probation passes. These only record it.
 
-    /// Records that a probationary launch is about to be attempted.
+    /// Counts a probationary launch about to be attempted, and returns the
+    /// phase as it was before it: exhausted when every try was spent before
+    /// this one, which the caller rolls back rather than starting the version
+    /// again; otherwise this start is counted and goes ahead.
     ///
-    /// Persisted *before* the launch, because a counter incremented afterwards
-    /// never records the crash that prevented the increment.
+    /// Judged before counting, so a version gets every one of its tries: the
+    /// last one is a try, not the moment it is given up. Persisted *before*
+    /// the launch, because a counter incremented afterwards never records the
+    /// crash that prevented the increment.
     pub fn begin_attempt(&self) -> Result<UpdatePhase> {
         let mut state = self.load_state()?;
+        let before = state.update.clone();
+        if before.attempts_exhausted() {
+            return Ok(before);
+        }
         state.update.record_attempt();
-        let phase = state.update.clone();
         self.lock.save_state(&state)?;
-        Ok(phase)
+        Ok(before)
     }
 
     /// Marks the active version healthy and ends probation.

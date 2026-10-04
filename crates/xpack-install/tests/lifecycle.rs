@@ -144,9 +144,12 @@ fn probation_ends_after_a_bounded_number_of_attempts() {
     install(&lock, dir.path(), &key, "1.0.0", &options).unwrap();
     install(&lock, dir.path(), &key, "1.1.0", &options).unwrap();
 
-    let mut phase = installer.begin_attempt().unwrap();
-    assert!(!phase.attempts_exhausted(), "one attempt is not exhaustion");
-    phase = installer.begin_attempt().unwrap();
+    // Every try is a try: the last one is not where the version is given up.
+    for attempt in 1..=xpack_core::state::MAX_ACTIVATION_ATTEMPTS {
+        let phase = installer.begin_attempt().unwrap();
+        assert!(!phase.attempts_exhausted(), "attempt {attempt} was refused its try");
+    }
+    let phase = installer.begin_attempt().unwrap();
     assert!(phase.attempts_exhausted(), "probation must terminate");
 }
 

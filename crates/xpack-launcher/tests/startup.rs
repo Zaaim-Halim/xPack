@@ -420,6 +420,35 @@ fn an_exhausted_probation_rolls_back_without_launching_again() {
     assert_eq!(world.active(), Some(v("1.0.0")));
 }
 
+/// Two tries, so that one interruption (a power cut, a closed splash screen)
+/// does not condemn a version that starts well the next time. A start after
+/// one spent try runs the version, and its good start ends the probation.
+#[cfg(unix)]
+#[test]
+fn a_version_interrupted_once_gets_its_second_try() {
+    let world = World::new();
+    world.install("1.0.0", Behaviour::ExitsCleanly, 5);
+    world.launcher().launch(&[], true).unwrap();
+    world.install("1.1.0", Behaviour::ExitsCleanly, 5);
+    {
+        // The first try began and never ended: the machine stopped.
+        let lock = InstallLock::acquire(&world.paths).unwrap();
+        let mut state = lock.load_state().unwrap().value;
+        state.update = xpack_core::state::UpdatePhase::PendingVerification {
+            version: v("1.1.0"),
+            rollback_to: v("1.0.0"),
+            attempts: xpack_core::state::MAX_ACTIVATION_ATTEMPTS - 1,
+        };
+        lock.save_state(&state).unwrap();
+    }
+
+    let outcome = world.launcher().launch(&[], true).unwrap();
+
+    assert_eq!(outcome.version, v("1.1.0"), "the second try was not given");
+    assert_eq!(outcome.rolled_back_to, None);
+    assert_eq!(world.active(), Some(v("1.1.0")));
+}
+
 #[cfg(unix)]
 #[test]
 fn each_probationary_start_is_counted_before_the_application_runs() {
