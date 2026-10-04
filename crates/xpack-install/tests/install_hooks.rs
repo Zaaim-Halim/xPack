@@ -816,3 +816,98 @@ fn a_package_with_hooks_gets_the_dialog_that_explains_its_start_where_there_is_o
     };
     assert_eq!(installed.notifier, expected);
 }
+
+// --- uninstalling ---
+
+/// Uninstalls, telling `progress` about the hooks.
+fn uninstall(fixture: &Fixture, progress: &dyn ProgressReporter) -> xpack_install::Removal {
+    let lock = InstallLock::acquire(&fixture.paths()).unwrap();
+    xpack_install::uninstall_reporting(lock, None, Some(&fixture.commands), progress).unwrap()
+}
+
+const SAY: &str = "export function main(ctx) { ctx.log.info(ctx.operation + '.' + ctx.when); }";
+
+fn uninstall_hooks() -> serde_json::Value {
+    serde_json::json!({ "uninstall": [
+        { "when": "before", "script": "xpack/hooks/say.js" },
+        { "when": "after", "script": "xpack/hooks/say.js" }
+    ] })
+}
+
+#[test]
+fn uninstall_before_finds_the_installation_whole_and_after_finds_it_gone() {
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(
+        &fixture,
+        &fixture.package("1.0.0", uninstall_hooks(), &[("xpack/hooks/say.js", SAY)]),
+    );
+    let moments = Moments::new(fixture.paths());
+    let removal = uninstall(&fixture, &moments);
+
+    assert_eq!(moments.points(), ["uninstall.before", "uninstall.after"]);
+    let (versions, active, launcher, _) = moments.at("uninstall.before");
+    assert_eq!((versions.len(), active, launcher), (1, Some(v("1.0.0")), true));
+    // Its files gone, xpack-hook with them: it ran from the copy kept aside.
+    let (versions, _, launcher, _) = moments.at("uninstall.after");
+    assert_eq!((versions.len(), launcher), (0, false));
+    assert_eq!(
+        *moments.lines.lock().unwrap(),
+        ["[uninstall.before] uninstall.before", "[uninstall.after] uninstall.after"]
+    );
+    assert!(removal.root_removed, "left: {:?}", removal.remaining);
+    assert!(!fixture.paths().root().exists());
+}
+
+#[test]
+fn a_failed_uninstall_hook_does_not_stop_the_uninstall() {
+    let Some(fixture) = Fixture::new() else { return };
+    let hooks = serde_json::json!({ "uninstall": [
+        { "when": "before", "script": "xpack/hooks/fail.js" },
+        { "when": "after", "script": "xpack/hooks/fail.js" }
+    ] });
+    install_then(&fixture, &fixture.package("1.0.0", hooks, &[("xpack/hooks/fail.js", FAIL)]));
+    let removal = uninstall(&fixture, &Moments::new(fixture.paths()));
+    assert!(removal.root_removed, "left: {:?}", removal.remaining);
+}
+
+#[test]
+fn uninstalling_leaves_nothing_of_what_hooks_kept_or_of_the_copy_kept_aside() {
+    let Some(fixture) = Fixture::new() else { return };
+    let hooks = serde_json::json!({
+        "install": "xpack/hooks/mark.js",
+        "uninstall": { "when": "after", "script": "xpack/hooks/mark.js" }
+    });
+    install_then(&fixture, &fixture.package("1.0.0", hooks, &INSTALL_ALL));
+    assert!(fixture.paths().data_dir().join("marks").is_file());
+    let removal = uninstall(&fixture, &Moments::new(fixture.paths()));
+    assert!(removal.root_removed, "left: {:?}", removal.remaining);
+    let beside: Vec<String> = fs::read_dir(fixture.paths().root().parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".xpack-uninstall-"))
+        .collect();
+    assert_eq!(beside, Vec::<String>::new(), "the copy kept aside was left behind");
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstalling_without_uninstall_hooks_never_starts_the_program_that_runs_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new() else { return };
+    install_then(
+        &fixture,
+        &fixture.package(
+            "1.0.0",
+            serde_json::json!({ "update": "xpack/hooks/mark.js" }),
+            &INSTALL_ALL,
+        ),
+    );
+    let marker = fixture.dir.path().join("engine-started");
+    let engine = fixture.paths().hook_engine_file();
+    fs::write(&engine, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display())).unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let removal = uninstall(&fixture, &Moments::new(fixture.paths()));
+    assert!(removal.root_removed);
+    assert!(!marker.exists(), "uninstalling started xpack-hook for no hook");
+}

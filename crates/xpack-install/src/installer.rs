@@ -2606,6 +2606,29 @@ pub fn uninstall_into(
     desktop_roots: Option<&crate::integration::Roots>,
     command_roots: Option<&crate::integration::command::CommandRoots>,
 ) -> Result<Removal> {
+    uninstall_reporting(lock, desktop_roots, command_roots, &NoProgress)
+}
+
+/// Removes an installation as [`uninstall_into`] does, telling `progress`
+/// when its uninstall hooks run and passing on what they write.
+///
+/// # Hooks
+///
+/// The active version's `uninstall.before` hooks run first, with the
+/// installation whole; its `uninstall.after` hooks run once its files are
+/// gone, from a copy of their scripts and of `xpack-hook` taken beforehand,
+/// beside the installation. A failed uninstall hook is logged and the
+/// uninstall carries on: a half-removed application is worse than either
+/// outcome. Nothing cancels them.
+///
+/// The installation's data directory goes too, after `uninstall.after`, and
+/// so the root: uninstalling leaves nothing of the installation.
+pub fn uninstall_reporting(
+    lock: InstallLock,
+    desktop_roots: Option<&crate::integration::Roots>,
+    command_roots: Option<&crate::integration::command::CommandRoots>,
+    progress: &dyn ProgressReporter,
+) -> Result<Removal> {
     let paths = lock.paths().clone();
     let root = paths.root().to_path_buf();
 
@@ -2616,16 +2639,151 @@ pub fn uninstall_into(
     // user's menu with no way to find it again.
     let desktop_entry = desktop_entry_for_removal(&lock);
     let commands = commands_for_removal(&lock);
+    let hooks = UninstallHooks::prepare(&lock);
+    let context = hooks.as_ref().map(|hooks| hooks.context(progress));
+    if let (Some(hooks), Some(context)) = (&hooks, &context) {
+        hooks.run_before(&paths, context);
+    }
+
     let (desktop, desktop_shortcut, command) =
         remove_contents(&lock, desktop_entry.as_ref(), &commands, desktop_roots, command_roots)?;
+
+    if let (Some(hooks), Some(context)) = (&hooks, &context) {
+        hooks.run_after(&paths, context);
+    }
+    // What the application and its hooks kept, and what a hook run cut short
+    // left: the installation's, and gone with it.
+    atomic::remove_dir_all_if_exists(&paths.data_dir())?;
+    atomic::remove_dir_all_if_exists(&paths.hook_runs_dir())?;
 
     // Releases the lock and closes the handle to the file inside `state/`.
     // Everything after this point runs unlocked, which is why it is ordered
     // last and why the root removal cannot recurse.
     drop(lock);
+    drop(hooks);
     let (root_removed, remaining) = finish_removal(&paths)?;
     tracing::info!(root = %root.display(), root_removed, "installation removed");
     Ok(Removal { root, root_removed, remaining, desktop, desktop_shortcut, command })
+}
+
+/// The active version's uninstall hooks, and what `uninstall.after` runs
+/// from once the installation's files are gone.
+struct UninstallHooks {
+    manifest: xpack_core::Manifest,
+    version_dir: PathBuf,
+    scope: xpack_core::InstallScope,
+    engine: Option<PathBuf>,
+    /// A copy of `xpack-hook` and of the `uninstall.after` scripts, beside
+    /// the installation rather than in the system's temporary directory: an
+    /// administrator's process can inherit a user's, who could change a
+    /// script there between its copy and its run. Removed when this is
+    /// dropped.
+    kept: Option<tempfile::TempDir>,
+}
+
+impl UninstallHooks {
+    /// Reads the active version's hooks, and keeps what `uninstall.after`
+    /// will need. None when it has no uninstall hooks, or cannot be read.
+    fn prepare(lock: &InstallLock) -> Option<Self> {
+        let paths = lock.paths();
+        let state = lock.load_state().ok()?.value;
+        let version = state.current_version.clone().or_else(|| state.previous_version.clone())?;
+        let bytes = std::fs::read(paths.version_manifest_file(&version)).ok()?;
+        let manifest = xpack_core::Manifest::from_slice(&bytes).ok()?;
+        if manifest.hooks.uninstall.is_empty() {
+            return None;
+        }
+        let engine = Some(paths.hook_engine_file()).filter(|engine| engine.is_file());
+        let version_dir = paths.version_dir(&version);
+        let after = point(Operation::Uninstall, Moment::After);
+        let kept = match (&engine, manifest.hooks.at(after).next().is_some()) {
+            (Some(engine), true) => keep_for_after(paths, engine, &manifest, &version_dir),
+            _ => None,
+        };
+        Some(Self { manifest, version_dir, scope: state.scope, engine, kept })
+    }
+
+    fn context<'a>(&'a self, progress: &'a dyn ProgressReporter) -> HookContext<'a> {
+        HookContext { engine: self.engine.as_deref(), scope: self.scope, progress, cancel: None }
+    }
+
+    fn run_before(&self, paths: &xpack_core::InstallPaths, context: &HookContext<'_>) {
+        let version = &self.manifest.application.version;
+        context.run_and_carry_on(
+            paths,
+            &self.manifest,
+            &self.version_dir,
+            point(Operation::Uninstall, Moment::Before),
+            Some(version),
+            None,
+            None,
+        );
+    }
+
+    fn run_after(&self, paths: &xpack_core::InstallPaths, context: &HookContext<'_>) {
+        let after = point(Operation::Uninstall, Moment::After);
+        if self.manifest.hooks.at(after).next().is_none() {
+            return;
+        }
+        let Some(kept) = &self.kept else {
+            tracing::warn!("the uninstall.after hooks could not be kept aside, and do not run");
+            return;
+        };
+        let engine = kept.path().join(engine_name());
+        let context = HookContext { engine: Some(&engine), ..*context };
+        let version = &self.manifest.application.version;
+        context.run_and_carry_on(
+            paths,
+            &self.manifest,
+            &kept.path().join("scripts"),
+            after,
+            Some(version),
+            None,
+            None,
+        );
+    }
+}
+
+/// The file name `xpack-hook` has on this platform.
+fn engine_name() -> String {
+    format!("xpack-hook{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Copies `xpack-hook` and the `uninstall.after` scripts beside the
+/// installation, where they outlive its removal. None, logged, if that fails.
+fn keep_for_after(
+    paths: &xpack_core::InstallPaths,
+    engine: &Path,
+    manifest: &xpack_core::Manifest,
+    version_dir: &Path,
+) -> Option<tempfile::TempDir> {
+    let beside = paths.root().parent()?;
+    let kept = tempfile::Builder::new()
+        .prefix(".xpack-uninstall-")
+        .tempdir_in(beside)
+        .map_err(|error| tracing::warn!(%error, "could not keep the uninstall.after hooks aside"))
+        .ok()?;
+    let copy = || -> std::io::Result<()> {
+        let to = kept.path().join(engine_name());
+        std::fs::copy(engine, &to)?;
+        let after = point(Operation::Uninstall, Moment::After);
+        for hook in manifest.hooks.at(after) {
+            let relative: PathBuf = hook.script.split('/').collect();
+            let target = kept.path().join("scripts").join(&relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(version_dir.join(&relative), target)?;
+        }
+        Ok(())
+    };
+    match copy() {
+        Ok(()) => Some(kept),
+        Err(error) => {
+            tracing::warn!(%error, "could not keep the uninstall.after hooks aside");
+            None
+        }
+    }
 }
 
 /// Removes what is xPack's in an installation, under its lock: versions,
