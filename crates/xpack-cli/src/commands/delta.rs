@@ -58,7 +58,22 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     let target = super::sealing::open(&args.target, &args.password)?;
     let application = {
         let mut reader = xpack_package::PackageReader::open(&target.path)?;
-        reader.peek_manifest_unverified()?.application.id
+        let manifest = reader.peek_manifest_unverified()?;
+        // A delta becomes the target package on users' machines, so it ships
+        // that package's hooks: tested, or not at all. It is an update by
+        // definition, reached from its base, and only installations for one
+        // user update themselves.
+        if !manifest.hooks.is_empty() {
+            let (_, manifest_sha256) = super::hooks_test::package_identity(&target.path)?;
+            super::hooks_gate::ensure_tested(&super::hooks_gate::Shipping {
+                package: &args.target,
+                manifest_sha256,
+                manifest: &manifest,
+                earlier_release: true,
+                scopes: &[xpack_core::InstallScope::User],
+            })?;
+        }
+        manifest.application.id
     };
 
     let output = match &args.out {

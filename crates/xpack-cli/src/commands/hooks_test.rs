@@ -83,7 +83,11 @@ pub(crate) struct PointReport {
 
 /// What the test is asked to do.
 pub(crate) struct Test<'a> {
+    /// The package as it can be read: itself, or its opened copy when it is
+    /// sealed.
     pub(crate) package: &'a Path,
+    /// The package as it was named.
+    pub(crate) named: &'a Path,
     pub(crate) previous: Option<&'a Path>,
     pub(crate) real: bool,
     pub(crate) answers: BTreeMap<String, xpack_core::hooks::ProgramAnswer>,
@@ -101,9 +105,14 @@ pub(crate) fn package_identity(package: &Path) -> Result<(Manifest, Sha256Digest
     Ok((verified.manifest().clone(), digest))
 }
 
-/// Where a package's report is written, and looked for: beside it.
-pub(crate) fn report_path(package: &Path) -> PathBuf {
-    package.with_extension("hooks-report.json")
+/// Where a package's report for installations of `scope` is written, and
+/// looked for: beside it, one per scope, as each scope has permissions of
+/// its own.
+pub(crate) fn report_path(package: &Path, scope: InstallScope) -> PathBuf {
+    match scope {
+        InstallScope::User => package.with_extension("hooks-report.json"),
+        InstallScope::Machine => package.with_extension("hooks-report.all-users.json"),
+    }
 }
 
 /// Runs the test and returns its report.
@@ -115,7 +124,7 @@ pub(crate) fn run(test: &Test<'_>) -> Result<Report> {
             "hooks test",
             format!(
                 "{} is a {} package; its hooks are tested on {}, where they will run",
-                test.package.display(),
+                test.named.display(),
                 manifest.platform,
                 manifest.platform
             ),
@@ -345,7 +354,7 @@ fn assemble(
         .collect();
     Report {
         package: test
-            .package
+            .named
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),

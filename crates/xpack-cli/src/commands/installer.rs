@@ -153,6 +153,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     })?;
 
     let (ui, licence) = load_ui(args.ui.as_deref())?;
+    // Before anything is built: a package with hooks ships only with them
+    // tested, in each scope this installer installs for.
+    ensure_hooks_tested(&args.package, &opened.path, &manifest, ui.as_ref())?;
     let plan = InstallPlan {
         format_version: InstallPlan::format_for(ui.as_ref()),
         application_id: manifest.application.id.clone(),
@@ -240,21 +243,24 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("size", super::pack::format_size(size));
     crate::output::field("binaries", binaries.len());
 
+    print_signing_note(target);
+    super::success()
+}
+
+/// What the publisher must still do before distributing the installer.
+fn print_signing_note(target: Os) {
+    xpack_core::errln!();
     if target == Os::Macos {
-        xpack_core::errln!();
         xpack_core::errln!(
             "note: sign and notarise this bundle before distributing it; macOS blocks an \
              unsigned downloaded installer."
         );
     } else {
-        xpack_core::errln!();
         xpack_core::errln!(
             "note: sign this installer if you distribute it, and sign it *after* this step — \
              appending the payload invalidates a signature applied to the stub."
         );
     }
-
-    super::success()
 }
 
 /// Reads the wizard settings, and the licence they name.
@@ -491,6 +497,35 @@ fn brand_stub(
         icon,
     )?;
     Ok(Some(destination))
+}
+
+/// Refuses a package whose hooks have not passed `xpack hooks test`, read
+/// from `readable`, its reports beside `package`: one for each scope the
+/// installer's settings install for.
+fn ensure_hooks_tested(
+    package: &Path,
+    readable: &Path,
+    manifest: &xpack_core::Manifest,
+    ui: Option<&xpack_installer::UiPlan>,
+) -> Result<()> {
+    use xpack_core::InstallScope::{Machine, User};
+    if manifest.hooks.is_empty() {
+        return Ok(());
+    }
+    let scopes: &[xpack_core::InstallScope] =
+        match ui.map_or(xpack_installer::AllUsers::Never, |ui| ui.all_users) {
+            xpack_installer::AllUsers::Never => &[User],
+            xpack_installer::AllUsers::Offer => &[User, Machine],
+            xpack_installer::AllUsers::Always => &[Machine],
+        };
+    let (_, manifest_sha256) = super::hooks_test::package_identity(readable)?;
+    super::hooks_gate::ensure_tested(&super::hooks_gate::Shipping {
+        package,
+        manifest_sha256,
+        manifest,
+        earlier_release: false,
+        scopes,
+    })
 }
 
 /// The installer build a target gets when no stub is named.

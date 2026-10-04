@@ -105,6 +105,20 @@ pub(crate) struct Args {
     #[arg(long)]
     json: bool,
 
+    /// Publish a release whose hooks differ from the release already in the
+    /// index. The differences are printed whether or not this is given; new
+    /// permissions always are.
+    #[arg(long)]
+    accept_hook_changes: bool,
+
+    /// The update tree already published, as a directory or an `https` URL
+    /// laid out as `--out-dir` writes it: what each package's hooks are
+    /// compared with, and what tells whether installations will update to
+    /// it from an earlier release. Without it, the index already in
+    /// `--out-dir`, if there is one.
+    #[arg(long, value_name = "DIR|URL")]
+    current: Option<String>,
+
     /// The password, when the packages are sealed. It opens each one to read
     /// what it is; the index names the sealed files, which are what is
     /// published.
@@ -175,6 +189,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // leave nothing behind rather than half a release tree, which a later
     // upload step would happily publish.
     let targets = resolve_targets(&described, &args.out_dir)?;
+    for (package, path) in described.iter().zip(&targets) {
+        check_hooks(package, path, args)?;
+    }
 
     let mut written = Vec::new();
     for (package, path) in described.iter().zip(targets) {
@@ -207,8 +224,13 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
 
 /// Everything read out of one package file.
 struct Described {
+    /// The package as it was named, beside which its hooks report sits.
+    path: PathBuf,
     file_name: String,
     manifest: Manifest,
+    /// The SHA-256 of its signed manifest, for a package with hooks: what
+    /// its hooks report must be bound to.
+    manifest_sha256: Option<xpack_core::digest::Sha256Digest>,
     sha256: xpack_core::digest::Sha256Digest,
     size: u64,
 }
@@ -234,6 +256,12 @@ fn describe(
         reader.ensure_full_package()?;
         reader.peek_manifest_unverified()?.clone()
     };
+    // Read while the opened copy of a sealed package still exists.
+    let manifest_sha256 = if manifest.hooks.is_empty() {
+        None
+    } else {
+        Some(super::hooks_test::package_identity(&opened.path)?.1)
+    };
 
     let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
     let (sha256, size) = sha256_reader(&mut std::io::BufReader::new(file))?;
@@ -247,7 +275,143 @@ fn describe(
         .ok_or_else(|| Error::invalid("package", format!("{} has no file name", path.display())))?
         .to_string();
 
-    Ok(Described { file_name, manifest, sha256, size })
+    Ok(Described { path: path.to_path_buf(), file_name, manifest, manifest_sha256, sha256, size })
+}
+
+/// Refuses to publish a package whose hooks have not passed their test, or
+/// whose hooks differ from those of the release already published and the
+/// difference was not accepted. Every difference is printed, new
+/// permissions always.
+fn check_hooks(package: &Described, target: &std::path::Path, args: &Args) -> Result<()> {
+    let manifest = &package.manifest;
+    let current = published(manifest, target, args.current.as_deref())?;
+    if let Some(manifest_sha256) = package.manifest_sha256 {
+        super::hooks_gate::ensure_tested(&super::hooks_gate::Shipping {
+            package: &package.path,
+            manifest_sha256,
+            manifest,
+            earlier_release: matches!(
+                &current,
+                Published::Found(current) if current.version < manifest.application.version
+            ),
+            // Only installations for one user update themselves.
+            scopes: &[xpack_core::InstallScope::User],
+        })?;
+    }
+    let what = format!("{} {}", manifest.application.name, manifest.application.version);
+    let current = match current {
+        Published::Found(current) => current,
+        // Nothing published yet for this platform and channel: a first
+        // release, with nothing to compare.
+        Published::Nothing => return Ok(()),
+        Published::Unknown => {
+            if !manifest.hooks.is_empty() {
+                xpack_core::errln!(
+                    "warning: {what} has hooks, and no published index was given to compare them \
+                     with, so nothing was compared; pass --current with the published update \
+                     tree. Its hooks may:"
+                );
+                for permission in permissions_of(manifest) {
+                    xpack_core::errln!("  {permission}");
+                }
+            }
+            return Ok(());
+        }
+    };
+    let changes = super::hooks_gate::changes(
+        current.hooks.as_ref(),
+        super::hooks_gate::summary(manifest).as_ref(),
+    );
+    if changes.is_empty() {
+        return Ok(());
+    }
+    xpack_core::errln!("{what}: its hooks differ from those of {} in the index:", current.version);
+    for difference in &changes.differences {
+        xpack_core::errln!("  {difference}");
+    }
+    for permission in &changes.new_permissions {
+        xpack_core::errln!("  new permission, {permission}");
+    }
+    if args.accept_hook_changes {
+        return Ok(());
+    }
+    Err(Error::invalid(
+        "hooks",
+        format!(
+            "{what} changes its hooks; read the differences above and, when they are meant, \
+             publish with --accept-hook-changes"
+        ),
+    ))
+}
+
+/// What is already published for a platform and channel.
+enum Published {
+    /// This index.
+    Found(Box<UpdateIndex>),
+    /// Nothing yet, where it would be.
+    Nothing,
+    /// Unknown: nowhere was given to look.
+    Unknown,
+}
+
+/// The index already published for `manifest`'s platform and channel.
+fn published(
+    manifest: &Manifest,
+    target: &std::path::Path,
+    current: Option<&str>,
+) -> Result<Published> {
+    let relative = format!("{}/{}.json", manifest.platform, manifest.update.channel);
+    let Some(base) = current else {
+        return match std::fs::read(target) {
+            Ok(bytes) => Ok(Published::Found(Box::new(UpdateIndex::from_slice(&bytes)?))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Published::Unknown),
+            Err(error) => Err(Error::io(target, error)),
+        };
+    };
+    if base.starts_with("https://") {
+        let url = format!("{}/{relative}", base.trim_end_matches('/'));
+        let transport = xpack_update::HttpsTransport::new();
+        let fetched = xpack_update::transport::UpdateTransport::fetch_to_vec(
+            &transport,
+            &url,
+            xpack_update::index::MAX_INDEX_BYTES,
+        );
+        return match fetched {
+            Ok(bytes) => Ok(Published::Found(Box::new(UpdateIndex::from_slice(&bytes)?))),
+            Err(Error::Transport(message)) if message.contains("HTTP 404") => {
+                Ok(Published::Nothing)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    if base.contains("://") {
+        return Err(Error::invalid(
+            "--current",
+            format!("{base} is neither a directory nor an https URL"),
+        ));
+    }
+    let file = std::path::Path::new(base).join(&relative);
+    match std::fs::read(&file) {
+        Ok(bytes) => Ok(Published::Found(Box::new(UpdateIndex::from_slice(&bytes)?))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Published::Nothing),
+        Err(error) => Err(Error::io(&file, error)),
+    }
+}
+
+/// Everything a package's hooks may run or write, in words.
+fn permissions_of(manifest: &Manifest) -> Vec<String> {
+    let permissions = &manifest.hooks.permissions;
+    let mut said = Vec::new();
+    for (scope, block) in [("user", &permissions.user), ("machine", &permissions.machine)] {
+        said.extend(block.exec.iter().map(|program| format!("{scope}: run {program}")));
+        said.extend(block.write.iter().map(|place| format!("{scope}: write {place}")));
+    }
+    if said.is_empty() {
+        said.push(
+            "run no program, and write only in their own data and temporary directories".into(),
+        );
+    }
+    said
 }
 
 /// Everything read out of one delta file.
@@ -472,6 +636,7 @@ fn write_index(
         },
         release_notes: args.release_notes.clone(),
         rollout: args.rollout,
+        hooks: super::hooks_gate::summary(manifest),
         // Only the ones that rebuild *this* platform's release. A delta is
         // built from one published package to another, so it belongs to
         // exactly one index.
@@ -558,8 +723,10 @@ mod tests {
             hooks: xpack_core::hooks::Hooks::default(),
         };
         Described {
+            path: PathBuf::from("pkg.xpkg"),
             file_name: "pkg.xpkg".into(),
             manifest,
+            manifest_sha256: None,
             sha256: xpack_core::digest::Sha256Digest::from_bytes([0; 32]),
             size: 1,
         }

@@ -94,6 +94,27 @@ pub struct UpdateIndex {
     /// out to be bad. See [`crate::rollout`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<u8>,
+
+    /// The release's hooks, as `xpack index` records them, so the next
+    /// release's can be compared with them before it is published.
+    ///
+    /// For the publishing tool alone: no installation reads it, and an
+    /// updater that predates it ignores it. Absent: the release has no
+    /// hooks, or was published before they were recorded, which no release
+    /// with hooks was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HookSummary>,
+}
+
+/// A release's hooks, as compared from one release to the next: what is
+/// declared, and each script by its digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookSummary {
+    /// The `hooks` the manifest declares, permissions included.
+    pub declared: xpack_core::hooks::Hooks,
+    /// Each script the hooks name, by its signed digest.
+    pub scripts: std::collections::BTreeMap<String, Sha256Digest>,
 }
 
 fn default_channel() -> String {

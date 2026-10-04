@@ -31,7 +31,7 @@ pub mod schedule;
 pub mod transport;
 pub mod updater;
 
-pub use index::{PackageRef, UpdateIndex};
+pub use index::{HookSummary, PackageRef, UpdateIndex};
 pub use reporting::ProgressWriter;
 #[cfg(feature = "https")]
 pub use transport::HttpsTransport;

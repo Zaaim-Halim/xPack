@@ -52,6 +52,10 @@ struct TestArgs {
     /// permissions, rather than one user's.
     #[arg(long)]
     all_users: bool,
+
+    /// The password, when the packages are sealed.
+    #[command(flatten)]
+    password: super::sealing::PasswordArgs,
 }
 
 /// Arguments for `xpack hooks check`.
@@ -90,9 +94,17 @@ fn run_test(args: &TestArgs) -> Result<ExitCode> {
         Some(file) => xpack_core::atomic::read_json(file)?,
         None => std::collections::BTreeMap::new(),
     };
+    // Sealed, each is tested from an opened copy; the report still sits
+    // beside the package as it was named, where the gate looks for it.
+    let package = super::sealing::open(&args.package, &args.password)?;
+    let previous = match &args.previous {
+        Some(path) => Some(super::sealing::open(path, &args.password)?),
+        None => None,
+    };
     let test = super::hooks_test::Test {
-        package: &args.package,
-        previous: args.previous.as_deref(),
+        package: &package.path,
+        named: &args.package,
+        previous: previous.as_ref().map(|opened| opened.path.as_path()),
         real: args.real,
         answers,
         scope: if args.all_users {
@@ -103,7 +115,7 @@ fn run_test(args: &TestArgs) -> Result<ExitCode> {
         engine,
     };
     let report = super::hooks_test::run(&test)?;
-    let path = super::hooks_test::report_path(&args.package);
+    let path = super::hooks_test::report_path(&args.package, test.scope);
     let json = serde_json::to_vec_pretty(&report).map_err(|e| Error::json("report", e))?;
     xpack_core::atomic::write(&path, &json)?;
 

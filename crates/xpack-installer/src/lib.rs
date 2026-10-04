@@ -30,7 +30,7 @@
 pub mod bundle;
 mod engine;
 
-pub use xpack_installer_ui::UiPlan;
+pub use xpack_installer_ui::{AllUsers, UiPlan};
 
 use std::path::{Path, PathBuf};
 

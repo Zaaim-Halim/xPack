@@ -550,6 +550,9 @@ fn ctrl_c_stops_a_running_install_hook_and_the_install_is_undone() {
     assert!(!project.installation().exists(), "the cancelled install left something behind");
 }
 
+/// A hook that passes its test and fails on the machine it is installed on:
+/// what it runs answers success in plan mode, and fails for real.
+#[cfg(unix)]
 #[test]
 fn an_installer_whose_install_hook_fails_exits_seven_and_leaves_nothing() {
     if !engine_is_built() {
@@ -566,12 +569,18 @@ fn an_installer_whose_install_hook_fails_exits_seven_and_leaves_nothing() {
     let project = Project::new(&serde_json::json!({}), &[]);
     let package = project.pack_version(
         "1.0.0",
-        &serde_json::json!({ "install": "xpack/hooks/fail.js" }),
+        &serde_json::json!({
+            "install": "xpack/hooks/fail.js",
+            "uninstall": "xpack/hooks/fail.js",
+            "permissions": { "user": { "exec": ["/usr/bin/false"] } }
+        }),
         &[(
             "xpack/hooks/fail.js",
-            "export function main() { throw new Error('refused by the hook'); }",
+            "export function main(ctx) { if (ctx.exec('/usr/bin/false').exitCode !== 0) throw new Error('the service would not start'); }",
         )],
     );
+    let (tested, report) = project.hooks_test(&package, &[]);
+    assert!(tested.status.success(), "{report:#}");
     let stub = bin.join(format!("xpack-installer{suffix}"));
     let built = project.run(&[
         "installer",
@@ -606,7 +615,12 @@ impl Project {
         let mut args = vec!["hooks", "test", package];
         args.extend_from_slice(extra);
         let ran = self.run(&args);
-        let report_file = self.path().join(package.replace(".xpkg", ".hooks-report.json"));
+        let suffix = if extra.contains(&"--all-users") {
+            ".hooks-report.all-users.json"
+        } else {
+            ".hooks-report.json"
+        };
+        let report_file = self.path().join(package.replace(".xpkg", suffix));
         let report = std::fs::read(&report_file)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -910,4 +924,435 @@ fn the_previous_releases_own_hooks_are_not_counted_against_this_package() {
     let (ran, report) = project.hooks_test(&package, &["--previous", &previous]);
     assert!(ran.status.success(), "{}\n{report:#}", stderr(&ran));
     assert_eq!(point(&report, "install.after")["result"], "succeeded", "{report:#}");
+}
+
+// --- the release gate ---
+
+const NOTHING: &str = "export function main() {}";
+
+impl Project {
+    fn installer(&self, package: &str) -> Output {
+        let stub = xpack()
+            .parent()
+            .unwrap()
+            .join(format!("xpack-installer{}", std::env::consts::EXE_SUFFIX));
+        self.run(&[
+            "installer",
+            package,
+            "--out",
+            "Demo-installer",
+            "--stub",
+            &stub.to_string_lossy(),
+        ])
+    }
+
+    fn index(&self, package: &str, extra: &[&str]) -> Output {
+        let mut args = vec!["index", package, "--out-dir", "updates"];
+        args.extend_from_slice(extra);
+        self.run(&args)
+    }
+}
+
+fn installer_parts_are_built() -> bool {
+    let bin = xpack().parent().unwrap().to_path_buf();
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let built = ["xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller"]
+        .iter()
+        .all(|name| bin.join(format!("{name}{suffix}")).is_file());
+    assert!(built || std::env::var_os("CI").is_none(), "the installer's programs are not built");
+    built
+}
+
+fn simple_hooks() -> serde_json::Value {
+    serde_json::json!({ "install": "xpack/hooks/n.js", "uninstall": "xpack/hooks/n.js" })
+}
+
+#[test]
+fn an_installer_is_not_built_from_a_package_whose_hooks_were_never_tested() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    let built = project.installer(&package);
+    assert!(!built.status.success());
+    let said = stderr(&built);
+    assert!(said.contains("no report beside it"), "{said}");
+    assert!(said.contains(&format!("xpack hooks test {package}")), "{said}");
+    assert!(!project.path().join("Demo-installer").exists(), "an installer was written");
+
+    let (tested, report) = project.hooks_test(&package, &[]);
+    assert!(tested.status.success(), "{report:#}");
+    let built = project.installer(&package);
+    assert!(built.status.success(), "{}", stderr(&built));
+}
+
+#[test]
+fn a_report_for_another_build_of_the_same_version_does_not_count() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&package, &[]).0.status.success());
+    // The same version built again, with a script that is not the one tested.
+    let rebuilt = project.pack_version(
+        "1.0.0",
+        &simple_hooks(),
+        &[("xpack/hooks/n.js", "export function main() { /* changed */ }")],
+    );
+    assert_eq!(rebuilt, package);
+    let built = project.installer(&package);
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("for another build"), "{}", stderr(&built));
+}
+
+#[test]
+fn a_failed_report_does_not_count() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version(
+        "1.0.0",
+        &simple_hooks(),
+        &[(
+            "xpack/hooks/n.js",
+            "export function main(ctx) { if (ctx.operation === 'install') throw new Error('no'); }",
+        )],
+    );
+    assert!(!project.hooks_test(&package, &[]).0.status.success());
+    let built = project.installer(&package);
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("failed: install.after"), "{}", stderr(&built));
+}
+
+#[test]
+fn a_delta_ships_its_target_packages_hooks_tested_or_not_at_all() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let base = project.pack_version("1.0.0", &serde_json::json!({}), &[]);
+    let target = project.pack_version("1.1.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    let delta = project.run(&["delta", &base, &target, "--out", "d.xpkgd"]);
+    assert!(!delta.status.success());
+    assert!(stderr(&delta).contains("no report beside it"), "{}", stderr(&delta));
+    assert!(project.hooks_test(&target, &[]).0.status.success());
+    let delta = project.run(&["delta", &base, &target, "--out", "d.xpkgd"]);
+    assert!(delta.status.success(), "{}", stderr(&delta));
+}
+
+#[test]
+fn an_index_needs_the_update_scenario_once_it_offers_an_earlier_release() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let first = project.pack_version("1.0.0", &serde_json::json!({}), &[]);
+    let published = project.index(&first, &[]);
+    assert!(published.status.success(), "{}", stderr(&published));
+
+    let hooks = serde_json::json!({
+        "update": "xpack/hooks/n.js",
+        "rollback": "xpack/hooks/n.js",
+    });
+    let second = project.pack_version("1.1.0", &hooks, &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&second, &[]).0.status.success());
+    let refused = project.index(&second, &["--accept-hook-changes"]);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("ran no update scenario"), "{}", stderr(&refused));
+
+    assert!(project.hooks_test(&second, &["--previous", &first]).0.status.success());
+    let published = project.index(&second, &["--accept-hook-changes"]);
+    assert!(published.status.success(), "{}", stderr(&published));
+}
+
+#[test]
+fn an_index_shows_and_refuses_hook_changes_unless_they_are_accepted() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let first = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&first, &[]).0.status.success());
+    let published = project.index(&first, &[]);
+    assert!(published.status.success(), "{}", stderr(&published));
+    let index = std::fs::read_to_string(
+        std::fs::read_dir(project.path().join("updates"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("stable.json"),
+    )
+    .unwrap();
+    assert!(index.contains("\"hooks\""), "the index does not record the release's hooks: {index}");
+
+    // The same hooks again: nothing to accept.
+    let same = project.pack_version("1.0.1", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&same, &[]).0.status.success());
+    let published = project.index(&same, &[]);
+    assert!(published.status.success(), "{}", stderr(&published));
+
+    // A changed script and a new permission.
+    let mut changed = simple_hooks();
+    changed["permissions"] = serde_json::json!({ "user": { "exec": ["agentctl"] } });
+    let next = project.pack_version(
+        "1.0.2",
+        &changed,
+        &[("xpack/hooks/n.js", "export function main() { /* v2 */ }")],
+    );
+    assert!(project.hooks_test(&next, &[]).0.status.success());
+    let refused = project.index(&next, &[]);
+    assert!(!refused.status.success());
+    let said = stderr(&refused);
+    assert!(said.contains("xpack/hooks/n.js changed"), "{said}");
+    assert!(said.contains("new permission, user: may run agentctl"), "{said}");
+    assert!(said.contains("--accept-hook-changes"), "{said}");
+
+    let accepted = project.index(&next, &["--accept-hook-changes"]);
+    assert!(accepted.status.success(), "{}", stderr(&accepted));
+    assert!(
+        stderr(&accepted).contains("new permission, user: may run agentctl"),
+        "{}",
+        stderr(&accepted)
+    );
+}
+
+#[test]
+fn a_mandatory_release_ships_only_after_a_real_run() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let config = serde_json::json!({
+        "application": { "id": "com.example.demo", "name": "Demo", "version": "1.0.0" },
+        "launch": { "executable": "bin/app" },
+        "update": { "mandatory": true },
+        "hooks": simple_hooks(),
+    });
+    std::fs::create_dir_all(project.path().join("payload/xpack/hooks")).unwrap();
+    std::fs::write(project.path().join("payload/xpack/hooks/n.js"), NOTHING).unwrap();
+    std::fs::write(project.path().join("xpack.json"), config.to_string()).unwrap();
+    assert!(project.pack().status.success());
+
+    assert!(project.hooks_test("demo.xpkg", &[]).0.status.success());
+    let built = project.installer("demo.xpkg");
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("--real"), "{}", stderr(&built));
+
+    assert!(project.hooks_test("demo.xpkg", &["--real"]).0.status.success());
+    let built = project.installer("demo.xpkg");
+    assert!(built.status.success(), "{}", stderr(&built));
+}
+
+#[test]
+fn a_sealed_package_is_tested_and_gated_like_any_other() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let config = serde_json::json!({
+        "application": { "id": "com.example.demo", "name": "Demo", "version": "1.0.0" },
+        "launch": { "executable": "bin/app" },
+        "protection": { "installer": true, "packages": true },
+        "hooks": simple_hooks(),
+    });
+    std::fs::create_dir_all(project.path().join("payload/xpack/hooks")).unwrap();
+    std::fs::write(project.path().join("payload/xpack/hooks/n.js"), NOTHING).unwrap();
+    std::fs::write(project.path().join("xpack.json"), config.to_string()).unwrap();
+    let with_password = |args: &[&str]| {
+        Command::new(xpack())
+            .current_dir(project.path())
+            .env("XPACK_PASSWORD", "correct horse battery staple")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let packed = with_password(&["pack", "payload", "--key", "signing.json", "--out", "demo.xpkg"]);
+    assert!(packed.status.success(), "{}", stderr(&packed));
+    let stub =
+        xpack().parent().unwrap().join(format!("xpack-installer{}", std::env::consts::EXE_SUFFIX));
+    let stub = stub.to_string_lossy().into_owned();
+    let installer = ["installer", "demo.xpkg", "--out", "Demo-installer", "--stub", stub.as_str()];
+    let built = with_password(&installer);
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("no report beside it"), "{}", stderr(&built));
+
+    let tested = with_password(&["hooks", "test", "demo.xpkg"]);
+    assert!(tested.status.success(), "{}", stderr(&tested));
+    assert!(project.path().join("demo.hooks-report.json").is_file());
+    let built = with_password(&installer);
+    assert!(built.status.success(), "{}", stderr(&built));
+}
+
+impl Project {
+    /// `xpack installer` with installer settings `ui`.
+    fn installer_with(&self, package: &str, ui: &serde_json::Value) -> Output {
+        std::fs::write(self.path().join("installer-ui.json"), ui.to_string()).unwrap();
+        let stub = xpack()
+            .parent()
+            .unwrap()
+            .join(format!("xpack-installer{}", std::env::consts::EXE_SUFFIX));
+        self.run(&[
+            "installer",
+            package,
+            "--out",
+            "Demo-installer",
+            "--stub",
+            &stub.to_string_lossy(),
+            "--ui",
+            "installer-ui.json",
+        ])
+    }
+}
+
+#[test]
+fn an_installer_for_everyone_as_well_needs_both_reports_and_one_only_for_everyone_needs_that_one() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&package, &[]).0.status.success());
+
+    let offer = serde_json::json!({ "allUsers": "offer" });
+    let built = project.installer_with(&package, &offer);
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("--all-users"), "{}", stderr(&built));
+    assert!(stderr(&built).contains("for an installation for everyone"), "{}", stderr(&built));
+
+    assert!(project.hooks_test(&package, &["--all-users"]).0.status.success());
+    let built = project.installer_with(&package, &offer);
+    assert!(built.status.success(), "{}", stderr(&built));
+
+    // Only for everyone: the one user's report is not needed.
+    std::fs::remove_file(project.path().join(package.replace(".xpkg", ".hooks-report.json")))
+        .unwrap();
+    let built = project.installer_with(&package, &serde_json::json!({ "allUsers": "always" }));
+    assert!(built.status.success(), "{}", stderr(&built));
+}
+
+#[test]
+fn an_index_written_afresh_compares_with_the_published_tree_named_by_current() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let first = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&first, &[]).0.status.success());
+    let published = project.run(&["index", &first, "--out-dir", "published"]);
+    assert!(published.status.success(), "{}", stderr(&published));
+
+    let mut hooks = simple_hooks();
+    hooks["update"] = serde_json::json!("xpack/hooks/n.js");
+    hooks["rollback"] = serde_json::json!("xpack/hooks/n.js");
+    hooks["permissions"] = serde_json::json!({ "user": { "exec": ["agentctl"] } });
+    let second = project.pack_version("1.1.0", &hooks, &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&second, &[]).0.status.success());
+
+    // A fresh directory and no --current: written, with a warning that
+    // nothing was compared, naming what the hooks may do.
+    let blind = project.run(&["index", &second, "--out-dir", "fresh-a"]);
+    assert!(blind.status.success(), "{}", stderr(&blind));
+    assert!(stderr(&blind).contains("nothing was compared"), "{}", stderr(&blind));
+    assert!(stderr(&blind).contains("user: run agentctl"), "{}", stderr(&blind));
+
+    // With --current, the update scenario is required, as an earlier release
+    // is published...
+    let refused = project.run(&[
+        "index",
+        &second,
+        "--out-dir",
+        "fresh-b",
+        "--current",
+        "published",
+        "--accept-hook-changes",
+    ]);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("ran no update scenario"), "{}", stderr(&refused));
+    // ...and the changes are compared and refused unless accepted.
+    assert!(project.hooks_test(&second, &["--previous", &first]).0.status.success());
+    let refused =
+        project.run(&["index", &second, "--out-dir", "fresh-c", "--current", "published"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("new permission, user: may run agentctl"),
+        "{}",
+        stderr(&refused)
+    );
+    let accepted = project.run(&[
+        "index",
+        &second,
+        "--out-dir",
+        "fresh-d",
+        "--current",
+        "published",
+        "--accept-hook-changes",
+    ]);
+    assert!(accepted.status.success(), "{}", stderr(&accepted));
+}
+
+#[test]
+fn current_must_be_a_directory_or_an_https_url() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&package, &[]).0.status.success());
+    let refused = project.run(&[
+        "index",
+        &package,
+        "--out-dir",
+        "o",
+        "--current",
+        "http://example.com/updates",
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("neither a directory nor an https URL"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+#[test]
+fn a_delta_of_a_package_with_update_hooks_needs_the_update_scenario() {
+    if !engine_is_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let base = project.pack_version("1.0.0", &serde_json::json!({}), &[]);
+    let mut hooks = simple_hooks();
+    hooks["update"] = serde_json::json!("xpack/hooks/n.js");
+    hooks["rollback"] = serde_json::json!("xpack/hooks/n.js");
+    let target = project.pack_version("1.1.0", &hooks, &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&target, &[]).0.status.success());
+    let delta = project.run(&["delta", &base, &target, "--out", "d.xpkgd"]);
+    assert!(!delta.status.success());
+    assert!(stderr(&delta).contains("ran no update scenario"), "{}", stderr(&delta));
+    assert!(project.hooks_test(&target, &["--previous", &base]).0.status.success());
+    let delta = project.run(&["delta", &base, &target, "--out", "d.xpkgd"]);
+    assert!(delta.status.success(), "{}", stderr(&delta));
+}
+
+#[test]
+fn a_report_of_the_other_scope_under_this_ones_name_does_not_count() {
+    if !engine_is_built() || !installer_parts_are_built() {
+        return;
+    }
+    let project = Project::new(&serde_json::json!({}), &[]);
+    let package = project.pack_version("1.0.0", &simple_hooks(), &[("xpack/hooks/n.js", NOTHING)]);
+    assert!(project.hooks_test(&package, &["--all-users"]).0.status.success());
+    std::fs::copy(
+        project.path().join(package.replace(".xpkg", ".hooks-report.all-users.json")),
+        project.path().join(package.replace(".xpkg", ".hooks-report.json")),
+    )
+    .unwrap();
+    let built = project.installer(&package);
+    assert!(!built.status.success());
+    assert!(stderr(&built).contains("tested the other scope"), "{}", stderr(&built));
 }
