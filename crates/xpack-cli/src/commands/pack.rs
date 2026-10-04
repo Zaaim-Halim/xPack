@@ -100,6 +100,11 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         None => args.out_dir.join(manifest.package_file_name()),
     };
 
+    // Before anything is built: a package whose hooks could never run is
+    // refused here, with the hook and the rule named, not on a user's machine.
+    let warnings = super::hooks::check_hooks(&manifest, &args.payload)?;
+    super::hooks::print_warnings(&warnings);
+
     // Second layer, by path rather than by content. `xpack-package` refuses a
     // recognisable xPack key file wherever it appears; this refuses *the key
     // being used right now* if it sits inside the tree being packaged, whatever

@@ -3,6 +3,7 @@
 pub(crate) mod activate;
 pub(crate) mod autoupdate;
 pub(crate) mod delta;
+pub(crate) mod hooks;
 pub(crate) mod index;
 pub(crate) mod inspect;
 pub(crate) mod install;
@@ -111,6 +112,14 @@ pub(crate) fn default_notifier() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-notify")
 }
 
+/// The `xpack-hook` binary sitting beside this executable, if there is one.
+///
+/// Offered to every install; placed in every installation, whether or not its
+/// package has hooks, so that one can receive them in an update.
+pub(crate) fn default_hook_engine() -> Option<std::path::PathBuf> {
+    sibling_binary("xpack-hook")
+}
+
 /// The `xpack-uninstaller` binary sitting beside this executable, if there is one.
 pub(crate) fn default_uninstaller() -> Option<std::path::PathBuf> {
     sibling_binary("xpack-uninstaller")
@@ -126,7 +135,8 @@ pub(crate) fn sibling_binary_required(name: &str) -> xpack_core::Result<std::pat
         xpack_core::Error::invalid(
             "binary",
             format!(
-                "{name} was not found beside this executable; build the workspace first, or                  pass it explicitly"
+                "{name} was not found beside this executable; build the workspace first, or \
+                 pass it explicitly"
             ),
         )
     })

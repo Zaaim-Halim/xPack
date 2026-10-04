@@ -510,7 +510,10 @@ fn resolve_binaries(args: &Args, manifest: &xpack_core::Manifest) -> Result<Vec<
         return Ok(args.binaries.clone());
     }
 
-    let mut wanted = vec!["xpack-launcher", "xpack-updater", "xpack-uninstaller"];
+    // `xpack-hook` in every installer, hooks or not: an installation whose
+    // first version has none can receive them in an update, which never
+    // brings the program that runs them.
+    let mut wanted = vec!["xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-hook"];
     // Only Windows distinguishes a windowed build; elsewhere it is a duplicate
     // of the console one and installing it would double the launcher bytes.
     if target == Os::Windows {
@@ -540,8 +543,10 @@ fn resolve_binaries(args: &Args, manifest: &xpack_core::Manifest) -> Result<Vec<
 /// macOS or Windows. The installer applies the same rule, so shipping the
 /// notice under any other condition would only add bytes nobody installs.
 fn wants_notice(manifest: &xpack_core::Manifest) -> bool {
-    manifest.update.notify
-        && manifest.update.check_while_running
+    // Or the package has hooks, whose start the dialog explains while they
+    // run: the rule the installer applies when it places one.
+    let prompts = manifest.update.notify && manifest.update.check_while_running;
+    (prompts || !manifest.hooks.is_empty())
         && matches!(manifest.platform.os, Os::Windows | Os::Macos)
 }
 
@@ -1004,6 +1009,16 @@ mod tests {
             assert!(!wants_notice(&manifest), "{os:?} announcing without checking while running");
             manifest.update.check_while_running = true;
             assert_eq!(wants_notice(&manifest), expected, "{os:?} announcing and checking");
+        }
+    }
+
+    #[test]
+    fn the_notice_is_shipped_for_hooks_whose_start_it_explains() {
+        for (os, expected) in [(Os::Macos, true), (Os::Windows, true), (Os::Linux, false)] {
+            let mut manifest = manifest_named("Demo");
+            manifest.platform.os = os;
+            manifest.hooks = serde_json::from_str(r#"{"update":"xpack/hooks/a.js"}"#).unwrap();
+            assert_eq!(wants_notice(&manifest), expected, "{os:?} with hooks, without a prompt");
         }
     }
 

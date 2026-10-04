@@ -348,10 +348,16 @@ jobs:
       # which is not the "not a dynamic executable" this once looked for — so
       # the check failed on a binary that was correct all along. A dependency
       # shows up as a `=>` line whatever wording the libc's ldd chooses.
+      # The program that runs hooks carries QuickJS, whose C is compiled for
+      # the target like ring's. Every installation gets it, on every
+      # distribution, so it must link statically too.
+      - name: Build the hook engine
+        run: cargo build --release --target x86_64-unknown-linux-musl -p xpack-hook
+
       - name: Verify the binaries are actually static
         run: |
           set -euo pipefail
-          for bin in xpack-launcher xpack; do
+          for bin in xpack-launcher xpack xpack-hook; do
             path="target/x86_64-unknown-linux-musl/release/$bin"
             file "$path"
             if ! file "$path" | grep -q "static"; then

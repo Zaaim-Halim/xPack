@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer xpack-hook; do
             path="target/${{ matrix.target }}/release/$bin"
             file "$path"
             # A binary depends on the system's libc exactly when it names a
@@ -144,7 +144,7 @@ jobs:
           fi
 
           mkdir -p "staging/$name"
-          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer; do
+          for bin in xpack cargo-xpack xpack-launcher xpack-updater xpack-uninstaller xpack-installer xpack-hook; do
             cp "$out/$bin$suffix" "staging/$name/"
           done
           # Only Windows distinguishes a windowed build, and only Windows
@@ -228,7 +228,8 @@ jobs:
           fi
           mkdir -p prebuilt
           for bin in xpack cargo-xpack xpack-launcher xpack-launcherw xpack-updater \
-                     xpack-uninstaller xpack-installer xpack-installerw xpack-notify; do
+                     xpack-uninstaller xpack-installer xpack-installerw xpack-notify \
+                     xpack-hook; do
             cp "$out/$bin$suffix" prebuilt/
           done
 

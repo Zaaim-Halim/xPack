@@ -866,7 +866,7 @@ fn installer_stub() -> PathBuf {
 ///
 /// CI runs `cargo build --workspace` first, so there they always run.
 fn installer_binaries_are_built() -> bool {
-    ["xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller"]
+    ["xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-hook"]
         .iter()
         .all(|name| binary_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX)).is_file())
 }
@@ -925,6 +925,10 @@ fn an_installer_installs_an_application_that_then_runs() {
         .output()
         .expect("the installer should run");
     assert!(ran.status.success(), "the installer failed: {}", stderr(&ran));
+    // Every installation gets the program that runs hooks, hooks or not.
+    let engine =
+        root.join("com.example.demo").join(format!("xpack-hook{}", std::env::consts::EXE_SUFFIX));
+    assert!(engine.is_file(), "the installer placed no xpack-hook");
 
     // Asking again says what installing again would do, with its exit code,
     // and changes nothing.
@@ -1478,8 +1482,14 @@ fn a_missing_notice_stops_the_installer_rather_than_leaving_it_out() {
     // A copy of `xpack` with every sibling it needs except the notice.
     let tools = fixture.path().join("tools");
     std::fs::create_dir_all(&tools).unwrap();
-    let mut siblings =
-        vec!["xpack", "xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller"];
+    let mut siblings = vec![
+        "xpack",
+        "xpack-installer",
+        "xpack-launcher",
+        "xpack-updater",
+        "xpack-uninstaller",
+        "xpack-hook",
+    ];
     if cfg!(windows) {
         siblings.extend(["xpack-installerw", "xpack-launcherw"]);
     }

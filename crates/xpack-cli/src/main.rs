@@ -55,6 +55,8 @@ enum Command {
     Delta(commands::delta::Args),
     /// Write the update index a server publishes.
     Index(commands::index::Args),
+    /// Check a project's hooks.
+    Hooks(commands::hooks::Args),
     /// Build a self-contained installer from a package.
     Installer(commands::installer::Args),
     /// Describe a package without trusting it.
@@ -96,6 +98,7 @@ impl Command {
             | Self::Pack(_)
             | Self::Delta(_)
             | Self::Index(_)
+            | Self::Hooks(_)
             | Self::Installer(_)
             | Self::Inspect(_)
             | Self::Verify(_) => None,
@@ -162,6 +165,7 @@ fn main() -> std::process::ExitCode {
         Command::Pack(a) => commands::pack::run(a),
         Command::Delta(a) => commands::delta::run(a),
         Command::Index(a) => commands::index::run(a),
+        Command::Hooks(a) => commands::hooks::run(a),
         Command::Installer(a) => commands::installer::run(a),
         Command::Inspect(a) => commands::inspect::run(a),
         Command::Verify(a) => commands::verify::run(a),

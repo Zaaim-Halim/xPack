@@ -266,9 +266,10 @@ fn install_from(
         command_roots: None,
         scope,
         seal_key,
-        // The installation's own, if it has one; `xpack` does not yet bring
-        // its own beside it.
-        hook_engine: None,
+        // The one beside `xpack`, even with `--no-launcher`: that leaves out
+        // the entry points, and a package's hooks still need the program that
+        // runs them. The installation's own when there is none beside `xpack`.
+        hook_engine: super::default_hook_engine(),
         cancel: None,
     };
     let installed = Installer::new(lock).install(&mut verified, &options)?;

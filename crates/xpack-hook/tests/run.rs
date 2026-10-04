@@ -566,13 +566,33 @@ fn check(scripts: &[&Path]) -> (i32, String) {
 }
 
 #[test]
-fn check_parses_a_script_and_runs_none_of_it() {
+fn check_loads_a_script_and_runs_none_of_its_main() {
     let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("good.js");
-    // Its top level throws: if any of it ran, the check would fail.
-    std::fs::write(&good, "throw new Error('ran'); export function main() {}").unwrap();
+    // `main` throws: had it run, the check would fail.
+    std::fs::write(&good, "export function main() { throw new Error('ran'); }").unwrap();
     let (code, err) = check(&[&good]);
     assert_eq!(code, 0, "{err}");
+}
+
+#[test]
+fn check_refuses_a_script_that_cannot_run_however_it_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        ("top-level.js", "throw new Error('at load'); export function main() {}", "at load"),
+        ("no-main.js", "export function start() {}", "no function main"),
+        ("not-a-function.js", "export const main = 3;", "no function main"),
+        ("imports.js", "import { x } from './other.js'; export function main() {}", ""),
+        ("loops.js", "for (;;) {} export function main() {}", "still running"),
+        ("never.js", "await new Promise(() => {}); export function main() {}", "never settle"),
+    ];
+    for (name, source, says) in cases {
+        let script = dir.path().join(name);
+        std::fs::write(&script, source).unwrap();
+        let (code, err) = check(&[&script]);
+        assert_eq!(code, 1, "{name} passed the check");
+        assert!(err.contains(name) && err.contains(says), "{name}: {err}");
+    }
 }
 
 #[test]

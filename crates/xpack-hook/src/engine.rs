@@ -57,17 +57,49 @@ pub fn run(request: &Request, source: &str) -> Outcome {
     })
 }
 
-/// Whether `source` parses as a hook script, without running any of it.
+/// How long loading a script may take when it is checked.
+const CHECK_SECONDS: u64 = 10;
+
+/// Whether `source` is a hook script that can run: it parses, it loads (its
+/// top level runs, which is safe without `ctx`: nothing in it can reach a
+/// file, a program or the network), it imports nothing, and it exports a
+/// function `main`. `main` itself is not run.
 ///
 /// What a version is checked with before it is accepted, so a script that
 /// cannot run is refused when it arrives rather than failing when it is due.
 pub fn check(name: &str, source: &str) -> Result<(), String> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("check".into())
+            .stack_size(THREAD_STACK)
+            .spawn_scoped(scope, || check_here(name, source))
+            .map_err(|e| format!("the script engine could not start: {e}"))?
+            .join()
+            .unwrap_or_else(|_| Err("the script engine stopped unexpectedly".into()))
+    })
+}
+
+fn check_here(name: &str, source: &str) -> Result<(), String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(MEMORY_LIMIT);
+    runtime.set_max_stack_size(ENGINE_STACK);
+    let deadline = Instant::now() + Duration::from_secs(CHECK_SECONDS);
+    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)));
     let context = Context::full(&runtime).map_err(|e| e.to_string())?;
-    context.with(|ctx| {
-        Module::declare(ctx.clone(), name, source).map(drop).map_err(|e| describe(&ctx, &e))
-    })
+    let loaded = context.with(|ctx| {
+        let declared =
+            Module::declare(ctx.clone(), name, source).map_err(|e| describe(&ctx, &e))?;
+        let (module, evaluated) = declared.eval().map_err(|e| describe(&ctx, &e))?;
+        evaluated.finish::<()>().map_err(|e| describe(&ctx, &e))?;
+        module
+            .get::<_, Function>("main")
+            .map(drop)
+            .map_err(|_| "it exports no function main".to_string())
+    });
+    if Instant::now() > deadline {
+        return Err(format!("loading it was still running after {CHECK_SECONDS} seconds"));
+    }
+    loaded
 }
 
 fn run_here(request: &Request, source: &str) -> Outcome {

@@ -43,6 +43,9 @@ pub(crate) struct ProjectConfig {
     /// How many copies of the application may run at once.
     #[serde(default, skip_serializing_if = "InstanceSpec::is_default")]
     pub(crate) instance: InstanceSpec,
+    /// Scripts of the payload to run at moments of an installation's life.
+    #[serde(default, skip_serializing_if = "xpack_core::hooks::Hooks::is_empty")]
+    pub(crate) hooks: xpack_core::hooks::Hooks,
     /// Whether the installer, and the packages, are locked with a password.
     #[serde(default, skip_serializing_if = "Protection::is_off")]
     pub(crate) protection: Protection,
@@ -119,7 +122,7 @@ impl ProjectConfig {
             command: self.command.clone(),
             commands: self.commands.clone(),
             instance: self.instance.clone(),
-            hooks: xpack_core::hooks::Hooks::default(),
+            hooks: self.hooks.clone(),
         };
         manifest.format_version = manifest.required_format_version();
         manifest
