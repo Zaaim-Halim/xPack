@@ -32,6 +32,16 @@
 //! instead would be a bug waiting to happen: the constant is compiled into the
 //! stub, so the stub's own read-only data contains it, and so might a
 //! compressed payload by coincidence.
+//!
+//! # A signed Windows installer ends with its signature
+//!
+//! Authenticode signing adds the signature after everything else in the file,
+//! so once a publisher has signed an installer the trailer is no longer last.
+//! The PE header records where the signature starts, and the trailer ends
+//! there, or up to seven zero bytes earlier: the signature starts on an
+//! eight-byte boundary and signing tools pad up to it. The signature covers
+//! the payload and the trailer, so a signed installer whose payload was
+//! changed also fails Windows' own check, before this code runs.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -271,27 +281,54 @@ pub fn locate(executable: &Path) -> Result<Source> {
     ))
 }
 
+/// The most zero bytes a signing tool puts between the trailer and the
+/// signature, to start the signature on an eight-byte boundary.
+const MAX_SIGNATURE_PADDING: u64 = 7;
+
 /// Reads the trailer from the end of `executable`, if there is one.
 fn locate_appended(executable: &Path) -> Result<Option<Source>> {
     let mut file = std::fs::File::open(executable).map_err(|e| Error::io(executable, e))?;
     let total = file.metadata().map_err(|e| Error::io(executable, e))?.len();
     let trailer_len = u64::try_from(TRAILER_LEN).expect("the trailer is a few dozen bytes");
-    if total <= trailer_len {
+
+    // Where the installer's own bytes end: before the signature when it has
+    // one, otherwise at the end of the file.
+    let signature = signature_start(&mut file, total).map_err(|e| Error::io(executable, e))?;
+    let (end, padding) = match signature {
+        Some(start) => (start, MAX_SIGNATURE_PADDING),
+        None => (total, 0),
+    };
+    if end <= trailer_len {
         return Ok(None);
     }
 
-    // Seek from the end. Searching the file for the magic would find the copy
-    // compiled into this very binary.
-    let back = i64::try_from(TRAILER_LEN).expect("the trailer is a few dozen bytes");
-    file.seek(SeekFrom::End(-back)).map_err(|e| Error::io(executable, e))?;
-    let mut bytes = vec![0u8; TRAILER_LEN];
+    // Read back from that end. Searching the file for the magic would find the
+    // copy compiled into this very binary.
+    let window = (trailer_len + padding).min(end);
+    let mut bytes = vec![0u8; usize::try_from(window).expect("a few dozen bytes")];
+    file.seek(SeekFrom::Start(end - window)).map_err(|e| Error::io(executable, e))?;
     file.read_exact(&mut bytes).map_err(|e| Error::io(executable, e))?;
 
-    let Some(trailer) = Trailer::parse(&bytes)? else {
+    // Each amount of padding the signing tool may have left, fewest first,
+    // as long as what it skips is zeros. The magic has no prefix that is also
+    // a suffix, so at most one of these positions can hold a trailer.
+    let mut found = None;
+    for skipped in 0..=usize::try_from(padding).expect("at most seven") {
+        let Some(stop) = bytes.len().checked_sub(skipped) else { break };
+        let Some(start) = stop.checked_sub(TRAILER_LEN) else { break };
+        if bytes[stop..].iter().any(|&b| b != 0) {
+            break;
+        }
+        if let Some(trailer) = Trailer::parse(&bytes[start..stop])? {
+            found = Some((trailer, skipped as u64));
+            break;
+        }
+    }
+    let Some((trailer, skipped)) = found else {
         return Ok(None);
     };
 
-    let payload_end = total - trailer_len;
+    let payload_end = end - skipped - trailer_len;
     let offset = payload_end.checked_sub(trailer.payload_len).ok_or_else(|| {
         Error::invalid(
             "installer",
@@ -307,6 +344,74 @@ fn locate_appended(executable: &Path) -> Result<Option<Source>> {
         length: trailer.payload_len,
         sha256: trailer.payload_sha256,
     }))
+}
+
+/// Where an Authenticode signature starts in `file`, if it is a signed PE.
+///
+/// `None` for anything else: an unsigned PE, an ELF or Mach-O stub, or a
+/// header that does not hold together. Every number comes from the file and
+/// is bounds-checked before use, and a signature counts only when it ends
+/// exactly at the end of the file, which is where signing puts it. The answer
+/// only says where to look for the trailer; it decides nothing about trust.
+fn signature_start(file: &mut std::fs::File, total: u64) -> std::io::Result<Option<u64>> {
+    // The offset of the PE header, at the end of the DOS header.
+    let Some(dos) = read_at(file, total, 0, 0x40)? else { return Ok(None) };
+    if dos[..2] != *b"MZ" {
+        return Ok(None);
+    }
+    let pe = u64::from(u32::from_le_bytes([dos[0x3C], dos[0x3D], dos[0x3E], dos[0x3F]]));
+
+    // "PE\0\0", then the COFF header, whose last-but-one field is the size
+    // of the optional header that follows it.
+    let Some(coff) = read_at(file, total, pe, 24)? else { return Ok(None) };
+    if coff[..4] != *b"PE\0\0" {
+        return Ok(None);
+    }
+    let optional_len = u64::from(u16::from_le_bytes([coff[20], coff[21]]));
+    let optional = pe + 24;
+
+    // The data directories start at a fixed place for each of the two
+    // optional-header formats. The security directory is the fifth.
+    let Some(magic) = read_at(file, total, optional, 2)? else { return Ok(None) };
+    let (count_at, directories) = match u16::from_le_bytes([magic[0], magic[1]]) {
+        0x10B => (92, 96),
+        0x20B => (108, 112),
+        _ => return Ok(None),
+    };
+    let entry = directories + 4 * 8;
+    if optional_len < entry + 8 {
+        return Ok(None);
+    }
+    let Some(count) = read_at(file, total, optional + count_at, 4)? else { return Ok(None) };
+    if u32::from_le_bytes([count[0], count[1], count[2], count[3]]) <= 4 {
+        return Ok(None);
+    }
+    let Some(security) = read_at(file, total, optional + entry, 8)? else { return Ok(None) };
+    let start = u64::from(u32::from_le_bytes([security[0], security[1], security[2], security[3]]));
+    let size = u64::from(u32::from_le_bytes([security[4], security[5], security[6], security[7]]));
+
+    if size == 0 || start.checked_add(size) != Some(total) {
+        return Ok(None);
+    }
+    Ok(Some(start))
+}
+
+/// `len` bytes of `file` at `offset`, or `None` when they would run past its
+/// `total` length.
+fn read_at(
+    file: &mut std::fs::File,
+    total: u64,
+    offset: u64,
+    len: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let fits = offset.checked_add(len as u64).is_some_and(|end| end <= total);
+    if !fits {
+        return Ok(None);
+    }
+    let mut bytes = vec![0u8; len];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 /// Reads the payload bytes a [`Source`] names, checking the declared digest.
