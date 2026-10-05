@@ -24,7 +24,9 @@
 //! normal order: sign the artefact you ship. The certificate belongs to the
 //! publisher, not to xPack, so xPack never handles it: with `--sign-command`
 //! it runs the publisher's own signing command on the finished Windows
-//! installer, then checks the result still installs. Whatever tool and
+//! installer, then checks the result still installs. Signing never stops a
+//! build: an installer that could not be signed is kept unsigned, with a
+//! warning; only one the command damaged fails the build. Whatever tool and
 //! certificate the publisher uses — a `.pfx`, a hardware token, a cloud
 //! signing service — is between them and that command. The Ed25519 signature
 //! xPack does care about is the one already inside the package.
@@ -107,8 +109,11 @@ pub(crate) struct Args {
     /// It is split into arguments at spaces, with double quotes keeping a
     /// part with spaces together, and run directly, not through a shell; for
     /// passwords from the environment, point it at a script of your own.
-    /// Afterwards the installer must carry a signature and still read its own
-    /// payload, or it is deleted and the build fails.
+    /// Signing never stops a build: if the command is unusable, the tool is
+    /// missing, it fails, or it signs nothing, the installer is built
+    /// unsigned with a warning (`--json` reports `codeSigned`). Only a command
+    /// that leaves an installer unable to read its own payload fails the
+    /// build, and that installer is deleted.
     #[arg(long, value_name = "COMMAND")]
     sign_command: Option<String>,
 
@@ -187,11 +192,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
 
     // Before anything is built, so a command that could never work does not
     // cost a whole build to find out.
-    let signer = args
-        .sign_command
-        .as_deref()
-        .map(|c| signing_command(c, manifest.platform.os))
-        .transpose()?;
+    let signer = prepare_signer(args.sign_command.as_deref(), manifest.platform.os);
 
     let stub = match &args.stub {
         Some(path) => path.clone(),
@@ -247,9 +248,10 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         }
     };
 
-    if let Some(signer) = &signer {
-        sign(&output, signer)?;
-    }
+    let code_signed = match &signer {
+        Some(signer) => sign(&output, signer)?,
+        None => false,
+    };
     let size = total_size(&output);
 
     if args.json {
@@ -261,7 +263,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
             platform: manifest.platform.to_string(),
             size,
             signed_by: signing_key,
-            code_signed: signer.is_some(),
+            code_signed,
         })?;
         return super::success();
     }
@@ -274,7 +276,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("size", super::pack::format_size(size));
     crate::output::field("binaries", binaries.len());
 
-    print_signing_note(target, signer.is_some());
+    print_signing_note(target, args.sign_command.is_some(), code_signed);
     super::success()
 }
 
@@ -347,23 +349,110 @@ fn signing_command(command: &str, target: Os) -> Result<Signer> {
     Ok(Signer { arguments })
 }
 
-/// Signs the installer at `output`, then checks it still installs.
+/// The signing command to run, checked before anything is built.
 ///
-/// Any failure deletes the installer: one that is unsigned, or signed but
-/// unable to read its own payload, must not be left where a release step
-/// would pick it up.
-fn sign(output: &Path, signer: &Signer) -> Result<()> {
-    let result = run_signer(output, signer).and_then(|()| check_signed(output));
-    if result.is_err() {
-        let _ = std::fs::remove_file(output);
+/// Signing never stops a build. A command that cannot work as written (no
+/// `{file}`, an installer that is not for Windows) or a signing tool that is
+/// not installed is a warning, said now, before the build, with what to fix
+/// or install; the installer is then built unsigned, as when no command was
+/// given, and `None` says so.
+fn prepare_signer(command: Option<&str>, target: Os) -> Option<Signer> {
+    const UNSIGNED: &str = "the installer will not be signed, so Windows will name its \
+                            publisher as unknown";
+    let command = command?;
+    let signer = match signing_command(command, target) {
+        Ok(signer) => signer,
+        Err(error) => {
+            xpack_core::errln!("warning: {error}; {UNSIGNED}.");
+            return None;
+        }
+    };
+    let program = &signer.arguments[0];
+    let found = if program.contains(['/', '\\']) {
+        Path::new(program).is_file()
+    } else {
+        xpack_platform::find_on_path(program).is_some()
+    };
+    if found {
+        return Some(signer);
     }
-    result
+    xpack_core::errln!(
+        "warning: the signing tool {program} was not found; {UNSIGNED}. {}",
+        install_hint(program)
+    );
+    None
 }
 
-fn run_signer(output: &Path, signer: &Signer) -> Result<()> {
-    let path = output.to_str().ok_or_else(|| {
-        Error::invalid("installer", format!("{} is not valid Unicode", output.display()))
-    })?;
+/// What to install for a signing tool that is not there, for the ones
+/// publishers use most; anything else gets the general advice.
+fn install_hint(program: &str) -> String {
+    let name = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or(program);
+    match name.to_ascii_lowercase().as_str() {
+        "signtool" => "signtool comes with the Windows SDK: install the SDK, or run the build \
+                       from a Developer Command Prompt, where it is on the PATH, or give its \
+                       full path. On macOS or Linux use osslsigncode or jsign instead."
+            .to_string(),
+        "osslsigncode" => "Install osslsigncode: `brew install osslsigncode` on macOS, \
+                           `sudo apt install osslsigncode` on Debian and Ubuntu."
+            .to_string(),
+        "jsign" => "Install jsign (https://ebourg.github.io/jsign/), which needs Java.".to_string(),
+        _ => format!("Install {name}, or give its full path in the signing command."),
+    }
+}
+
+/// Signs the installer at `output` with the publisher's command, and says
+/// whether it is now signed.
+///
+/// Best effort. A signing tool that is not installed, fails, or signs nothing
+/// leaves the installer unsigned, with a warning, and the build goes on: an
+/// unsigned installer still installs, and Windows only names its publisher as
+/// unknown. `--json` reports `codeSigned` for a release that insists.
+///
+/// What is never kept is an installer the command damaged. One that can no
+/// longer read its own payload is deleted and the build fails, signed or not,
+/// because a release step would otherwise ship it.
+fn sign(output: &Path, signer: &Signer) -> Result<bool> {
+    let ran = run_signer(output, signer);
+
+    let intact = xpack_installer::bundle::locate(output)
+        .and_then(|source| xpack_installer::bundle::read(output, &source));
+    if let Err(error) = intact {
+        let _ = std::fs::remove_file(output);
+        return Err(Error::invalid(
+            "--sign-command",
+            format!("left an installer that cannot read its own payload: {error}"),
+        ));
+    }
+
+    // Presence only: whether the certificate is trusted is decided by Windows
+    // on the machine that runs it, not here.
+    let has_signature = xpack_installer::bundle::is_signed(output)?;
+    let problem = match (ran, has_signature) {
+        (Ok(()), true) => return Ok(true),
+        (Ok(()), false) => format!(
+            "the signing command succeeded, but {} carries no Authenticode signature; check \
+             that it signs the file it is given",
+            output.display()
+        ),
+        (Err(reason), false) => reason,
+        (Err(reason), true) => format!(
+            "{reason}; {} carries a signature anyway, which may be incomplete: check it before \
+             shipping",
+            output.display()
+        ),
+    };
+    xpack_core::errln!(
+        "warning: {problem}. The installer is kept unsigned, so Windows will name its \
+         publisher as unknown."
+    );
+    Ok(false)
+}
+
+/// Runs the signing command, or says why it could not, or what it reported.
+fn run_signer(output: &Path, signer: &Signer) -> std::result::Result<(), String> {
+    let Some(path) = output.to_str() else {
+        return Err(format!("{} is not valid Unicode, so it cannot be signed", output.display()));
+    };
     let arguments: Vec<String> =
         signer.arguments.iter().map(|argument| argument.replace(FILE_PLACEHOLDER, path)).collect();
     let program = &arguments[0];
@@ -375,47 +464,33 @@ fn run_signer(output: &Path, signer: &Signer) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::io::stderr())
         .status()
-        .map_err(|e| Error::invalid("--sign-command", format!("could not run {program}: {e}")))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "the signing tool {program} was not found; is it installed and on the PATH?"
+                )
+            } else {
+                format!("could not run the signing tool {program}: {e}")
+            }
+        })?;
     if !status.success() {
-        return Err(Error::invalid(
-            "--sign-command",
-            format!("{program} failed ({status}); the installer was not signed"),
-        ));
-    }
-    Ok(())
-}
-
-/// Whether the signing command left a signed installer that still installs.
-///
-/// Presence only: whether the certificate is trusted is decided by Windows on
-/// the machine that runs it, not here.
-fn check_signed(output: &Path) -> Result<()> {
-    if !xpack_installer::bundle::is_signed(output)? {
-        return Err(Error::invalid(
-            "--sign-command",
-            format!(
-                "succeeded, but {} carries no Authenticode signature; check that the command \
-                 signs the file it is given",
-                output.display()
-            ),
-        ));
-    }
-    let readable = xpack_installer::bundle::locate(output)
-        .and_then(|source| xpack_installer::bundle::read(output, &source));
-    if let Err(error) = readable {
-        return Err(Error::invalid(
-            "--sign-command",
-            format!("left an installer that cannot read its own payload: {error}"),
-        ));
+        return Err(format!("the signing command {program} failed ({status})"));
     }
     Ok(())
 }
 
 /// Whether the installer was signed, or what the publisher must still do
 /// before distributing it.
-fn print_signing_note(target: Os, signed: bool) {
-    if signed {
-        crate::output::field("code signed", "yes");
+///
+/// When signing was asked for, the summary says plainly whether it happened:
+/// a warning printed above the summary is easy to scroll past, and an
+/// unsigned installer shipped by mistake is what this exists to prevent.
+fn print_signing_note(target: Os, asked: bool, signed: bool) {
+    if asked {
+        crate::output::field(
+            "code signed",
+            if signed { "yes" } else { "NO, see the warning above" },
+        );
         return;
     }
     xpack_core::errln!();

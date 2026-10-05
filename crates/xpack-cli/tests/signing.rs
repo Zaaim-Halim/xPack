@@ -4,8 +4,12 @@
 //! The stub is the minimal PE32+ that `xpack-installer`'s signed fixtures were
 //! built from, so these run on every machine. Signing for real needs
 //! `osslsigncode` and `openssl` on the PATH; without them those tests say they
-//! were skipped rather than passing quietly. The failure paths need neither:
+//! were skipped rather than passing quietly. The other paths need neither:
 //! they run commands every build machine has, this suite's own `xpack`.
+//!
+//! Signing is best effort: an installer that could not be signed is kept,
+//! unsigned, with a warning. Only an installer the command damaged fails the
+//! build.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -178,15 +182,61 @@ fn a_command_that_signs_something_else_in_its_place_is_caught() {
     assert!(!installer.exists(), "the broken installer was left behind");
 }
 
+/// An installer that was not signed is kept, works, says so, and warns why.
+fn assert_kept_unsigned(installer: &Path, output: &Output, reason: &str) {
+    assert!(output.status.success(), "the build failed: {}", stderr(output));
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("\"codeSigned\": false"), "{report}");
+    assert!(stderr(output).contains("warning:"), "{}", stderr(output));
+    assert!(stderr(output).contains(reason), "{}", stderr(output));
+    assert!(
+        stderr(output).contains("not be signed") || stderr(output).contains("kept unsigned"),
+        "{}",
+        stderr(output)
+    );
+    assert!(!xpack_installer::bundle::is_signed(installer).unwrap());
+    let source = xpack_installer::bundle::locate(installer).unwrap();
+    assert!(!xpack_installer::bundle::read(installer, &source).unwrap().is_empty());
+}
+
 #[test]
-fn a_failing_command_fails_the_build_and_leaves_no_installer() {
+fn a_signing_tool_that_is_not_installed_only_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let (installer, output) = build(dir.path(), "no-such-signing-tool sign {file}");
+    assert_kept_unsigned(&installer, &output, "no-such-signing-tool was not found");
+    assert!(stderr(&output).contains("Install no-such-signing-tool"), "{}", stderr(&output));
+}
+
+#[test]
+fn the_summary_says_plainly_when_the_installer_was_not_signed() {
+    // A warning scrolls away; the summary is what a person reads last.
+    let dir = tempfile::tempdir().unwrap();
+    let package = package(dir.path(), "windows");
+    let stub = stub(dir.path());
+    let output = xpack()
+        .arg("installer")
+        .arg(&package)
+        .arg("--stub")
+        .arg(&stub)
+        .arg("--binary")
+        .arg(&stub)
+        .arg("--out")
+        .arg(dir.path().join("Setup.exe"))
+        .args(["--sign-command", "no-such-signing-tool sign {file}"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(summary.contains("code signed    NO"), "{summary}");
+}
+
+#[test]
+fn a_failing_signing_command_only_warns() {
     let dir = tempfile::tempdir().unwrap();
     // `xpack inspect` refuses an installer: it is not a package.
     let command = format!(r#""{}" inspect {{file}}"#, env!("CARGO_BIN_EXE_xpack"));
     let (installer, output) = build(dir.path(), &command);
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("the installer was not signed"), "{}", stderr(&output));
-    assert!(!installer.exists(), "an unsigned installer was left where a release would take it");
+    assert_kept_unsigned(&installer, &output, "failed");
 }
 
 #[test]
@@ -195,31 +245,18 @@ fn a_command_that_succeeds_without_signing_is_not_taken_at_its_word() {
     // Exits 0 and touches nothing.
     let command = format!(r#""{}" --version {{file}}"#, env!("CARGO_BIN_EXE_xpack"));
     let (installer, output) = build(dir.path(), &command);
-    assert!(!output.status.success(), "an unsigned installer was reported as signed");
-    assert!(stderr(&output).contains("carries no Authenticode signature"), "{}", stderr(&output));
-    assert!(!installer.exists());
+    assert_kept_unsigned(&installer, &output, "carries no Authenticode signature");
 }
 
 #[test]
-fn a_program_that_does_not_exist_is_reported_by_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let (installer, output) = build(dir.path(), "no-such-signing-tool sign {file}");
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("could not run no-such-signing-tool"), "{}", stderr(&output));
-    assert!(!installer.exists());
-}
-
-#[test]
-fn a_command_that_never_names_the_installer_is_refused_before_building() {
+fn a_command_that_never_names_the_installer_only_warns() {
     let dir = tempfile::tempdir().unwrap();
     let (installer, output) = build(dir.path(), "signtool sign /a");
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("{file}"), "{}", stderr(&output));
-    assert!(!installer.exists());
+    assert_kept_unsigned(&installer, &output, "{file}");
 }
 
 #[test]
-fn signing_is_refused_for_an_installer_that_is_not_for_windows() {
+fn signing_an_installer_that_is_not_for_windows_only_warns() {
     let dir = tempfile::tempdir().unwrap();
     let package = package(dir.path(), "linux");
     let output = xpack()
@@ -234,6 +271,7 @@ fn signing_is_refused_for_an_installer_that_is_not_for_windows() {
         .args(["--sign-command", "signtool sign {file}"])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(output.status.success(), "{}", stderr(&output));
     assert!(stderr(&output).contains("signs Windows installers"), "{}", stderr(&output));
+    assert!(dir.path().join("installer").is_file(), "no installer was built");
 }
