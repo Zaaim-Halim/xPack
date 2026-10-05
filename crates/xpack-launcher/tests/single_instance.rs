@@ -144,15 +144,15 @@ impl World {
     /// Starts the application and leaves it running, once it has started.
     fn start(&mut self, arguments: &[&str]) {
         let before = self.starts().len();
-        let child = self.command(arguments).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-        self.running.push(child.unwrap());
+        let child = spawn(self.command(arguments).stdout(Stdio::null()).stderr(Stdio::null()));
+        self.running.push(child);
         self.wait_for_starts(before + 1);
     }
 
     /// Starts the application and waits for that start to finish.
     fn start_and_wait(&self, arguments: &[&str]) -> Output {
         let mut child =
-            self.command(arguments).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            spawn(self.command(arguments).stdout(Stdio::piped()).stderr(Stdio::piped()));
         let deadline = Instant::now() + Duration::from_secs(10);
         while child.try_wait().unwrap().is_none() {
             if Instant::now() > deadline {
@@ -211,6 +211,27 @@ impl Drop for World {
 
 fn inbox_of(paths: &InstallPaths) -> String {
     paths.instance_inbox_dir().display().to_string()
+}
+
+/// Starts `command`, retrying while Linux reports the program busy.
+///
+/// Linux refuses to execute a file some process still holds open for
+/// writing, and a child forked by another test thread while a program was
+/// being written keeps a copy of that handle until it execs. That lasts
+/// milliseconds, so it is retried rather than reported.
+fn spawn(command: &mut Command) -> Child {
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result.unwrap(),
+        }
+    }
 }
 
 #[test]
@@ -301,8 +322,8 @@ fn a_start_that_arrives_while_the_first_is_still_starting_is_not_lost() {
     fs::write(world.paths.instance_record_file(), r#"{"pid":1}"#).unwrap();
 
     let installation = InstallLock::acquire(&world.paths).unwrap();
-    let first = world.command(&["first"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-    world.running.push(first.unwrap());
+    let first = spawn(world.command(&["first"]).stdout(Stdio::null()).stderr(Stdio::null()));
+    world.running.push(first);
     let deadline = Instant::now() + Duration::from_secs(10);
     // An error is "not yet" too: macOS briefly refuses the file while it
     // checks a newly copied executable on its first run.
@@ -384,8 +405,8 @@ fn a_command_running_with_no_copy_open_does_not_become_the_running_copy() {
     // Were it to take the instance lock, the window opened while it runs
     // would be handed over to a command, and never appear.
     let mut world = World::alongside(&["--hold"]);
-    let command = world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-    world.running.push(command.unwrap());
+    let command = spawn(world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()));
+    world.running.push(command);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !world.paths.root().join("commands.log").exists() {
         assert!(Instant::now() < deadline, "the command never ran");
@@ -520,8 +541,8 @@ fn a_second_copy_keeps_an_installer_out_after_the_first_has_gone() {
 #[test]
 fn a_command_running_beside_the_window_keeps_an_installer_out() {
     let mut world = World::alongside(&["--hold"]);
-    let command = world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-    world.running.push(command.unwrap());
+    let command = spawn(world.command(&["--hold"]).stdout(Stdio::null()).stderr(Stdio::null()));
+    world.running.push(command);
     eventually("the command never ran", || world.paths.root().join("commands.log").exists());
 
     assert!(!an_installer_could_replace(&world.paths), "an installer was let in during a command");
@@ -532,8 +553,8 @@ fn a_start_waits_while_an_installer_replaces_the_programs() {
     let mut world = World::new(false);
     let installer = xpack_platform::PresenceLock::exclusive(&world.paths).unwrap().unwrap();
 
-    let start = world.command(&["waited"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-    world.running.push(start.unwrap());
+    let start = spawn(world.command(&["waited"]).stdout(Stdio::null()).stderr(Stdio::null()));
+    world.running.push(start);
     std::thread::sleep(Duration::from_secs(1));
     assert!(world.starts().is_empty(), "it started in the middle of a replacement");
 
@@ -547,8 +568,7 @@ fn a_start_that_meets_a_replacement_still_going_says_so_and_starts_nothing() {
     let world = World::new(false);
     let _installer = xpack_platform::PresenceLock::exclusive(&world.paths).unwrap().unwrap();
 
-    let mut start =
-        world.command(&[]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut start = spawn(world.command(&[]).stdout(Stdio::piped()).stderr(Stdio::piped()));
     // It waits fifteen seconds for the installer before giving up.
     let deadline = Instant::now() + Duration::from_secs(40);
     while start.try_wait().unwrap().is_none() {

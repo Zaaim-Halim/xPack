@@ -164,7 +164,7 @@ fn an_installer_signed_by_the_publishers_command_is_signed_and_still_installs() 
 
     // And the installer still finds, and checks, what it carries.
     let source = xpack_installer::bundle::locate(&installer).unwrap();
-    assert!(!xpack_installer::bundle::read(&installer, &source).unwrap().is_empty());
+    assert_ne!(xpack_installer::bundle::read(&installer, &source).unwrap().len(), 0);
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn assert_kept_unsigned(installer: &Path, output: &Output, reason: &str) {
     );
     assert!(!xpack_installer::bundle::is_signed(installer).unwrap());
     let source = xpack_installer::bundle::locate(installer).unwrap();
-    assert!(!xpack_installer::bundle::read(installer, &source).unwrap().is_empty());
+    assert_ne!(xpack_installer::bundle::read(installer, &source).unwrap().len(), 0);
 }
 
 #[test]
