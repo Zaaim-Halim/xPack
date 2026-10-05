@@ -54,12 +54,26 @@ public sealed class EndToEndTests : IDisposable
         return directory?.FullName ?? throw new InvalidOperationException("not inside the xPack repository");
     }
 
+    /// <summary>
+    /// The folder holding the xpack command line, or null to skip.
+    /// </summary>
+    /// <remarks>
+    /// With <c>XPACK_DOTNET_REQUIRE_XPACK</c> set, as CI sets it, a missing
+    /// xpack fails instead: a skip is not a failure, so a broken setup would
+    /// otherwise pass these tests by never running them.
+    /// </remarks>
     private static string? XPackHome()
     {
         var home = Environment.GetEnvironmentVariable("XPACK_HOME")
             ?? Path.Combine(RepositoryRoot(), "target", "debug");
         var executable = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
-        return File.Exists(executable) ? home : null;
+        if (File.Exists(executable))
+        {
+            return home;
+        }
+        Assert.True(Environment.GetEnvironmentVariable("XPACK_DOTNET_REQUIRE_XPACK") is null or "",
+            $"no xpack at {executable}, and XPACK_DOTNET_REQUIRE_XPACK forbids skipping");
+        return null;
     }
 
     private static string HostRuntimeIdentifier()

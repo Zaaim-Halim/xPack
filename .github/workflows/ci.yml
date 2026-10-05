@@ -75,6 +75,23 @@ jobs:
           # fail rather than skip if it is not.
           XPACK_TEST_REQUIRE_ELEVATED: ${{ runner.os == 'Windows' && '1' || '' }}
 
+      # The .NET integration, end to end against the xpack just built: a
+      # fresh application published through XPack.Build, packed, installed
+      # and run, and its installer built and run silently. On Windows this is
+      # also where the installer-signing warning path runs.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test the .NET integration
+        shell: bash
+        run: dotnet test integrations/dotnet/XPack.Build.Tests
+        env:
+          XPACK_HOME: ${{ github.workspace }}/target/debug
+          # Without xpack the end-to-end tests skip; here that would be a
+          # broken setup passing, so it fails instead.
+          XPACK_DOTNET_REQUIRE_XPACK: '1'
+
       # Installing for every user needs administrator rights, so those tests
       # skip in the run above on macOS and Linux and run here as root. The
       # test binary is built as the runner's user and only run with sudo, so
@@ -142,6 +159,68 @@ jobs:
           fi
 
           echo "smoke test passed on ${{ matrix.os }}"
+
+
+  # A .NET developer cross-builds: one machine publishes for every platform.
+  # Building is not proof a package runs, so each package built on Linux is
+  # installed and started on its own OS. The macOS runner is Apple Silicon,
+  # which refuses an arm64 program without a code signature; whether the .NET
+  # SDK signs one it cross-builds on Linux is what this settles.
+  dotnet-cross-build:
+    name: dotnet / cross-build on Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dotnet-cross-build
+      - name: Build xpack
+        run: cargo build -p xpack-cli --bin xpack
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish the sample for every platform
+        run: integrations/dotnet/ci/cross-build.sh target/debug dotnet-cross linux-x64 win-x64 osx-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-cross
+          path: dotnet-cross/
+          if-no-files-found: error
+
+  dotnet-cross-run:
+    name: dotnet / cross-run / ${{ matrix.platform }}
+    needs: dotnet-cross-build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-latest
+            platform: macos-arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dotnet-cross-run-${{ matrix.os }}
+      # Installing needs the launcher and the other runtime programs beside
+      # xpack, not only xpack itself.
+      - name: Build xpack and its runtime programs
+        run: cargo build --workspace --bins
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotnet-cross
+          path: dotnet-cross
+      - name: Install and run the package built on Linux
+        run: integrations/dotnet/ci/cross-run.sh target/debug dotnet-cross ${{ matrix.platform }}
 
   shortcut:
     name: windows shortcut resolves
