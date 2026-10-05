@@ -21,9 +21,13 @@
 //!
 //! Appending invalidates an Authenticode signature just as it does a Mach-O
 //! one, so the stub must be signed *after* assembly, never before. That is the
-//! normal order: sign the artefact you ship. This command does no signing —
-//! the certificates belong to the publisher, not to xPack — and the Ed25519
-//! signature it does care about is the one already inside the package.
+//! normal order: sign the artefact you ship. The certificate belongs to the
+//! publisher, not to xPack, so xPack never handles it: with `--sign-command`
+//! it runs the publisher's own signing command on the finished Windows
+//! installer, then checks the result still installs. Whatever tool and
+//! certificate the publisher uses — a `.pfx`, a hardware token, a cloud
+//! signing service — is between them and that command. The Ed25519 signature
+//! xPack does care about is the one already inside the package.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -95,6 +99,19 @@ pub(crate) struct Args {
     #[arg(long)]
     console: bool,
 
+    /// Sign a Windows installer with this command once it is built.
+    ///
+    /// The publisher's own signing command, with `{file}` where the
+    /// installer's path goes, for example
+    /// `signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f cert.pfx {file}`.
+    /// It is split into arguments at spaces, with double quotes keeping a
+    /// part with spaces together, and run directly, not through a shell; for
+    /// passwords from the environment, point it at a script of your own.
+    /// Afterwards the installer must carry a signature and still read its own
+    /// payload, or it is deleted and the build fails.
+    #[arg(long, value_name = "COMMAND")]
+    sign_command: Option<String>,
+
     /// Do not make the installed version active.
     #[arg(long)]
     no_activate: bool,
@@ -126,6 +143,8 @@ struct InstallerReport<'a> {
     platform: String,
     size: u64,
     signed_by: String,
+    /// Whether `--sign-command` signed the installer.
+    code_signed: bool,
 }
 
 /// Runs `xpack installer`.
@@ -165,6 +184,14 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         activate: !args.no_activate,
         ui,
     };
+
+    // Before anything is built, so a command that could never work does not
+    // cost a whole build to find out.
+    let signer = args
+        .sign_command
+        .as_deref()
+        .map(|c| signing_command(c, manifest.platform.os))
+        .transpose()?;
 
     let stub = match &args.stub {
         Some(path) => path.clone(),
@@ -220,6 +247,9 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
         }
     };
 
+    if let Some(signer) = &signer {
+        sign(&output, signer)?;
+    }
     let size = total_size(&output);
 
     if args.json {
@@ -231,6 +261,7 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
             platform: manifest.platform.to_string(),
             size,
             signed_by: signing_key,
+            code_signed: signer.is_some(),
         })?;
         return super::success();
     }
@@ -243,23 +274,164 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     crate::output::field("size", super::pack::format_size(size));
     crate::output::field("binaries", binaries.len());
 
-    print_signing_note(target);
+    print_signing_note(target, signer.is_some());
     super::success()
 }
 
-/// What the publisher must still do before distributing the installer.
-fn print_signing_note(target: Os) {
+/// The publisher's signing command, split into a program and its arguments.
+///
+/// Split here rather than by a shell, so it means the same on every build
+/// machine: spaces separate, double quotes keep a part with spaces together
+/// and are removed, and nothing else is special. A backslash stays a
+/// backslash, which is what a Windows path needs.
+struct Signer {
+    arguments: Vec<String>,
+}
+
+/// Where the installer's path goes in a signing command.
+const FILE_PLACEHOLDER: &str = "{file}";
+
+fn signing_command(command: &str, target: Os) -> Result<Signer> {
+    if target != Os::Windows {
+        return Err(Error::invalid(
+            "--sign-command",
+            format!(
+                "signs Windows installers; a {target} installer is signed with that platform's \
+                 own tools after this step"
+            ),
+        ));
+    }
+
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in command.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    arguments.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if quoted {
+        return Err(Error::invalid("--sign-command", "has a quote that is never closed"));
+    }
+    if started {
+        arguments.push(current);
+    }
+
+    if arguments.is_empty() {
+        return Err(Error::invalid("--sign-command", "is empty"));
+    }
+    // A command that never names the installer signs something else, and the
+    // check afterwards would only say the installer is unsigned.
+    if !arguments.iter().any(|argument| argument.contains(FILE_PLACEHOLDER)) {
+        return Err(Error::invalid(
+            "--sign-command",
+            format!(
+                "does not say where the installer goes; put {FILE_PLACEHOLDER} where its path belongs"
+            ),
+        ));
+    }
+    Ok(Signer { arguments })
+}
+
+/// Signs the installer at `output`, then checks it still installs.
+///
+/// Any failure deletes the installer: one that is unsigned, or signed but
+/// unable to read its own payload, must not be left where a release step
+/// would pick it up.
+fn sign(output: &Path, signer: &Signer) -> Result<()> {
+    let result = run_signer(output, signer).and_then(|()| check_signed(output));
+    if result.is_err() {
+        let _ = std::fs::remove_file(output);
+    }
+    result
+}
+
+fn run_signer(output: &Path, signer: &Signer) -> Result<()> {
+    let path = output.to_str().ok_or_else(|| {
+        Error::invalid("installer", format!("{} is not valid Unicode", output.display()))
+    })?;
+    let arguments: Vec<String> =
+        signer.arguments.iter().map(|argument| argument.replace(FILE_PLACEHOLDER, path)).collect();
+    let program = &arguments[0];
+
+    // The command's own output goes to stderr, where a person reads it, so
+    // `--json` still prints nothing but the report.
+    let status = std::process::Command::new(program)
+        .args(&arguments[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::io::stderr())
+        .status()
+        .map_err(|e| Error::invalid("--sign-command", format!("could not run {program}: {e}")))?;
+    if !status.success() {
+        return Err(Error::invalid(
+            "--sign-command",
+            format!("{program} failed ({status}); the installer was not signed"),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the signing command left a signed installer that still installs.
+///
+/// Presence only: whether the certificate is trusted is decided by Windows on
+/// the machine that runs it, not here.
+fn check_signed(output: &Path) -> Result<()> {
+    if !xpack_installer::bundle::is_signed(output)? {
+        return Err(Error::invalid(
+            "--sign-command",
+            format!(
+                "succeeded, but {} carries no Authenticode signature; check that the command \
+                 signs the file it is given",
+                output.display()
+            ),
+        ));
+    }
+    let readable = xpack_installer::bundle::locate(output)
+        .and_then(|source| xpack_installer::bundle::read(output, &source));
+    if let Err(error) = readable {
+        return Err(Error::invalid(
+            "--sign-command",
+            format!("left an installer that cannot read its own payload: {error}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the installer was signed, or what the publisher must still do
+/// before distributing it.
+fn print_signing_note(target: Os, signed: bool) {
+    if signed {
+        crate::output::field("code signed", "yes");
+        return;
+    }
     xpack_core::errln!();
-    if target == Os::Macos {
-        xpack_core::errln!(
+    match target {
+        Os::Macos => xpack_core::errln!(
             "note: sign and notarise this bundle before distributing it; macOS blocks an \
              unsigned downloaded installer."
-        );
-    } else {
-        xpack_core::errln!(
+        ),
+        Os::Windows => xpack_core::errln!(
+            "note: unsigned, so Windows will name its publisher as unknown; with a code-signing \
+             certificate, --sign-command signs it as part of this step."
+        ),
+        Os::Linux => xpack_core::errln!(
             "note: sign this installer if you distribute it, and sign it *after* this step — \
              appending the payload invalidates a signature applied to the stub."
-        );
+        ),
     }
 }
 
@@ -927,6 +1099,28 @@ mod tests {
         // One build elsewhere, whatever was asked.
         assert_eq!(stub_name(Os::Macos, false), "xpack-installer");
         assert_eq!(stub_name(Os::Linux, true), "xpack-installer");
+    }
+
+    fn split(command: &str) -> Vec<String> {
+        signing_command(command, Os::Windows).unwrap().arguments
+    }
+
+    #[test]
+    fn a_signing_command_keeps_windows_paths_and_quoted_spaces() {
+        assert_eq!(
+            split(r#"signtool sign /f "C:\My Certs\cert.pfx"  /fd sha256 {file}"#),
+            ["signtool", "sign", "/f", r"C:\My Certs\cert.pfx", "/fd", "sha256", "{file}"]
+        );
+        // A quoted part can sit inside an argument, and can be empty.
+        assert_eq!(split(r#"tool /p:"a b" "" {file}"#), ["tool", "/p:a b", "", "{file}"]);
+        assert_eq!(split("tool --in={file}"), ["tool", "--in={file}"]);
+    }
+
+    #[test]
+    fn a_signing_command_that_cannot_be_split_or_names_no_file_is_refused() {
+        for command in ["", "   ", r#"signtool sign "{file}"#, "signtool sign /a"] {
+            assert!(signing_command(command, Os::Windows).is_err(), "{command:?} was accepted");
+        }
     }
 
     #[test]

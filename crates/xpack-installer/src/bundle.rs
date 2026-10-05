@@ -346,6 +346,19 @@ fn locate_appended(executable: &Path) -> Result<Option<Source>> {
     }))
 }
 
+/// Whether `executable` is a PE carrying an Authenticode signature.
+///
+/// Says only that a signature is there, laid out where signing puts one. It
+/// does not check the signature or the certificate: that is Windows' job when
+/// the file is run, and a build machine has no business deciding which
+/// certificates a user's machine trusts.
+pub fn is_signed(executable: &Path) -> Result<bool> {
+    let mut file = std::fs::File::open(executable).map_err(|e| Error::io(executable, e))?;
+    let total = file.metadata().map_err(|e| Error::io(executable, e))?.len();
+    let start = signature_start(&mut file, total).map_err(|e| Error::io(executable, e))?;
+    Ok(start.is_some())
+}
+
 /// Where an Authenticode signature starts in `file`, if it is a signed PE.
 ///
 /// `None` for anything else: an unsigned PE, an ELF or Mach-O stub, or a

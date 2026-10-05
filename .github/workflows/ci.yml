@@ -60,6 +60,13 @@ jobs:
         shell: bash
         run: echo 'XPACK_TEST_PE=${{ github.workspace }}\target\debug\xpack.exe' >> "$GITHUB_ENV"
 
+      # The `--sign-command` tests sign an installer for real with
+      # osslsigncode and a throwaway certificate, and skip where it is not
+      # installed. Here, so at least one platform runs them on every push.
+      - name: Install a signing tool for the installer signing tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y osslsigncode
+
       - name: Test
         run: cargo test --workspace --all-targets
         env:

@@ -46,6 +46,15 @@ fn payload_of(path: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn a_signature_is_recognised_only_where_signing_puts_one() {
+    assert!(bundle::is_signed(&fixture("aligned.exe")).unwrap());
+    assert!(bundle::is_signed(&fixture("padded.exe")).unwrap());
+    assert!(!bundle::is_signed(&fixture("unsigned.exe")).unwrap());
+    let (_dir, path) = altered("aligned.exe", |bytes| bytes.push(0));
+    assert!(!bundle::is_signed(&path).unwrap());
+}
+
+#[test]
 fn a_signed_installer_still_finds_its_payload() {
     assert_eq!(payload_of(&fixture("aligned.exe")), ALIGNED_PAYLOAD);
 }
