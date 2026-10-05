@@ -290,7 +290,7 @@ impl App {
         if buttons.retry != Visibility::Hidden {
             side(Key::Retry, sel!(retry:));
         } else if buttons.launch_existing != Visibility::Hidden {
-            side(Key::Launch, sel!(launchExisting:));
+            side(Key::LaunchExisting, sel!(launchExisting:));
         } else if buttons.close_application != Visibility::Hidden {
             side(Key::CloseApplication, sel!(closeApplication:));
         }

@@ -34,6 +34,9 @@ const NEXT_X: i32 = CANCEL_X - 10 - BUTTON_WIDTH;
 const BACK_X: i32 = NEXT_X - BUTTON_WIDTH;
 /// How many lines of text the busiest page uses.
 const LINES: usize = 12;
+/// The application's icon on the banner, and in the header of the other pages.
+const PICTURE: i32 = 96;
+const BADGE: i32 = 40;
 
 /// What a clicked control means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +65,8 @@ pub(super) struct Controls {
     bold: nwg::Font,
     large: nwg::Font,
     icon: nwg::Icon,
-    picture: nwg::Bitmap,
+    picture: nwg::Icon,
+    badge: nwg::Icon,
     has_picture: bool,
     image: nwg::ImageFrame,
     heading: nwg::Label,
@@ -102,13 +106,21 @@ impl Controls {
         let has_icon = icon.is_some_and(|bytes| {
             nwg::Icon::builder().source_bin(Some(bytes)).strict(true).build(&mut c.icon).is_ok()
         });
+        // The same icon again at the two sizes the pages draw it. An image
+        // frame centres its image at the image's own size and never scales
+        // it, so an icon loaded at full size (256 pixels for a typical .ico)
+        // shows only its middle. Icons rather than bitmaps, because a
+        // bitmap frame does not draw transparency.
         c.has_picture = icon.is_some_and(|bytes| {
-            nwg::Bitmap::builder()
-                .source_bin(Some(bytes))
-                .size(Some((96, 96)))
-                .strict(true)
-                .build(&mut c.picture)
-                .is_ok()
+            [(&mut c.picture, PICTURE), (&mut c.badge, BADGE)].into_iter().all(|(out, size)| {
+                let pixels = physical(size);
+                nwg::Icon::builder()
+                    .source_bin(Some(bytes))
+                    .size(Some((pixels, pixels)))
+                    .strict(true)
+                    .build(out)
+                    .is_ok()
+            })
         });
 
         nwg::Window::builder()
@@ -122,7 +134,7 @@ impl Controls {
 
         let window = &c.window;
         nwg::ImageFrame::builder()
-            .bitmap(c.has_picture.then_some(&c.picture))
+            .icon(c.has_picture.then_some(&c.picture))
             .parent(window)
             .build(&mut c.image)?;
         label(window, &c.large, &mut c.heading)?;
@@ -235,7 +247,8 @@ impl Controls {
 
     fn exterior(&self) {
         if self.has_picture {
-            place(&self.image, (BANNER - 96) / 2, 40, 96, 96);
+            self.image.set_icon(Some(&self.picture));
+            place(&self.image, (BANNER - PICTURE) / 2, 40, PICTURE, PICTURE);
         }
     }
 
@@ -251,7 +264,8 @@ impl Controls {
         text(&self.heading, &texts.line(title), 16, 10, WIDTH - 90, 20);
         text(&self.subtitle, &texts.get(subtitle).unwrap_or_default(), 32, 32, WIDTH - 110, 20);
         if self.has_picture {
-            place(&self.image, WIDTH - 56, 9, 40, 40);
+            self.image.set_icon(Some(&self.badge));
+            place(&self.image, WIDTH - 16 - BADGE, 9, BADGE, BADGE);
         }
     }
 
@@ -389,7 +403,7 @@ impl Controls {
         if buttons.retry != Visibility::Hidden {
             button(&self.retry, &texts.line(Key::Retry), side, y, 120, true);
         } else if buttons.launch_existing != Visibility::Hidden {
-            button(&self.launch_existing, &texts.line(Key::Launch), side, y, 120, true);
+            button(&self.launch_existing, &texts.line(Key::LaunchExisting), side, y, 120, true);
         } else if buttons.close_application != Visibility::Hidden {
             button(&self.close_application, &texts.line(Key::CloseApplication), side, y, 120, true);
         }
@@ -563,6 +577,14 @@ placeable!(
     nwg::ProgressBar,
     nwg::ImageFrame
 );
+
+/// A length in the window's layout units, in screen pixels. Positions and
+/// sizes given to controls are scaled for the display; an icon's size is not,
+/// so without this it would sit small inside its frame on a scaled display.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // A few hundred pixels at most.
+fn physical(length: i32) -> u32 {
+    (f64::from(length) * nwg::scale_factor()).round() as u32
+}
 
 fn place(control: &impl Placeable, x: i32, y: i32, width: i32, height: i32) {
     control.set_position(x, y);

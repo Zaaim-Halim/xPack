@@ -128,6 +128,7 @@ pub enum Key {
     Browse,
     Retry,
     Launch,
+    LaunchExisting,
     CloseApplication,
 
     WelcomeTitle,
@@ -228,7 +229,7 @@ pub enum Key {
 impl Key {
     /// Every key, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 94] = {
+    pub(crate) const ALL: [Self; 95] = {
         use Key::*;
         [
             WindowTitle,
@@ -240,6 +241,7 @@ impl Key {
             Browse,
             Retry,
             Launch,
+            LaunchExisting,
             CloseApplication,
             WelcomeTitle,
             WelcomeHeadline,
@@ -351,6 +353,9 @@ fn default_text(key: Key, flavour: Flavour) -> Option<&'static str> {
         Key::Browse => either("Browse…", "Choose…"),
         Key::Retry => Some("Retry"),
         Key::Launch => either("Launch {name}", "Open {name}"),
+        // A button beside the status line, with room for a word, not a name;
+        // the line next to it already names the application.
+        Key::LaunchExisting => either("Launch", "Open"),
         Key::CloseApplication => Some("Close it for me"),
 
         Key::WelcomeTitle => either("Welcome to the {name} Setup Wizard", "Welcome to {name}"),
@@ -724,6 +729,23 @@ mod tests {
         assert_eq!(windows.line(Key::WelcomeVerified), "Verified package");
         assert_eq!(windows.get(Key::WelcomeByline), None);
         assert_eq!(mac.line(Key::WelcomeByline), "Version 2.0.0");
+    }
+
+    #[test]
+    fn a_button_beside_the_status_fits_whatever_the_application_is_called() {
+        // These buttons have a fixed width beside the status line. A label
+        // that carried the name ran off both ends of the Windows button with
+        // a name as ordinary as "Expense Tracker".
+        let long = Facts { name: "An Application With A Rather Long Name".into(), ..facts(None) };
+        for flavour in [Flavour::Windows, Flavour::Mac] {
+            let texts = Texts::new(flavour, long.clone(), BTreeMap::new());
+            for key in [Key::Retry, Key::LaunchExisting, Key::CloseApplication] {
+                let line = texts.line(key);
+                assert!(line.chars().count() <= 15, "{key:?} on {flavour:?}: {line}");
+            }
+        }
+        assert_eq!(texts(Flavour::Windows, None).line(Key::LaunchExisting), "Launch");
+        assert_eq!(texts(Flavour::Mac, None).line(Key::LaunchExisting), "Open");
     }
 
     #[test]
