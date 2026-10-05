@@ -57,6 +57,20 @@ public final class InstallerSettings {
     }
 
     /**
+     * The command-line arguments that sign an installer for {@code target}.
+     *
+     * <p>Only a Windows installer is signed this way, so in a build that makes
+     * several platforms the command applies to the Windows ones and the others
+     * are built as before, not refused. None when no command is configured.
+     */
+    public static List<String> signArguments(Target target, String signCommand) {
+        if (signCommand == null || signCommand.isBlank() || target.os() != Target.Os.WINDOWS) {
+            return List.of();
+        }
+        return List.of("--sign-command", signCommand);
+    }
+
+    /**
      * The runtime binaries a cross-built installer carries, by name.
      *
      * <p>The same list the command line gathers for its own host: launcher,

@@ -69,6 +69,21 @@ public class InstallerMojo extends AbstractXPackMojo {
     @Parameter(property = "xpack.installer.console", defaultValue = "false")
     private boolean console;
 
+    /**
+     * Signs each Windows installer with this command once it is built.
+     *
+     * <p>Your own signing command, with {@code {file}} where the installer's
+     * path goes, for example
+     * {@code signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f cert.pfx {file}}.
+     * Passed to {@code xpack installer --sign-command}, which runs it, then
+     * checks the installer is signed and still reads its own payload. Signing
+     * never stops the build: if the tool is missing or signing fails, the
+     * installer is built unsigned and a warning says so. xPack never sees the
+     * certificate. Installers for other platforms are built as before.
+     */
+    @Parameter(property = "xpack.windowsSignCommand")
+    private String windowsSignCommand;
+
     /** Leaves the installed version inactive, for an installer that only stages. */
     @Parameter(property = "xpack.installer.noActivate", defaultValue = "false")
     private boolean noActivate;
@@ -120,12 +135,23 @@ public class InstallerMojo extends AbstractXPackMojo {
                 arguments.add("--config");
                 arguments.add(layout().manifest(target).toString());
             }
+            List<String> signing = InstallerSettings.signArguments(target, windowsSignCommand);
+            arguments.addAll(signing);
             addCrossBuildBinaries(arguments, target, pkg);
 
             Map<String, Object> result = cli().json("installer", arguments);
+            boolean signed = Boolean.TRUE.equals(result.get("codeSigned"));
             getLog().info("xpack: installer for " + Json.string(result, "platform")
                     + "  " + Json.string(result, "layout") + " layout, "
-                    + human(Json.number(result, "size")));
+                    + human(Json.number(result, "size")) + (signed ? ", code signed" : ""));
+            // The command line's own warning says why, but it reaches this log
+            // as an ordinary line. An installer meant to be signed that is not
+            // is what a person must not miss before shipping it.
+            if (!signing.isEmpty() && !signed) {
+                getLog().warn("xpack: the " + target.id() + " installer is NOT code signed, so "
+                        + "Windows will name its publisher as unknown; see the xpack warning "
+                        + "above for why. The build goes on with it unsigned.");
+            }
         }
     }
 

@@ -83,6 +83,25 @@ class InstallerSettingsTest {
     }
 
     @Test
+    void a_windows_installer_is_signed_with_the_configured_command() {
+        Target windows = new Target(Target.Os.WINDOWS, Target.Arch.X64);
+        String command = "signtool sign /f \"C:\\My Certs\\cert.pfx\" {file}";
+        // Passed through untouched, as one argument: the command line splits it.
+        assertEquals(List.of("--sign-command", command), InstallerSettings.signArguments(windows, command));
+    }
+
+    @Test
+    void only_windows_installers_are_signed_and_only_when_asked() {
+        Target windows = new Target(Target.Os.WINDOWS, Target.Arch.X64);
+        assertEquals(List.of(), InstallerSettings.signArguments(windows, null));
+        assertEquals(List.of(), InstallerSettings.signArguments(windows, "  "));
+        for (Target.Os os : List.of(Target.Os.MACOS, Target.Os.LINUX)) {
+            Target target = new Target(os, Target.Arch.ARM64);
+            assertEquals(List.of(), InstallerSettings.signArguments(target, "signtool sign {file}"));
+        }
+    }
+
+    @Test
     void other_targets_have_one_installer_build() {
         for (Target.Os os : List.of(Target.Os.MACOS, Target.Os.LINUX)) {
             Target target = new Target(os, Target.Arch.ARM64);

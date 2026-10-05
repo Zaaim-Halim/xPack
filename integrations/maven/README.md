@@ -178,6 +178,42 @@ the macOS installer bundle now shows in Finder. There is nothing else to set.
 `<icon>` on `xpack:installer` is **deprecated**. It is still passed on and
 still wins, so existing builds are unchanged, and it logs a warning.
 
+## Signing the Windows installer
+
+The name above shows in Explorer's Properties, but Windows still calls the
+publisher of an unsigned `Setup.exe` *unknown* when someone runs it. Only an
+Authenticode signature, made with a code-signing certificate you own, changes
+that. Give `xpack:installer` the command you sign with, with `{file}` where
+the installer's path goes:
+
+```xml
+<configuration>
+  <windowsSignCommand>signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f cert.pfx {file}</windowsSignCommand>
+  <!-- or -Dxpack.windowsSignCommand=... -->
+</configuration>
+```
+
+The plugin passes it to `xpack installer --sign-command`, which runs it on
+each finished Windows installer, then checks the installer carries a
+signature and still reads its own payload. xPack never sees the certificate,
+so a `.pfx`, a hardware token or a cloud signing service all work.
+Installers for other platforms in the same build are made as before.
+
+Signing never stops the build. Without `<windowsSignCommand>` the installer
+is built unsigned, as always. With it, a signing tool that is not installed
+(xPack says what to install), a command that fails, or one that signs
+nothing leaves the installer unsigned with a warning, `NOT code signed`, and
+the build goes on. The one exception is a command that damages the
+installer so it can no longer read its own payload: that installer is
+deleted and the build fails, because it would not install.
+
+The command is split at spaces, double quotes keep a part together, and it
+runs without a shell. For a password from the environment, as in CI, point it
+at a script of your own that reads it, such as
+`pwsh sign.ps1 {file}` or `bash sign.sh {file}`.
+
+Needs an xPack command line newer than 0.8.0.
+
 ## The installation wizard
 
 Installers open a wizard for a person who double-clicks them: the macOS
