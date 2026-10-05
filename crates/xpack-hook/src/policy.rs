@@ -188,7 +188,8 @@ impl Policy {
         let file = if path_like {
             PathBuf::from(program)
         } else {
-            find_on_path(program).ok_or_else(|| format!("{program} is not installed here"))?
+            xpack_platform::find_on_path(program)
+                .ok_or_else(|| format!("{program} is not installed here"))?
         };
         // Windows starts a batch file through `cmd.exe`, which parses its
         // arguments as a command line: a shell, which a hook never gets.
@@ -302,23 +303,6 @@ fn same_program_name(declared: &str, requested: &str) -> bool {
     } else {
         declared == requested
     }
-}
-
-/// The first file named `program` along this process's `PATH`, trying the
-/// executable extensions on Windows.
-fn find_on_path(program: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let mut names = vec![OsString::from(program)];
-    if cfg!(windows) && Path::new(program).extension().is_none() {
-        let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-        for extension in extensions.split(';').filter(|e| !e.is_empty()) {
-            names.push(OsString::from(format!("{program}{extension}")));
-        }
-    }
-    std::env::split_paths(&path)
-        .filter(|dir| dir.is_absolute())
-        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-        .find(|candidate| candidate.is_file())
 }
 
 /// A declared place with its placeholder replaced by the directory it names.

@@ -390,3 +390,20 @@ fn close_command(pid: u32) -> Command {
     command.arg("-TERM").arg(pid.to_string());
     command
 }
+
+/// The first file named `program` along this process's `PATH`, trying the
+/// executable extensions on Windows.
+pub fn find_on_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let mut names = vec![std::ffi::OsString::from(program)];
+    if cfg!(windows) && Path::new(program).extension().is_none() {
+        let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        for extension in extensions.split(';').filter(|e| !e.is_empty()) {
+            names.push(std::ffi::OsString::from(format!("{program}{extension}")));
+        }
+    }
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+}
