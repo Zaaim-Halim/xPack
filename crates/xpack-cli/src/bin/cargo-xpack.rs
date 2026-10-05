@@ -119,6 +119,12 @@ struct InstallerArgs {
     /// Build the console installer on Windows, for scripts.
     #[arg(long)]
     console: bool,
+
+    /// Sign a Windows installer with this command, `{file}` standing for its
+    /// path. Passed to `xpack installer --sign-command`; signing never stops
+    /// the build, and a warning says when the installer is not signed.
+    #[arg(long, value_name = "COMMAND")]
+    sign_command: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -609,9 +615,25 @@ fn installer(args: &InstallerArgs) -> Result<()> {
     if args.console {
         command.arg("--console");
     }
+    if let Some(sign) = &args.sign_command {
+        command.arg("--sign-command").arg(sign);
+    }
     let output = run(&mut command, "xpack installer")?;
+    // What xpack warned about, such as an installer it could not sign, is
+    // printed even though it succeeded: a warning swallowed here is one the
+    // publisher never sees.
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    if !diagnostics.trim().is_empty() {
+        xpack_core::errln!("{}", diagnostics.trim_end());
+    }
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("reading xpack installer: {e}"))?;
+    if args.sign_command.is_some() && report["codeSigned"] != serde_json::Value::Bool(true) {
+        xpack_core::errln!(
+            "cargo-xpack: the installer is NOT code signed; see the warning above. It was \
+             built unsigned."
+        );
+    }
     xpack_core::outln!("{}", package.display());
     if let Some(installer) = report["installer"].as_str() {
         xpack_core::outln!("{installer}");

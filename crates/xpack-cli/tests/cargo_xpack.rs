@@ -389,3 +389,36 @@ command = "mytool""#,
     let cwd = text.lines().find_map(|l| l.strip_prefix("cwd=")).unwrap();
     assert_eq!(std::fs::canonicalize(cwd).unwrap(), std::fs::canonicalize(&elsewhere).unwrap());
 }
+
+#[test]
+fn an_installer_that_could_not_be_signed_says_so_and_is_still_built() {
+    // The signing tool is not installed. `xpack installer` warns and builds
+    // the installer unsigned; `cargo xpack` must pass that warning on rather
+    // than swallow it with the rest of a successful run's output.
+    let stub = xpack().with_file_name(format!("xpack-installer{}", std::env::consts::EXE_SUFFIX));
+    if !stub.is_file() {
+        eprintln!("skipped: needs the workspace built, for the installer stub beside xpack");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path(), r#"id = "com.example.mytool""#);
+    let key = keygen(dir.path());
+
+    let out = Command::new(cargo_xpack())
+        .args(["xpack", "installer", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--key")
+        .arg(&key)
+        .arg("--xpack")
+        .arg(xpack())
+        .args(["--sign-command", "no-such-signing-tool sign {file}"])
+        .env("CARGO_TARGET_DIR", project.join("target"))
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "the build failed: {}", stderr(&out));
+    assert!(stderr(&out).contains("warning:"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("NOT code signed"), "{}", stderr(&out));
+    let installer = stdout(&out).lines().last().map(PathBuf::from).unwrap();
+    assert!(installer.exists(), "no installer at {}", installer.display());
+}
