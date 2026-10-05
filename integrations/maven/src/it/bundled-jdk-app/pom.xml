@@ -30,9 +30,9 @@
   <build>
     <plugins>
       <plugin>
-        <groupId>io.xpack</groupId>
+        <groupId>io.github.zaaim-halim</groupId>
         <artifactId>xpack-maven-plugin</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.8.0</version>
         <configuration>
 
           <!-- ============================================== the application -->
@@ -255,7 +255,7 @@
       <build>
         <plugins>
           <plugin>
-            <groupId>io.xpack</groupId>
+            <groupId>io.github.zaaim-halim</groupId>
             <artifactId>xpack-maven-plugin</artifactId>
             <executions>
               <!-- The installer ships the package's hooks too, so they are

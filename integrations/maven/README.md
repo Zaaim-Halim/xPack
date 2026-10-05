@@ -4,7 +4,7 @@ Packages a Maven project into a signed, self-updating xPack installation with
 a bundled Java runtime.
 
 ```
-io.xpack:xpack-maven-plugin
+io.github.zaaim-halim:xpack-maven-plugin
 ```
 
 ## What it does, and what it refuses to do
@@ -68,7 +68,7 @@ file together and a plain `mvn package` stays as it was:
     <build>
       <plugins>
         <plugin>
-          <groupId>io.xpack</groupId>
+          <groupId>io.github.zaaim-halim</groupId>
           <artifactId>xpack-maven-plugin</artifactId>
           <executions>
             <execution>
@@ -391,9 +391,9 @@ and a signing key from `xpack keygen --out xpack-signing.json`.
 
 ```xml
 <plugin>
-  <groupId>io.xpack</groupId>
+  <groupId>io.github.zaaim-halim</groupId>
   <artifactId>xpack-maven-plugin</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.8.0</version>
   <configuration>
     <mainClass>com.example.demo.Main</mainClass>
     <runtime>

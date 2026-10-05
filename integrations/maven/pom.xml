@@ -4,13 +4,41 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>io.xpack</groupId>
+  <groupId>io.github.zaaim-halim</groupId>
   <artifactId>xpack-maven-plugin</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.8.0</version>
   <packaging>maven-plugin</packaging>
 
   <name>xPack Maven Plugin</name>
   <description>Packages a Java application into a signed, self-updating xPack installation.</description>
+  <url>https://github.com/Zaaim-Halim/xPack</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>zaaim-halim</id>
+      <name>Halim Zaaim</name>
+      <url>https://github.com/Zaaim-Halim</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/Zaaim-Halim/xPack.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/Zaaim-Halim/xPack.git</developerConnection>
+    <url>https://github.com/Zaaim-Halim/xPack</url>
+    <tag>HEAD</tag>
+  </scm>
+
+  <prerequisites>
+    <maven>3.9.0</maven>
+  </prerequisites>
 
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
@@ -62,4 +90,64 @@
       </plugin>
     </plugins>
   </build>
+
+  <!--
+    Maven Central rejects a release without sources, javadoc and a GPG
+    signature on every file, so publishing runs with -Prelease. A plain build
+    stays fast and needs no signing key.
+  -->
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals><goal>jar-no-fork</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.12.0</version>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals><goal>jar</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.8</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <!-- Uploads and validates only; the release is published by hand from the portal. -->
+              <autoPublish>false</autoPublish>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
