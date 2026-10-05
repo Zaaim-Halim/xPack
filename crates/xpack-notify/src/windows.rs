@@ -42,13 +42,15 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
 
     // The application's own icon, where the installation has one. It titles
     // the window, appears on the task bar, and is drawn beside the message.
-    let mut icon = nwg::Icon::default();
-    let icon = prompt
-        .icon
-        .as_ref()
-        .and_then(|path| path.to_str())
-        .and_then(|path| nwg::Icon::builder().source_file(Some(path)).build(&mut icon).ok())
-        .map(|()| &icon);
+    let path = prompt.icon.as_ref().and_then(|path| path.to_str());
+    let icon = load_icon(path, None);
+    let icon = icon.as_ref();
+    // Again at the size it is drawn beside the message. An image frame
+    // centres its icon at the icon's own size and never scales it, and an
+    // icon loaded without a size keeps the size stored in the file, often
+    // 256 pixels, so the frame would show only its middle.
+    let picture = load_icon(path, Some((ICON.unsigned_abs(), ICON.unsigned_abs())));
+    let picture = picture.as_ref();
 
     let mut window = nwg::Window::default();
     if nwg::Window::builder()
@@ -63,10 +65,10 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
         return Answer::NotShown;
     }
 
-    if icon.is_some() {
+    if picture.is_some() {
         let mut image = nwg::ImageFrame::default();
         let _ = nwg::ImageFrame::builder()
-            .icon(icon)
+            .icon(picture)
             .size((ICON, ICON))
             .position((MARGIN, MARGIN))
             .parent(&window)
@@ -75,7 +77,7 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
         hold(Box::new(image));
     }
 
-    let text_left = if icon.is_some() { MARGIN * 2 + ICON } else { MARGIN };
+    let text_left = if picture.is_some() { MARGIN * 2 + ICON } else { MARGIN };
     let text_width = WINDOW.0 - text_left - MARGIN;
 
     let mut title = nwg::Label::default();
@@ -150,6 +152,13 @@ pub(crate) fn show(prompt: &Prompt) -> Answer {
     nwg::unbind_event_handler(&handler);
 
     answer.get()
+}
+
+/// The icon in the file at `path`, at `size` or at the size stored in it.
+fn load_icon(path: Option<&str>, size: Option<(u32, u32)>) -> Option<nwg::Icon> {
+    let mut icon = nwg::Icon::default();
+    nwg::Icon::builder().source_file(Some(path?)).size(size).build(&mut icon).ok()?;
+    Some(icon)
 }
 
 /// Keeps a control alive for the lifetime of the process.
