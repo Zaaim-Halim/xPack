@@ -1,0 +1,143 @@
+<Project>
+
+  <!--
+    Packages a published application with the xpack command line.
+
+    Off until <XPackId> is set: referencing the package changes nothing
+    before that, and a plain build never packs. With it set, a self-contained
+    `dotnet publish -r <rid>` is checked before publishing and packed after.
+  -->
+
+  <UsingTask TaskName="XPack.Build.WriteXPackManifest"
+             AssemblyFile="$(MSBuildThisFileDirectory)../tasks/netstandard2.0/XPack.Build.dll" />
+  <UsingTask TaskName="XPack.Build.RunXPack"
+             AssemblyFile="$(MSBuildThisFileDirectory)../tasks/netstandard2.0/XPack.Build.dll" />
+
+  <PropertyGroup>
+    <XPackEnabled Condition="'$(XPackEnabled)' == '' and '$(XPackId)' != ''">true</XPackEnabled>
+    <XPackDistDirectory Condition="'$(XPackDistDirectory)' == ''">$(MSBuildProjectDirectory)/bin/xpack/</XPackDistDirectory>
+    <XPackWorkDirectory Condition="'$(XPackWorkDirectory)' == ''">$(MSBuildProjectDirectory)/$(IntermediateOutputPath)xpack/</XPackWorkDirectory>
+    <XPackManifestPath>$(XPackWorkDirectory)xpack.json</XPackManifestPath>
+    <XPackPayloadDirectory>$(XPackWorkDirectory)payload/</XPackPayloadDirectory>
+    <XPackRunRoot>$(XPackWorkDirectory)run/</XPackRunRoot>
+    <_XPackHostExecutable Condition="'$(OS)' == 'Windows_NT'">xpack.exe</_XPackHostExecutable>
+    <_XPackHostExecutable Condition="'$(OS)' != 'Windows_NT'">xpack</_XPackHostExecutable>
+    <XPackExecutable Condition="'$(XPackExecutable)' == '' and '$(XPackHome)' != ''">$([MSBuild]::NormalizePath('$(XPackHome)', '$(_XPackHostExecutable)'))</XPackExecutable>
+    <XPackExecutable Condition="'$(XPackExecutable)' == ''">xpack</XPackExecutable>
+  </PropertyGroup>
+
+  <!-- Before anything is published: what cannot work is said now, not after
+       a whole publish. -->
+  <Target Name="XPackPrepare" BeforeTargets="PrepareForPublish" Condition="'$(XPackEnabled)' == 'true'">
+
+    <Error Condition="'$(RuntimeIdentifier)' != '' and '$(SelfContained)' != 'true'"
+           Text="xpack: XPack.Build packages self-contained applications, which carry their own .NET runtime: publish with --self-contained, or set &lt;SelfContained&gt;true&lt;/SelfContained&gt;." />
+    <Error Condition="'$(XPackHome)' != '' and !Exists('$(XPackExecutable)')"
+           Text="xpack: there is no xpack command line at $(XPackExecutable). Set XPackHome to the folder of the xPack release that holds it, or leave it unset to use xpack from the PATH." />
+    <Error Condition="'$(XPackKey)' == ''"
+           Text="xpack: XPackKey is not set. Point it at your signing key (made once with `xpack keygen --out signing.json`), for example -p:XPackKey=$HOME/keys/signing.json." />
+    <Error Condition="'$(XPackKey)' != '' and !Exists('$(XPackKey)')"
+           Text="xpack: the signing key $(XPackKey) does not exist." />
+    <Error Condition="'$(XPackKey)' != '' and $([System.IO.Path]::GetFullPath('$(XPackKey)').StartsWith($([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(PublishDir)'))))"
+           Text="xpack: the signing key $(XPackKey) is inside the publish folder, so it would be shipped in the package. Keep it outside the project." />
+
+    <PropertyGroup>
+      <_XPackVersion>$(XPackVersion)</_XPackVersion>
+      <_XPackVersion Condition="'$(_XPackVersion)' == ''">$(Version)</_XPackVersion>
+      <_XPackDescription>$(XPackDescription)</_XPackDescription>
+      <_XPackDescription Condition="'$(_XPackDescription)' == ''">$(Description)</_XPackDescription>
+      <_XPackRid>$(RuntimeIdentifier)</_XPackRid>
+      <_XPackIcon Condition="$(_XPackRid.StartsWith('win-')) and '$(XPackIconWindows)' != ''">$(XPackIconWindows)</_XPackIcon>
+      <_XPackIcon Condition="$(_XPackRid.StartsWith('osx-')) and '$(XPackIconMacos)' != ''">$(XPackIconMacos)</_XPackIcon>
+      <_XPackIcon Condition="$(_XPackRid.StartsWith('linux-')) and '$(XPackIconLinux)' != ''">$(XPackIconLinux)</_XPackIcon>
+      <_XPackIcon Condition="'$(_XPackIcon)' == '' and '$(XPackIcon)' != ''">$(XPackIcon)</_XPackIcon>
+      <_XPackIcon Condition="'$(_XPackIcon)' == '' and $(_XPackRid.StartsWith('win-')) and '$(ApplicationIcon)' != ''">$(ApplicationIcon)</_XPackIcon>
+      <_XPackIcon Condition="'$(_XPackIcon)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_XPackIcon)'))</_XPackIcon>
+    </PropertyGroup>
+
+    <WriteXPackManifest
+        ManifestPath="$(XPackManifestPath)"
+        Id="$(XPackId)"
+        AssemblyName="$(AssemblyName)"
+        Product="$(Product)"
+        Version="$(_XPackVersion)"
+        Description="$(_XPackDescription)"
+        Company="$(Company)"
+        RuntimeIdentifier="$(RuntimeIdentifier)"
+        OutputType="$(OutputType)"
+        UsesWpf="$(UseWPF)"
+        UsesWindowsForms="$(UseWindowsForms)"
+        UsesMaui="$(UseMaui)"
+        PackageReferences="@(PackageReference)"
+        Name="$(XPackName)"
+        Publisher="$(XPackPublisher)"
+        Executable="$(XPackExecutableName)"
+        Arguments="@(XPackArgument)"
+        Command="$(XPackCommand)"
+        KeepWorkingDirectory="$(XPackKeepWorkingDirectory)"
+        Terminal="$(XPackTerminal)"
+        Shortcut="$(XPackShortcut)"
+        UpdateUrl="$(XPackUpdateUrl)"
+        UpdateChannel="$(XPackUpdateChannel)"
+        SingleInstance="$(XPackSingleInstance)"
+        IconSource="$(_XPackIcon)">
+      <Output TaskParameter="Platform" PropertyName="XPackPlatform" />
+      <Output TaskParameter="IconPayloadPath" PropertyName="_XPackIconPayloadPath" />
+    </WriteXPackManifest>
+  </Target>
+
+  <!-- The payload is a copy of the publish folder, so what xPack adds never
+       lands in PublishDir itself. -->
+  <Target Name="XPackStagePayload" Condition="'$(XPackEnabled)' == 'true'" DependsOnTargets="XPackPrepare">
+    <ItemGroup>
+      <_XPackPublished Include="$(PublishDir)**/*" Exclude="$(PublishDir)**/*.pdb" Condition="'$(XPackIncludeSymbols)' != 'true'" />
+      <_XPackPublished Include="$(PublishDir)**/*" Condition="'$(XPackIncludeSymbols)' == 'true'" />
+    </ItemGroup>
+    <RemoveDir Directories="$(XPackPayloadDirectory)" />
+    <Copy SourceFiles="@(_XPackPublished)" DestinationFiles="@(_XPackPublished->'$(XPackPayloadDirectory)app/%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy Condition="'$(_XPackIconPayloadPath)' != ''" SourceFiles="$(_XPackIcon)" DestinationFiles="$(XPackPayloadDirectory)$(_XPackIconPayloadPath)" />
+  </Target>
+
+  <!-- Empty on purpose: hook it with AfterTargets to change the payload
+       before it is packed, such as signing the application's own .exe.
+       `pack` records the exact bytes, so later is too late. -->
+  <Target Name="XPackBeforePack" Condition="'$(XPackEnabled)' == 'true'" DependsOnTargets="XPackStagePayload" />
+
+  <Target Name="XPackPack" AfterTargets="Publish" Condition="'$(XPackEnabled)' == 'true'" DependsOnTargets="XPackBeforePack">
+    <ItemGroup>
+      <_XPackPackArgument Include="pack" />
+      <_XPackPackArgument Include="$(XPackPayloadDirectory)" />
+      <_XPackPackArgument Include="--config;$(XPackManifestPath)" />
+      <_XPackPackArgument Include="--key;$(XPackKey)" />
+      <_XPackPackArgument Include="--platform;$(XPackPlatform)" />
+      <_XPackPackArgument Include="--out-dir;$(XPackDistDirectory)" />
+      <_XPackPackArgument Include="--json" />
+    </ItemGroup>
+    <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackPackArgument)" CheckVersion="true">
+      <Output TaskParameter="Package" PropertyName="XPackPackage" />
+    </RunXPack>
+    <Message Importance="high" Text="xpack: package $(XPackPackage)" />
+  </Target>
+
+  <!-- The developer loop: publish, pack, install into a throwaway root, start.
+       A self-contained `dotnet publish -r <rid> -t:XPackRun`. -->
+  <Target Name="XPackRun" DependsOnTargets="Publish">
+    <Error Condition="'$(XPackEnabled)' != 'true'" Text="xpack: XPackRun needs XPackId to be set." />
+    <RemoveDir Directories="$(XPackRunRoot)" />
+    <ItemGroup>
+      <_XPackInstallArgument Include="install" />
+      <_XPackInstallArgument Include="$(XPackPackage)" />
+      <_XPackInstallArgument Include="--root;$(XPackRunRoot)" />
+      <_XPackInstallArgument Include="--trust-on-first-use" />
+      <_XPackRunArgument Include="run" />
+      <_XPackRunArgument Include="$(XPackId)" />
+      <_XPackRunArgument Include="--root;$(XPackRunRoot)" />
+    </ItemGroup>
+    <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackInstallArgument)" />
+    <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackRunArgument)">
+      <Output TaskParameter="StandardOutput" PropertyName="_XPackRunOutput" />
+    </RunXPack>
+    <Message Importance="high" Text="$(_XPackRunOutput)" />
+  </Target>
+
+</Project>

@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 so the tasks load both in `dotnet` and in Visual
+         Studio's .NET Framework MSBuild. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>XPack.Build</RootNamespace>
+
+    <PackageId>XPack.Build</PackageId>
+    <!-- The xPack release this package drives; the two are released together. -->
+    <Version>0.8.1</Version>
+    <Authors>Halim Zaaim</Authors>
+    <Description>Packages a .NET application into a signed, self-updating xPack installation after dotnet publish.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Zaaim-Halim/xPack</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Zaaim-Halim/xPack</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>installer;packaging;updates;self-update;msbuild</PackageTags>
+
+    <!-- A build-time package: nothing of it is referenced by, or shipped
+         with, the application. -->
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5100;NU5128</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Provided by whichever MSBuild loads the task. -->
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.11.48" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Kept in msbuild/ in the repository, whose root .gitignore leaves out
+         every build/ folder; NuGet requires it at build/ in the package. -->
+    <None Include="msbuild/XPack.Build.targets" Pack="true" PackagePath="build/" />
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- The task assembly goes beside the targets that load it, not under lib/,
+       so no project ever references it. -->
+  <Target Name="XPackPackTaskAssembly" BeforeTargets="_GetPackageFiles">
+    <ItemGroup>
+      <None Include="$(OutputPath)$(AssemblyName).dll" Pack="true" PackagePath="tasks/$(TargetFramework)/" />
+    </ItemGroup>
+  </Target>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="XPack.Build.Tests" />
+  </ItemGroup>
+
+</Project>
