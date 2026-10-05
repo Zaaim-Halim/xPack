@@ -412,6 +412,45 @@ On Windows, `xpack installer` produces a windowed installer by default. A shell
 does not wait for a windowed program, so build installers that only scripts
 run with `--console`.
 
+### Signing the Windows installer
+
+Windows names the publisher of a `Setup.exe` only from an Authenticode
+signature. Without one, a person running it is told the publisher is
+*unknown*. The application's name, publisher and icon that xPack writes into
+the installer show in Explorer's Properties, but only a signature made with
+a code-signing certificate you own changes that prompt.
+
+Give `xpack installer` the command you sign with, `{file}` standing for the
+installer's path:
+
+```sh
+xpack installer MyApp-1.3.0-windows-x64.xpkg --out-dir dist \
+  --sign-command "signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f cert.pfx {file}"
+```
+
+xPack runs it on the finished installer, then checks that the installer
+carries a signature and still reads and verifies its own payload. xPack never
+sees the certificate, so whatever you sign with works: a `.pfx` file, a
+hardware token, or a cloud service such as Azure Trusted Signing. On macOS or
+Linux, sign with `osslsigncode` or `jsign` instead of `signtool`.
+
+The command is split at spaces, with double quotes keeping a part together,
+and runs without a shell, so Windows paths keep their backslashes. For a
+password from the environment, as in CI, point it at a script of your own,
+such as `pwsh sign.ps1 {file}`.
+
+**Signing never stops a build.** Without `--sign-command` the installer is
+unsigned, as before. With it, a signing tool that is not installed (xPack
+says what to install, before building), a command that fails or one that
+signs nothing all leave the installer unsigned, with a warning, and the
+summary's `code signed` line says `NO`. `--json` reports `codeSigned`, for a release
+that must not ship unsigned. The one exception is a command that damages the
+installer so it can no longer read its payload: that installer is deleted and
+the build fails, because it would not install.
+
+A signed installer is also protected by the signature: change a byte of what
+it carries and Windows refuses it before xPack's own checks run.
+
 ### Installing for everyone on the computer
 
 By default an application is installed for the person installing it, in their
@@ -633,6 +672,9 @@ cargo xpack pack --key ~/keys/signing.json         # build --release, then a sig
 cargo xpack installer --key ~/keys/signing.json    # and the installer a user runs
 ```
 
+`cargo xpack installer --sign-command "<command> {file}"` signs a Windows
+installer, as [`xpack installer` does](#signing-the-windows-installer).
+
 The name, version, description and publisher come from `[package]`. Optional
 settings: `name`, `publisher`, `commands` (further binaries typed by name),
 `keep-working-directory` (on by default with a `command`), `binaries`,
@@ -669,8 +711,9 @@ See [`integrations/maven`](integrations/maven/README.md), and the complete
 example project in
 [`integrations/maven/src/it/bundled-jdk-app`](integrations/maven/src/it/bundled-jdk-app).
 Hooks are declared in the POM, and `xpack:hooks-test` tests them as part of
-an ordinary build. The plugin is not yet published to Maven Central; install it locally with
-`mvn install` in `integrations/maven`.
+an ordinary build. `<windowsSignCommand>` signs the Windows installer, as
+[`xpack installer --sign-command`](#signing-the-windows-installer) does. The
+plugin is on Maven Central as `io.github.zaaim-halim:xpack-maven-plugin`.
 
 [Expense Tracker](https://github.com/Zaaim-Halim/expense-tracker) is a real
 JavaFX application built, released and updated this way: CI builds it with
@@ -695,8 +738,9 @@ application xPack is validated against.
   the places and programs they declare. But a program a hook may run can do
   whatever the account running it can. Permissions make hooks reviewable and
   catch mistakes; they do not contain a publisher who means harm.
-- **Sign your installers.** Code-sign and notarise installer files after
-  `xpack installer` — appending the payload invalidates an earlier signature.
+- **Sign your installers.** On Windows, `--sign-command` signs the installer
+  with your certificate as it is built ([how](#signing-the-windows-installer)).
+  On macOS, sign and notarise the installer bundle after `xpack installer`.
 
 ## Commands
 
