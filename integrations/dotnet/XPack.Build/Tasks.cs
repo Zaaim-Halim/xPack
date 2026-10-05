@@ -47,6 +47,9 @@ public sealed class WriteXPackManifest : Task
     /// <summary>Where the icon goes in the payload; empty without one.</summary>
     [Output] public string IconPayloadPath { get; private set; } = "";
 
+    /// <summary>The xPack platform of the machine building, such as <c>macos-arm64</c>.</summary>
+    [Output] public string HostPlatform { get; private set; } = "";
+
     public override bool Execute()
     {
         if (IconSource.Length > 0 && !File.Exists(IconSource))
@@ -108,6 +111,7 @@ public sealed class WriteXPackManifest : Task
         }
         Platform = result.Platform;
         IconPayloadPath = result.IconPayloadPath;
+        HostPlatform = Manifest.HostPlatform();
         return true;
     }
 }
@@ -133,6 +137,12 @@ public sealed class RunXPack : Task
     /// <summary>The <c>package</c> field of xpack's <c>--json</c> report, when it has one.</summary>
     [Output] public string Package { get; private set; } = "";
 
+    /// <summary>The <c>installer</c> field of xpack's <c>--json</c> report, when it has one.</summary>
+    [Output] public string Installer { get; private set; } = "";
+
+    /// <summary>Whether xpack's report says the installer was code signed.</summary>
+    [Output] public bool CodeSigned { get; private set; }
+
     [Output] public string StandardOutput { get; private set; } = "";
 
     public override bool Execute()
@@ -154,6 +164,8 @@ public sealed class RunXPack : Task
             return false;
         }
         Package = ReadStringField(stdout, "package");
+        Installer = ReadStringField(stdout, "installer");
+        CodeSigned = ReadTrue(stdout, "codeSigned");
         return true;
     }
 
@@ -289,6 +301,10 @@ public sealed class RunXPack : Task
         quoted.Append('\\', backslashes * 2).Append('"');
         return quoted.ToString();
     }
+
+    /// <summary>Whether a field of a JSON object is <c>true</c>; absent or anything else is not.</summary>
+    internal static bool ReadTrue(string json, string field) =>
+        Regex.IsMatch(json, "\"" + Regex.Escape(field) + "\"\\s*:\\s*true\\b");
 
     /// <summary>A top-level string field of a JSON object, unescaped; empty when absent.</summary>
     internal static string ReadStringField(string json, string field)

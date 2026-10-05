@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Xunit;
 using Xunit.Abstractions;
@@ -205,5 +206,93 @@ public sealed class EndToEndTests : IDisposable
         Assert.Contains("there is no xpack command line", publishOutput);
         Assert.False(Directory.Exists(Path.Combine(app, "bin", "Release", "net10.0", HostRuntimeIdentifier(), "publish")),
             "it published before saying so");
+    }
+
+    /// <summary>The program to run inside a built installer: the file itself, or the macOS bundle's executable.</summary>
+    private static string InstallerProgram(string installer)
+    {
+        if (!Directory.Exists(installer))
+        {
+            return installer;
+        }
+        return Assert.Single(Directory.GetFiles(Path.Combine(installer, "Contents", "MacOS")));
+    }
+
+    [Fact]
+    public void An_installer_built_with_the_package_installs_silently_and_the_application_runs()
+    {
+        var home = XPackHome();
+        if (home == null)
+        {
+            output.WriteLine("skipped: build xpack (cargo build) or set XPACK_HOME to run this");
+            return;
+        }
+        var xpack = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
+        var app = Application("<XPackInstaller>true</XPackInstaller>");
+        var key = Key(xpack);
+
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r {HostRuntimeIdentifier()} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\"", app);
+        Assert.True(published == 0, publishOutput);
+
+        var dist = Path.Combine(app, "bin", "xpack");
+        var installer = Directory.GetFileSystemEntries(dist).Single(p => !p.EndsWith(".xpkg", StringComparison.Ordinal));
+        // By name: the build reports the real path, which on macOS is
+        // /private/var/… for a temporary folder this test sees as /var/….
+        Assert.Contains("xpack: installer ", publishOutput);
+        Assert.Contains(Path.GetFileName(installer), publishOutput);
+
+        var root = Path.Combine(work, "installed");
+        var (installed, installOutput) = Run(InstallerProgram(installer), $"--silent --root \"{root}\"", work);
+        Assert.True(installed == 0, installOutput);
+
+        var (ran, runOutput) = Run(xpack, $"run com.example.hellodotnet --root \"{root}\"", work);
+        Assert.True(ran == 0, runOutput);
+        Assert.Contains("hello from xpack", runOutput);
+    }
+
+    [Fact]
+    public void An_installer_for_another_platform_is_refused_before_publishing()
+    {
+        var home = XPackHome();
+        if (home == null)
+        {
+            output.WriteLine("skipped: build xpack (cargo build) or set XPACK_HOME to run this");
+            return;
+        }
+        var xpack = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
+        var other = OperatingSystem.IsWindows() ? "osx-arm64" : "win-x64";
+        var app = Application("<XPackInstaller>true</XPackInstaller>");
+        var key = Key(xpack);
+
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r {other} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\"", app);
+        Assert.NotEqual(0, published);
+        Assert.Contains("builds an installer for the machine it runs on", publishOutput);
+        Assert.False(Directory.Exists(Path.Combine(app, "bin", "xpack")), "it packed before saying so");
+    }
+
+    [Fact]
+    public void A_windows_installer_that_could_not_be_signed_is_built_unsigned_with_a_warning()
+    {
+        var home = XPackHome();
+        if (home == null || !OperatingSystem.IsWindows())
+        {
+            output.WriteLine("skipped: needs Windows and the xpack command line");
+            return;
+        }
+        var xpack = Path.Combine(home, "xpack.exe");
+        var app = Application("""
+            <XPackInstaller>true</XPackInstaller>
+            <XPackWindowsSignCommand>no-such-signing-tool sign {file}</XPackWindowsSignCommand>
+            """);
+        var key = Key(xpack);
+
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r win-x64 --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\"", app);
+        Assert.True(published == 0, publishOutput);
+        Assert.Contains("no-such-signing-tool was not found", publishOutput);
+        Assert.Contains("NOT code signed", publishOutput);
+        Assert.Single(Directory.GetFiles(Path.Combine(app, "bin", "xpack"), "*-Setup.exe"));
     }
 }

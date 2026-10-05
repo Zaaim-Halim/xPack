@@ -127,6 +127,18 @@ public class ManifestTests
         Assert.True(Manifest.Build(Facts(f => { f.RuntimeIdentifier = "win-x64"; f.HostIsWindows = true; })).Succeeded);
     }
 
+    [Theory]
+    [InlineData("WINDOWS", System.Runtime.InteropServices.Architecture.X64, "windows-x64")]
+    [InlineData("OSX", System.Runtime.InteropServices.Architecture.Arm64, "macos-arm64")]
+    [InlineData("OSX", System.Runtime.InteropServices.Architecture.X64, "macos-x64")]
+    [InlineData("LINUX", System.Runtime.InteropServices.Architecture.Arm64, "linux-arm64")]
+    [InlineData("WINDOWS", System.Runtime.InteropServices.Architecture.X86, "")]
+    [InlineData("FREEBSD", System.Runtime.InteropServices.Architecture.X64, "")]
+    public void The_build_machine_is_named_as_an_xpack_platform(string os, System.Runtime.InteropServices.Architecture arch, string expected)
+    {
+        Assert.Equal(expected, Manifest.HostPlatform(System.Runtime.InteropServices.OSPlatform.Create(os), arch));
+    }
+
     [Fact]
     public void A_console_tool_gets_a_terminal_and_a_window_does_not()
     {

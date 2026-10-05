@@ -83,7 +83,17 @@
         IconSource="$(_XPackIcon)">
       <Output TaskParameter="Platform" PropertyName="XPackPlatform" />
       <Output TaskParameter="IconPayloadPath" PropertyName="_XPackIconPayloadPath" />
+      <Output TaskParameter="HostPlatform" PropertyName="_XPackHostPlatform" />
     </WriteXPackManifest>
+
+    <!-- An installer is the target platform's own installer program with the
+         package attached. The xpack command line brings the one for the
+         machine it runs on; one for another platform is not supported here
+         yet, and is refused now rather than after the publish. -->
+    <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackPlatform)' != '$(_XPackHostPlatform)'"
+           Text="xpack: XPackInstaller builds an installer for the machine it runs on ($(_XPackHostPlatform)), not for $(XPackPlatform). Build the $(XPackPlatform) installer on that platform, or publish the package without XPackInstaller and run `xpack installer` there." />
+    <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackInstallerUi)' != '' and !Exists('$(XPackInstallerUi)')"
+           Text="xpack: the installer settings $(XPackInstallerUi) do not exist." />
   </Target>
 
   <!-- The payload is a copy of the publish folder, so what xPack adds never
@@ -117,6 +127,33 @@
       <Output TaskParameter="Package" PropertyName="XPackPackage" />
     </RunXPack>
     <Message Importance="high" Text="xpack: package $(XPackPackage)" />
+  </Target>
+
+  <!-- The installer a user runs on a machine with nothing installed: a
+       Setup.exe, a macOS app bundle, or a Linux installer. -->
+  <Target Name="XPackInstaller" AfterTargets="XPackPack" Condition="'$(XPackEnabled)' == 'true' and '$(XPackInstaller)' == 'true'">
+    <PropertyGroup>
+      <_XPackSigning Condition="'$(XPackWindowsSignCommand)' != '' and $(XPackPlatform.StartsWith('windows-'))">true</_XPackSigning>
+    </PropertyGroup>
+    <ItemGroup>
+      <_XPackInstallerArgument Include="installer" />
+      <_XPackInstallerArgument Include="$(XPackPackage)" />
+      <_XPackInstallerArgument Include="--out-dir;$(XPackDistDirectory)" />
+      <_XPackInstallerArgument Include="--json" />
+      <_XPackInstallerArgument Include="--ui;$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(XPackInstallerUi)'))" Condition="'$(XPackInstallerUi)' != ''" />
+      <_XPackInstallerArgument Include="--console" Condition="'$(XPackInstallerConsole)' == 'true'" />
+      <_XPackInstallerArgument Include="--sign-command;$(XPackWindowsSignCommand)" Condition="'$(_XPackSigning)' == 'true'" />
+    </ItemGroup>
+    <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackInstallerArgument)">
+      <Output TaskParameter="Installer" PropertyName="XPackInstallerFile" />
+      <Output TaskParameter="CodeSigned" PropertyName="_XPackCodeSigned" />
+    </RunXPack>
+    <Message Importance="high" Text="xpack: installer $(XPackInstallerFile)" Condition="'$(_XPackCodeSigned)' != 'True'" />
+    <Message Importance="high" Text="xpack: installer $(XPackInstallerFile) (code signed)" Condition="'$(_XPackCodeSigned)' == 'True'" />
+    <!-- xpack's own warning says why; it reaches this log as a warning too,
+         but an installer meant to be signed that is not must not be missed. -->
+    <Warning Condition="'$(_XPackSigning)' == 'true' and '$(_XPackCodeSigned)' != 'True'"
+             Text="xpack: the installer is NOT code signed, so Windows will name its publisher as unknown; see the warning above for why. The build goes on with it unsigned." />
   </Target>
 
   <!-- The developer loop: publish, pack, install into a throwaway root, start.

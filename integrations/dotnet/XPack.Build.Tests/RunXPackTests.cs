@@ -46,6 +46,17 @@ public class RunXPackTests
     }
 
     [Fact]
+    public void The_installer_and_whether_it_was_signed_are_read_from_the_report()
+    {
+        var signed = "{\n  \"installer\": \"C:\\\\dist\\\\My-App-1.0.0-windows-x64-Setup.exe\",\n  \"codeSigned\": true\n}";
+        Assert.Equal("C:\\dist\\My-App-1.0.0-windows-x64-Setup.exe", RunXPack.ReadStringField(signed, "installer"));
+        Assert.True(RunXPack.ReadTrue(signed, "codeSigned"));
+        Assert.False(RunXPack.ReadTrue("{\"codeSigned\": false}", "codeSigned"));
+        Assert.False(RunXPack.ReadTrue("{\"installer\": \"x\"}", "codeSigned"));
+        Assert.False(RunXPack.ReadTrue("{\"codeSigned\": trueish}", "codeSigned"));
+    }
+
+    [Fact]
     public void The_package_version_is_the_xpack_release_it_was_made_for()
     {
         var expected = typeof(RunXPack).Assembly.GetName().Version!;

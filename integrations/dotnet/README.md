@@ -108,8 +108,45 @@ empty `XPackBeforePack` target; the payload is in `$(XPackPayloadDirectory)`:
 </Target>
 ```
 
+## The installer
+
+```sh
+dotnet publish -c Release -r win-x64 --self-contained -p:XPackKey=$HOME/keys/signing.json -p:XPackInstaller=true
+```
+
+Beside the package, the file a user downloads and runs on a machine with
+nothing installed: `My-App-1.2.0-windows-x64-Setup.exe`, a macOS
+`Install My App.app`, or a Linux `My-App-1.2.0-linux-x64-installer`. It
+opens a wizard, or installs with `--silent`.
+
+| Property | Default | Does |
+| --- | --- | --- |
+| `XPackInstaller` | `false` | build the installer after the package |
+| `XPackInstallerUi` | none | the wizard settings, a JSON file: pages, licence, wording ([format](https://github.com/Zaaim-Halim/xPack#the-installer-and-its-wizard)) |
+| `XPackInstallerConsole` | `false` | on Windows, the console installer, for scripts only |
+| `XPackWindowsSignCommand` | none | sign `Setup.exe` with your certificate: your signing command, `{file}` where the installer's path goes |
+
+An installer is built for the machine the publish runs on: a Windows
+installer on Windows, and so on. Asking for one for another platform is
+refused before publishing; build it there, or run `xpack installer` there on
+the package.
+
+### Signing the Windows installer
+
+Without a signature Windows calls the publisher *unknown*. With a
+code-signing certificate:
+
+```xml
+<XPackWindowsSignCommand>signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f cert.pfx {file}</XPackWindowsSignCommand>
+```
+
+xPack runs it on the finished installer and checks the installer is signed
+and still reads its own package. xPack never sees the certificate, so a
+`.pfx`, a hardware token or a cloud signing service all work. Signing never
+stops the build: if the tool is missing or signing fails, the installer is
+built unsigned and the build warns `NOT code signed`.
+
 ## Not yet
 
-Building the installer a user runs, deltas and the update index come in
-later releases of this package. Until then, run `xpack installer` on the
-package this one makes.
+Installers for another platform than the build machine's, deltas and the
+update index come in later releases of this package.

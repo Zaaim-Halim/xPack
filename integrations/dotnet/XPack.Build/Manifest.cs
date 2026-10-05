@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
 namespace XPack.Build;
@@ -84,6 +85,23 @@ internal static class Manifest
     internal const string ApplicationFolder = "app";
 
     private static readonly Regex FourPartVersion = new Regex(@"^\d+\.\d+\.\d+\.\d+$");
+
+    /// <summary>The xPack platform of the machine this runs on, or empty when xPack has none.</summary>
+    internal static string HostPlatform(OSPlatform? os = null, Architecture? architecture = null)
+    {
+        var arch = (architecture ?? RuntimeInformation.OSArchitecture) switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.Arm64 => "arm64",
+            _ => "",
+        };
+        bool Is(OSPlatform platform) => os.HasValue ? os.Value == platform : RuntimeInformation.IsOSPlatform(platform);
+        var system = Is(OSPlatform.Windows) ? "windows"
+            : Is(OSPlatform.OSX) ? "macos"
+            : Is(OSPlatform.Linux) ? "linux"
+            : "";
+        return system.Length == 0 || arch.Length == 0 ? "" : system + "-" + arch;
+    }
 
     public static ManifestResult Build(ProjectFacts facts)
     {
