@@ -212,7 +212,7 @@ runs without a shell. For a password from the environment, as in CI, point it
 at a script of your own that reads it, such as
 `pwsh sign.ps1 {file}` or `bash sign.sh {file}`.
 
-Needs an xPack command line newer than 0.8.0.
+Needs xPack 0.8.1 or later, the command line and the plugin alike.
 
 ## The installation wizard
 
@@ -429,7 +429,7 @@ and a signing key from `xpack keygen --out xpack-signing.json`.
 <plugin>
   <groupId>io.github.zaaim-halim</groupId>
   <artifactId>xpack-maven-plugin</artifactId>
-  <version>0.8.0</version>
+  <version>0.8.1</version>
   <configuration>
     <mainClass>com.example.demo.Main</mainClass>
     <runtime>

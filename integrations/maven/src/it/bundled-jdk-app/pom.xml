@@ -32,7 +32,7 @@
       <plugin>
         <groupId>io.github.zaaim-halim</groupId>
         <artifactId>xpack-maven-plugin</artifactId>
-        <version>0.8.0</version>
+        <version>0.8.1</version>
         <configuration>
 
           <!-- ============================================== the application -->
