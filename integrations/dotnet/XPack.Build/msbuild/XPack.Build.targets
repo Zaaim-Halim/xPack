@@ -88,10 +88,13 @@
 
     <!-- An installer is the target platform's own installer program with the
          package attached. The xpack command line brings the one for the
-         machine it runs on; one for another platform is not supported here
-         yet, and is refused now rather than after the publish. -->
-    <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackPlatform)' != '$(_XPackHostPlatform)'"
-           Text="xpack: XPackInstaller builds an installer for the machine it runs on ($(_XPackHostPlatform)), not for $(XPackPlatform). Build the $(XPackPlatform) installer on that platform, or publish the package without XPackInstaller and run `xpack installer` there." />
+         machine it runs on; for another platform it takes them from that
+         platform's xPack release folder, XPackTargetBinaries. Without one,
+         such an installer is refused now rather than after the publish. -->
+    <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackTargetBinaries)' == '' and '$(XPackPlatform)' != '$(_XPackHostPlatform)'"
+           Text="xpack: an installer for $(XPackPlatform) is that platform's own installer program with the package attached, and this machine is $(_XPackHostPlatform). Unpack xPack's $(XPackPlatform) release (xpack-&lt;version&gt;-$(XPackPlatform)) and set XPackTargetBinaries to its folder, or build the installer on $(XPackPlatform)." />
+    <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackTargetBinaries)' != '' and !Exists('$(XPackTargetBinaries)')"
+           Text="xpack: XPackTargetBinaries names $(XPackTargetBinaries), which does not exist." />
     <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackInstallerUi)' != '' and !Exists('$(XPackInstallerUi)')"
            Text="xpack: the installer settings $(XPackInstallerUi) do not exist." />
   </Target>
@@ -142,6 +145,7 @@
       <_XPackInstallerArgument Include="--json" />
       <_XPackInstallerArgument Include="--ui;$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(XPackInstallerUi)'))" Condition="'$(XPackInstallerUi)' != ''" />
       <_XPackInstallerArgument Include="--console" Condition="'$(XPackInstallerConsole)' == 'true'" />
+      <_XPackInstallerArgument Include="--target-binaries;$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(XPackTargetBinaries)'))" Condition="'$(XPackTargetBinaries)' != ''" />
       <_XPackInstallerArgument Include="--sign-command;$(XPackWindowsSignCommand)" Condition="'$(_XPackSigning)' == 'true'" />
     </ItemGroup>
     <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackInstallerArgument)">

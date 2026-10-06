@@ -125,11 +125,21 @@ opens a wizard, or installs with `--silent`.
 | `XPackInstallerUi` | none | the wizard settings, a JSON file: pages, licence, wording ([format](https://github.com/Zaaim-Halim/xPack#the-installer-and-its-wizard)) |
 | `XPackInstallerConsole` | `false` | on Windows, the console installer, for scripts only |
 | `XPackWindowsSignCommand` | none | sign `Setup.exe` with your certificate: your signing command, `{file}` where the installer's path goes |
+| `XPackTargetBinaries` | none | for an installer for another platform than the build machine's: the folder of xPack's release for it |
 
-An installer is built for the machine the publish runs on: a Windows
-installer on Windows, and so on. Asking for one for another platform is
-refused before publishing; build it there, or run `xpack installer` there on
-the package.
+An installer is the target platform's own installer program with the
+package attached. For the build machine's platform, the xpack command line
+brings it. For another, unpack xPack's release for that platform
+(`xpack-<version>-linux-x64`) and set `XPackTargetBinaries` to its folder:
+
+```sh
+dotnet publish -c Release -r linux-x64 --self-contained -p:XPackKey=... \
+  -p:XPackInstaller=true -p:XPackTargetBinaries=$HOME/xpack/xpack-<version>-linux-x64
+```
+
+xpack takes the installer program and the runtime programs from it, and
+refuses any built for another platform. Without it, an installer for another
+platform is refused before publishing.
 
 ### Signing the Windows installer
 
@@ -148,5 +158,4 @@ built unsigned and the build warns `NOT code signed`.
 
 ## Not yet
 
-Installers for another platform than the build machine's, deltas and the
-update index come in later releases of this package.
+Deltas and the update index come in a later release of this package.

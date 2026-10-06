@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -287,7 +288,7 @@ public sealed class EndToEndTests : IDisposable
         Assert.Contains(
             OperatingSystem.IsWindows()
                 ? "cannot be built on Windows"
-                : "builds an installer for the machine it runs on",
+                : "set XPackTargetBinaries to its folder",
             publishOutput);
         Assert.False(Directory.Exists(Path.Combine(app, "bin", "xpack")), "it packed before saying so");
     }
@@ -314,5 +315,76 @@ public sealed class EndToEndTests : IDisposable
         Assert.Contains("no-such-signing-tool was not found", publishOutput);
         Assert.Contains("NOT code signed", publishOutput);
         Assert.Single(Directory.GetFiles(Path.Combine(app, "bin", "xpack"), "*-Setup.exe"));
+    }
+
+    /// <summary>The first bytes of a Linux program for <paramref name="arch"/>.</summary>
+    private static byte[] Elf(string arch)
+    {
+        var bytes = new byte[64];
+        "\u007fELF"u8.CopyTo(bytes);
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        BitConverter.GetBytes((ushort)(arch == "arm64" ? 0xB7 : 0x3E)).CopyTo(bytes, 0x12);
+        return bytes;
+    }
+
+    /// <summary>The programs an appended installer carries, by name, with their first bytes.</summary>
+    private static Dictionary<string, byte[]> Carried(string installer)
+    {
+        var bytes = File.ReadAllBytes(installer);
+        var trailer = bytes.AsSpan(bytes.Length - 52);
+        Assert.Equal("XPACKBDL"u8.ToArray(), trailer[..8].ToArray());
+        var length = (int)BitConverter.ToUInt64(trailer.Slice(12, 8));
+        using var archive = new System.IO.Compression.ZipArchive(
+            new MemoryStream(bytes, bytes.Length - 52 - length, length));
+        var programs = new Dictionary<string, byte[]>();
+        foreach (var entry in archive.Entries.Where(e => e.FullName.StartsWith("bin/", StringComparison.Ordinal)))
+        {
+            using var stream = entry.Open();
+            var head = new byte[4];
+            stream.ReadExactly(head);
+            programs[entry.FullName["bin/".Length..]] = head;
+        }
+        return programs;
+    }
+
+    [Fact]
+    public void An_installer_for_another_platform_is_built_from_its_release_folder()
+    {
+        var home = XPackHome();
+        if (home == null || OperatingSystem.IsWindows())
+        {
+            // From Windows every other platform is a Unix one, whose packages
+            // Windows cannot make at all.
+            output.WriteLine("skipped: needs macOS or Linux and the xpack command line");
+            return;
+        }
+        var xpack = Path.Combine(home, "xpack");
+        var (rid, arch) = HostRuntimeIdentifier() == "linux-x64" ? ("linux-arm64", "arm64") : ("linux-x64", "x64");
+
+        // A stand-in for xPack's release for that platform: real Linux headers,
+        // enough for every check, since building an installer runs none of them.
+        var release = Path.Combine(work, "xpack-release-" + rid);
+        Directory.CreateDirectory(release);
+        foreach (var name in new[] { "xpack-installer", "xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-hook" })
+        {
+            File.WriteAllBytes(Path.Combine(release, name), Elf(arch));
+        }
+
+        var app = Application($"""
+            <XPackInstaller>true</XPackInstaller>
+            <XPackTargetBinaries>{release}</XPackTargetBinaries>
+            """);
+        var key = Key(xpack);
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r {rid} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\"", app);
+        Assert.True(published == 0, publishOutput);
+
+        var installer = Assert.Single(Directory.GetFiles(Path.Combine(app, "bin", "xpack"), "*-installer"));
+        Assert.Equal(Elf(arch)[..4], File.ReadAllBytes(installer)[..4]);
+        var programs = Carried(installer);
+        Assert.Equal(new[] { "xpack-hook", "xpack-launcher", "xpack-uninstaller", "xpack-updater" }, programs.Keys.Order());
+        Assert.All(programs.Values, head => Assert.Equal(Elf(arch)[..4], head));
     }
 }
