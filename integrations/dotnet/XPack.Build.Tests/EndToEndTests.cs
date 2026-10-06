@@ -107,7 +107,7 @@ public sealed class EndToEndTests : IDisposable
         Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 
     /// <summary>Packs the package under test and makes an application that uses it.</summary>
-    private string Application(string extraProperties = "")
+    private string Application(string extraProperties = "", string? program = null)
     {
         var feed = Path.Combine(work, "feed");
         var project = Path.Combine(RepositoryRoot(), "integrations", "dotnet", "XPack.Build", "XPack.Build.csproj");
@@ -141,8 +141,8 @@ public sealed class EndToEndTests : IDisposable
               </ItemGroup>
             </Project>
             """);
-        File.WriteAllText(Path.Combine(app, "Program.cs"),
-            "System.Console.WriteLine($\"hello from xpack, args=[{string.Join(\"|\", args)}]\");\n");
+        File.WriteAllText(Path.Combine(app, "Program.cs"), program
+            ?? "System.Console.WriteLine($\"hello from xpack, args=[{string.Join(\"|\", args)}]\");\n");
         return app;
     }
 
@@ -386,5 +386,130 @@ public sealed class EndToEndTests : IDisposable
         var programs = Carried(installer);
         Assert.Equal(new[] { "xpack-hook", "xpack-launcher", "xpack-uninstaller", "xpack-updater" }, programs.Keys.Order());
         Assert.All(programs.Values, head => Assert.Equal(Elf(arch)[..4], head));
+    }
+
+    /// <summary>Serves <paramref name="root"/> over loopback HTTP, which the updater allows for exactly this.</summary>
+    private static (System.Net.HttpListener Server, string Url) Serve(string root)
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        var url = $"http://127.0.0.1:{port}/";
+        var server = new System.Net.HttpListener();
+        server.Prefixes.Add(url);
+        server.Start();
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            while (server.IsListening)
+            {
+                System.Net.HttpListenerContext context;
+                try { context = await server.GetContextAsync(); }
+                catch (Exception) { return; }
+                var relative = Uri.UnescapeDataString(context.Request.Url!.AbsolutePath.TrimStart('/'));
+                var file = Path.GetFullPath(Path.Combine(root, relative));
+                if (file.StartsWith(Path.GetFullPath(root), StringComparison.Ordinal) && File.Exists(file))
+                {
+                    var bytes = File.ReadAllBytes(file);
+                    context.Response.ContentLength64 = bytes.Length;
+                    context.Response.OutputStream.Write(bytes);
+                }
+                else
+                {
+                    context.Response.StatusCode = 404;
+                }
+                context.Response.Close();
+            }
+        });
+        return (server, url);
+    }
+
+    [Fact]
+    public void A_release_updates_an_installed_copy_through_a_delta()
+    {
+        var home = XPackHome();
+        if (home == null)
+        {
+            output.WriteLine("skipped: build xpack (cargo build) or set XPACK_HOME to run this");
+            return;
+        }
+        var xpack = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
+        var rid = HostRuntimeIdentifier();
+        var site = Path.Combine(work, "served");
+        var (server, url) = Serve(site);
+        using var _ = server;
+
+        var app = Application(
+            $"<XPackUpdateUrl>{url}updates/{{platform}}</XPackUpdateUrl>",
+            "System.Console.WriteLine($\"version {System.Reflection.Assembly.GetEntryAssembly()!.GetName().Version}\");\n");
+        var key = Key(xpack);
+        var pub = Path.ChangeExtension(key, null) + ".pub.json";
+        string Publish(string version, string extra) => Run(Dotnet(),
+            $"publish -c Release -r {rid} --self-contained -p:Version={version} -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\" {extra}", app) is var (code, text) && code == 0
+                ? text
+                : throw new Xunit.Sdk.XunitException(text);
+
+        // 1.0.0, released earlier and installed.
+        Publish("1.0.0", "");
+        var previous = Path.Combine(work, "previous");
+        Directory.CreateDirectory(previous);
+        var first = Assert.Single(Directory.GetFiles(Path.Combine(app, "bin", "xpack"), "*-1.0.0-*.xpkg"));
+        File.Copy(first, Path.Combine(previous, Path.GetFileName(first)));
+        var root = Path.Combine(work, "root");
+        var (installed, installOutput) = Run(xpack, $"install \"{first}\" --root \"{root}\" --trust \"{pub}\"", work);
+        Assert.True(installed == 0, installOutput);
+
+        // 1.1.0, released: a delta from 1.0.0, and the index.
+        var released = Publish("1.1.0", $"-p:XPackRelease=true -p:XPackPreviousPackages=\"{previous}\"");
+        Assert.Contains("-1.0.0-to-1.1.0-", released);
+        var platformSite = Path.Combine(app, "bin", "xpack", "site", Manifest.HostPlatform());
+        Assert.True(File.Exists(Path.Combine(platformSite, "stable.json")), released);
+        Assert.Single(Directory.GetFiles(platformSite, "*.xpkgd"));
+
+        // Published where the 1.0.0 installation looks, and taken from there.
+        CopyDirectory(Path.Combine(app, "bin", "xpack", "site"), Path.Combine(site, "updates"));
+        var (updated, updateOutput) = Run(xpack, $"update com.example.hellodotnet --root \"{root}\"", work);
+        Assert.True(updated == 0, updateOutput);
+        // The delta, not the package: what was downloaded is a small part of
+        // what a full download would have been.
+        var downloaded = long.Parse(System.Text.RegularExpressions.Regex
+            .Match(updateOutput, @"package downloaded bytes=(\d+)").Groups[1].Value);
+        var full = new FileInfo(Assert.Single(Directory.GetFiles(platformSite, "*.xpkg"))).Length;
+        Assert.True(downloaded * 20 < full, $"downloaded {downloaded} bytes of a {full}-byte package: no delta was used");
+
+        var (ran, runOutput) = Run(xpack, $"run com.example.hellodotnet --root \"{root}\"", work);
+        Assert.True(ran == 0, runOutput);
+        Assert.Contains("version 1.1.0", runOutput);
+    }
+
+    [Fact]
+    public void A_release_without_earlier_packages_is_indexed_with_no_deltas()
+    {
+        var home = XPackHome();
+        if (home == null)
+        {
+            output.WriteLine("skipped: build xpack (cargo build) or set XPACK_HOME to run this");
+            return;
+        }
+        var xpack = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
+        var app = Application("<XPackUpdateUrl>https://updates.example.com/hello/{platform}</XPackUpdateUrl>");
+        var key = Key(xpack);
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r {HostRuntimeIdentifier()} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\" -p:XPackRelease=true", app);
+        Assert.True(published == 0, publishOutput);
+        Assert.Contains("no deltas", publishOutput);
+        var platformSite = Path.Combine(app, "bin", "xpack", "site", Manifest.HostPlatform());
+        Assert.True(File.Exists(Path.Combine(platformSite, "stable.json")));
+        Assert.Single(Directory.GetFiles(platformSite, "*.xpkg"));
+    }
+
+    private static void CopyDirectory(string from, string to)
+    {
+        foreach (var file in Directory.GetFiles(from, "*", SearchOption.AllDirectories))
+        {
+            var target = Path.Combine(to, Path.GetRelativePath(from, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, overwrite: true);
+        }
     }
 }

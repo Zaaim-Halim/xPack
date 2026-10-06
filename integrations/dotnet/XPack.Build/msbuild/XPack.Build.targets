@@ -12,6 +12,8 @@
              AssemblyFile="$(MSBuildThisFileDirectory)../tasks/netstandard2.0/XPack.Build.dll" />
   <UsingTask TaskName="XPack.Build.RunXPack"
              AssemblyFile="$(MSBuildThisFileDirectory)../tasks/netstandard2.0/XPack.Build.dll" />
+  <UsingTask TaskName="XPack.Build.BuildXPackDeltas"
+             AssemblyFile="$(MSBuildThisFileDirectory)../tasks/netstandard2.0/XPack.Build.dll" />
 
   <PropertyGroup>
     <XPackEnabled Condition="'$(XPackEnabled)' == '' and '$(XPackId)' != ''">true</XPackEnabled>
@@ -20,6 +22,10 @@
     <XPackManifestPath>$(XPackWorkDirectory)xpack.json</XPackManifestPath>
     <XPackPayloadDirectory>$(XPackWorkDirectory)payload/</XPackPayloadDirectory>
     <XPackRunRoot>$(XPackWorkDirectory)run/</XPackRunRoot>
+    <XPackSiteDirectory Condition="'$(XPackSiteDirectory)' == ''">$(MSBuildProjectDirectory)/bin/xpack/site/</XPackSiteDirectory>
+    <XPackDeltaCount Condition="'$(XPackDeltaCount)' == ''">3</XPackDeltaCount>
+    <!-- xpack keygen writes the public half beside the key: signing.json, signing.pub.json. -->
+    <XPackPublicKey Condition="'$(XPackPublicKey)' == '' and $(XPackKey.EndsWith('.json'))">$(XPackKey.Substring(0, $([MSBuild]::Subtract($(XPackKey.Length), 5)))).pub.json</XPackPublicKey>
     <_XPackHostExecutable Condition="'$(OS)' == 'Windows_NT'">xpack.exe</_XPackHostExecutable>
     <_XPackHostExecutable Condition="'$(OS)' != 'Windows_NT'">xpack</_XPackHostExecutable>
     <XPackExecutable Condition="'$(XPackExecutable)' == '' and '$(XPackHome)' != ''">$([MSBuild]::NormalizePath('$(XPackHome)', '$(_XPackHostExecutable)'))</XPackExecutable>
@@ -95,6 +101,10 @@
            Text="xpack: an installer for $(XPackPlatform) is that platform's own installer program with the package attached, and this machine is $(_XPackHostPlatform). Unpack xPack's $(XPackPlatform) release (xpack-&lt;version&gt;-$(XPackPlatform)) and set XPackTargetBinaries to its folder, or build the installer on $(XPackPlatform)." />
     <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackTargetBinaries)' != '' and !Exists('$(XPackTargetBinaries)')"
            Text="xpack: XPackTargetBinaries names $(XPackTargetBinaries), which does not exist." />
+    <Error Condition="'$(XPackRelease)' == 'true' and ('$(XPackPublicKey)' == '' or !Exists('$(XPackPublicKey)'))"
+           Text="xpack: XPackRelease verifies the package against the public key before indexing it, and there is none at '$(XPackPublicKey)'. Set XPackPublicKey to the signing.pub.json that xpack keygen wrote." />
+    <Error Condition="'$(XPackRelease)' == 'true' and '$(XPackPreviousPackages)' != '' and !Exists('$(XPackPreviousPackages)')"
+           Text="xpack: XPackPreviousPackages names $(XPackPreviousPackages), which does not exist." />
     <Error Condition="'$(XPackInstaller)' == 'true' and '$(XPackInstallerUi)' != '' and !Exists('$(XPackInstallerUi)')"
            Text="xpack: the installer settings $(XPackInstallerUi) do not exist." />
   </Target>
@@ -158,6 +168,45 @@
          but an installer meant to be signed that is not must not be missed. -->
     <Warning Condition="'$(_XPackSigning)' == 'true' and '$(_XPackCodeSigned)' != 'True'"
              Text="xpack: the installer is NOT code signed, so Windows will name its publisher as unknown; see the warning above for why. The build goes on with it unsigned." />
+  </Target>
+
+  <!-- A release: deltas from the most recent earlier releases, then the
+       update index installed copies read. -->
+  <Target Name="XPackDelta" AfterTargets="XPackPack" Condition="'$(XPackEnabled)' == 'true' and '$(XPackRelease)' == 'true'">
+    <BuildXPackDeltas
+        Executable="$(XPackExecutable)"
+        Package="$(XPackPackage)"
+        Id="$(XPackId)"
+        Platform="$(XPackPlatform)"
+        Version="$(_XPackVersion)"
+        OutputDirectory="$(XPackDistDirectory)"
+        PreviousPackages="$(XPackPreviousPackages)"
+        Count="$(XPackDeltaCount)">
+      <Output TaskParameter="Deltas" ItemName="XPackDelta" />
+      <Output TaskParameter="IndexArguments" ItemName="_XPackDeltaArgument" />
+    </BuildXPackDeltas>
+  </Target>
+
+  <Target Name="XPackIndex" AfterTargets="XPackDelta" Condition="'$(XPackEnabled)' == 'true' and '$(XPackRelease)' == 'true'">
+    <ItemGroup>
+      <_XPackIndexArgument Include="index" />
+      <_XPackIndexArgument Include="$(XPackPackage)" />
+      <_XPackIndexArgument Include="--out-dir;$(XPackSiteDirectory)" />
+      <_XPackIndexArgument Include="--key;$(XPackPublicKey)" />
+      <_XPackIndexArgument Include="--json" />
+      <_XPackIndexArgument Include="@(_XPackDeltaArgument)" />
+      <_XPackIndexArgument Include="--package-url;$(XPackPackageUrl)" Condition="'$(XPackPackageUrl)' != ''" />
+      <_XPackIndexArgument Include="--release-notes;$(XPackReleaseNotes)" Condition="'$(XPackReleaseNotes)' != ''" />
+      <_XPackIndexArgument Include="--rollout;$(XPackRollout)" Condition="'$(XPackRollout)' != ''" />
+      <_XPackIndexArgument Include="--current;$(XPackCurrentIndex)" Condition="'$(XPackCurrentIndex)' != ''" />
+      <_XPackIndexArgument Include="--accept-hook-changes" Condition="'$(XPackAcceptHookChanges)' == 'true'" />
+    </ItemGroup>
+    <RunXPack Executable="$(XPackExecutable)" Arguments="@(_XPackIndexArgument)" />
+    <!-- Without a package URL the index names the package and its deltas
+         relative to itself, so they go beside it: the site folder is then
+         ready to upload as it is. -->
+    <Copy Condition="'$(XPackPackageUrl)' == ''" SourceFiles="$(XPackPackage);@(XPackDelta)" DestinationFolder="$(XPackSiteDirectory)$(XPackPlatform)" />
+    <Message Importance="high" Text="xpack: update index $(XPackSiteDirectory)$(XPackPlatform)" />
   </Target>
 
   <!-- The developer loop: publish, pack, install into a throwaway root, start.

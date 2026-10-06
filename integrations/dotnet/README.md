@@ -156,6 +156,37 @@ and still reads its own package. xPack never sees the certificate, so a
 stops the build: if the tool is missing or signing fails, the installer is
 built unsigned and the build warns `NOT code signed`.
 
-## Not yet
+## Shipping updates
 
-Deltas and the update index come in a later release of this package.
+```sh
+dotnet publish -c Release -r win-x64 --self-contained -p:XPackKey=$HOME/keys/signing.json \
+  -p:XPackRelease=true -p:XPackPreviousPackages=$HOME/releases/myapp
+```
+
+After the package, a release also builds:
+
+- **deltas** from the most recent earlier releases in `XPackPreviousPackages`
+  — the `.xpkg` files you published before, exactly as users downloaded them
+  (copy them from wherever your releases live). Which are earlier releases of
+  this application for this platform is read from each file, so the folder
+  may hold others too. An installed copy downloads only what changed.
+- **the update index** in `bin/xpack/site/<platform>/stable.json`, which
+  installed copies read at their `XPackUpdateUrl`. The package and its
+  deltas are put beside it, so the `site` folder is ready to upload as it is,
+  unless `XPackPackageUrl` says they live elsewhere.
+
+| Property | Default | Does |
+| --- | --- | --- |
+| `XPackRelease` | `false` | build deltas and the update index after the package |
+| `XPackPreviousPackages` | none | folder of earlier releases' packages; without it, no deltas |
+| `XPackDeltaCount` | `3` | deltas from this many of the most recent earlier releases |
+| `XPackPublicKey` | the key's `.pub.json` | the public key every package is verified against before it is indexed |
+| `XPackSiteDirectory` | `bin/xpack/site/` | where the index is written |
+| `XPackPackageUrl` | none | where packages are downloaded from, when not beside the index (`https`) |
+| `XPackReleaseNotes` | none | a URL recorded in the index |
+| `XPackRollout` | none | offer the release to this percentage of installations first |
+| `XPackCurrentIndex` | none | the update tree already published (folder or `https` URL), to compare hooks with |
+| `XPackAcceptHookChanges` | `false` | publish a release whose hooks differ from the published one's |
+
+Point `XPackUpdateUrl` at where the `site` folder is served, with
+`{platform}`: `https://updates.example.com/myapp/{platform}`.

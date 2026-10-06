@@ -153,7 +153,7 @@ public sealed class RunXPack : Task
         }
 
         var arguments = Arguments.Select(a => a.ItemSpec).ToList();
-        if (!Run(arguments, out var stdout, out var exitCode))
+        if (!Run(Log, Executable, arguments, out var stdout, out var exitCode))
         {
             return false;
         }
@@ -182,7 +182,7 @@ public sealed class RunXPack : Task
     private bool VersionMatches()
     {
         var expected = PackageVersion();
-        if (!Run(new List<string> { "--version" }, out var stdout, out var exitCode))
+        if (!Run(Log, Executable, new List<string> { "--version" }, out var stdout, out var exitCode))
         {
             return false;
         }
@@ -202,11 +202,20 @@ public sealed class RunXPack : Task
         return true;
     }
 
-    private bool Run(IList<string> arguments, out string stdout, out int exitCode)
+    /// <summary>What <c>xpack inspect</c> prints about every package it reads without verifying.</summary>
+    internal const string UnverifiedNotice = "has NOT been verified";
+
+    /// <summary>
+    /// Runs <paramref name="executable"/> with each argument passed on its own,
+    /// logging what it prints for a person and returning what it prints for a
+    /// program. False when it could not be started at all.
+    /// </summary>
+    internal static bool Run(TaskLoggingHelper log, string executable, IList<string> arguments,
+        out string stdout, out int exitCode, bool readingOnly = false)
     {
         stdout = "";
         exitCode = -1;
-        var start = new ProcessStartInfo(Executable)
+        var start = new ProcessStartInfo(executable)
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -222,8 +231,8 @@ public sealed class RunXPack : Task
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception || e is InvalidOperationException)
         {
-            Log.LogError(
-                $"xpack: could not run {Executable}: {e.Message}. Install xPack and put xpack on the PATH, "
+            log.LogError(
+                $"xpack: could not run {executable}: {e.Message}. Install xPack and put xpack on the PATH, "
                 + "or set XPackHome to the folder that holds it.");
             return false;
         }
@@ -232,7 +241,16 @@ public sealed class RunXPack : Task
         {
             var output = new StringBuilder();
             process.OutputDataReceived += (_, e) => { if (e.Data != null) output.AppendLine(e.Data); };
-            process.ErrorDataReceived += (_, e) => { if (e.Data != null) LogLine(e.Data); };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                // `xpack inspect` says, rightly, that it has not checked the
+                // signature. A build that only reads a package's name and
+                // version from it would show that as a warning every time.
+                if (e.Data != null && !(readingOnly && e.Data.Contains(UnverifiedNotice)))
+                {
+                    LogLine(log, e.Data);
+                }
+            };
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             process.WaitForExit();
@@ -246,20 +264,20 @@ public sealed class RunXPack : Task
     /// A line xpack printed for a person: a warning stays a warning in the
     /// build's own log, where it is not mistaken for ordinary output.
     /// </summary>
-    private void LogLine(string line)
+    private static void LogLine(TaskLoggingHelper log, string line)
     {
         var trimmed = line.TrimStart();
         if (trimmed.StartsWith("warning:", StringComparison.Ordinal))
         {
-            Log.LogWarning("xpack: " + trimmed.Substring("warning:".Length).Trim());
+            log.LogWarning("xpack: " + trimmed.Substring("warning:".Length).Trim());
         }
         else if (trimmed.StartsWith("error:", StringComparison.Ordinal))
         {
-            Log.LogError("xpack: " + trimmed.Substring("error:".Length).Trim());
+            log.LogError("xpack: " + trimmed.Substring("error:".Length).Trim());
         }
         else
         {
-            Log.LogMessage(MessageImportance.High, line);
+            log.LogMessage(MessageImportance.High, line);
         }
     }
 
