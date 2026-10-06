@@ -282,7 +282,13 @@ public sealed class EndToEndTests : IDisposable
         var (published, publishOutput) = Run(Dotnet(),
             $"publish -c Release -r {other} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\"", app);
         Assert.NotEqual(0, published);
-        Assert.Contains("builds an installer for the machine it runs on", publishOutput);
+        // From Windows every other platform is a Unix one, refused for the
+        // reason that comes first: Windows cannot make its packages at all.
+        Assert.Contains(
+            OperatingSystem.IsWindows()
+                ? "cannot be built on Windows"
+                : "builds an installer for the machine it runs on",
+            publishOutput);
         Assert.False(Directory.Exists(Path.Combine(app, "bin", "xpack")), "it packed before saying so");
     }
 
