@@ -101,6 +101,17 @@ fn build(dir: &Path, sign_command: &str) -> (PathBuf, Output) {
     (installer, output)
 }
 
+/// The first bytes of an x64 Linux program.
+fn elf_x64() -> Vec<u8> {
+    let mut bytes = vec![0u8; 64];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[0x12..0x14].copy_from_slice(&0x3Eu16.to_le_bytes());
+    bytes
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -259,13 +270,17 @@ fn a_command_that_never_names_the_installer_only_warns() {
 fn signing_an_installer_that_is_not_for_windows_only_warns() {
     let dir = tempfile::tempdir().unwrap();
     let package = package(dir.path(), "linux");
+    // A Linux installer is built from Linux programs: the start of an x64 ELF
+    // stands in for both, since building never runs them.
+    let linux = dir.path().join("linux-program");
+    std::fs::write(&linux, elf_x64()).unwrap();
     let output = xpack()
         .arg("installer")
         .arg(&package)
         .arg("--stub")
-        .arg(stub(dir.path()))
+        .arg(&linux)
         .arg("--binary")
-        .arg(stub(dir.path()))
+        .arg(&linux)
         .arg("--out")
         .arg(dir.path().join("installer"))
         .args(["--sign-command", "signtool sign {file}"])

@@ -100,6 +100,9 @@ serde_json.workspace = true
 xpack-update.workspace = true
 xpack-security.workspace = true
 xpack-core.workspace = true
+# The installer tests open the payload an installer carries to see which
+# programs went into it, with the archive library that wrote it.
+zip.workspace = true
 
 [lints]
 workspace = true

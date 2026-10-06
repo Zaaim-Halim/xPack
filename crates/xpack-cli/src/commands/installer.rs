@@ -55,6 +55,17 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FILE")]
     stub: Option<PathBuf>,
 
+    /// The folder of xPack's release for the platform the installer targets.
+    ///
+    /// Where the stub and the runtime programs come from when the installer
+    /// is for another platform than this machine's: unpack
+    /// `xpack-<version>-<platform>` and name its folder. Which programs an
+    /// installer carries is decided here, as for this machine's own, so a
+    /// build tool passes a folder rather than a list it would have to keep
+    /// in step.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["stub", "binaries"])]
+    target_binaries: Option<PathBuf>,
+
     /// Runtime binaries to place in the installation.
     ///
     /// Repeatable. Defaults to the launcher, updater and uninstaller sitting
@@ -194,11 +205,14 @@ pub(crate) fn run(args: &Args) -> Result<ExitCode> {
     // cost a whole build to find out.
     let signer = prepare_signer(args.sign_command.as_deref(), manifest.platform.os);
 
-    let stub = match &args.stub {
-        Some(path) => path.clone(),
-        None => super::sibling_binary_required(stub_name(manifest.platform.os, args.console))?,
-    };
+    let stub = resolve_stub(args, &manifest)?;
     let binaries = resolve_binaries(args, &manifest)?;
+    // Before anything is built on them: a program for another platform makes
+    // an installer that installs and then cannot start anything.
+    crate::executable::ensure_built_for(&stub, manifest.platform, "stub")?;
+    for binary in &binaries {
+        crate::executable::ensure_built_for(binary, manifest.platform, "binary")?;
+    }
 
     // Branded before they are embedded, and the stub before the payload is
     // appended: rewriting a resource section moves bytes, so doing it to the
@@ -780,6 +794,55 @@ fn stub_name(target: Os, console: bool) -> &'static str {
     if target == Os::Windows && !console { "xpack-installerw" } else { "xpack-installer" }
 }
 
+/// The installer program to build on: named, taken from the target's
+/// release folder, or this machine's own beside this executable.
+fn resolve_stub(args: &Args, manifest: &xpack_core::Manifest) -> Result<PathBuf> {
+    let name = stub_name(manifest.platform.os, args.console);
+    match (&args.stub, &args.target_binaries) {
+        (Some(path), _) => Ok(path.clone()),
+        (None, Some(folder)) => in_release_folder(folder, name, manifest.platform),
+        (None, None) => {
+            ensure_this_machine_is(manifest.platform)?;
+            super::sibling_binary_required(name)
+        }
+    }
+}
+
+/// Refuses to take this machine's own programs for an installer meant for
+/// another platform, which would install them where they cannot run.
+fn ensure_this_machine_is(target: xpack_core::Platform) -> Result<()> {
+    let host = xpack_core::Platform::host()?;
+    if host == target {
+        return Ok(());
+    }
+    Err(Error::invalid(
+        "installer",
+        format!(
+            "this machine is {host}, so the programs beside xpack are {host} programs; an \
+             installer for {target} must carry {target} ones. Unpack xPack's {target} release \
+             (xpack-<version>-{target}) and pass its folder with --target-binaries"
+        ),
+    ))
+}
+
+/// A program from the folder of xPack's release for `target`, named as that
+/// platform names its programs.
+fn in_release_folder(folder: &Path, name: &str, target: xpack_core::Platform) -> Result<PathBuf> {
+    let suffix = if target.os == Os::Windows { ".exe" } else { "" };
+    let path = folder.join(format!("{name}{suffix}"));
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(Error::invalid(
+        "--target-binaries",
+        format!(
+            "{} has no {name}{suffix}; it should be the folder of xPack's {target} release, \
+             which holds it",
+            folder.display()
+        ),
+    ))
+}
+
 /// The runtime binaries to ship, defaulting to those beside this executable.
 fn resolve_binaries(args: &Args, manifest: &xpack_core::Manifest) -> Result<Vec<PathBuf>> {
     let target = manifest.platform.os;
@@ -810,11 +873,14 @@ fn resolve_binaries(args: &Args, manifest: &xpack_core::Manifest) -> Result<Vec<
         wanted.push("xpack-notify");
     }
 
-    let mut found = Vec::new();
-    for name in wanted {
-        found.push(super::sibling_binary_required(name)?);
+    if let Some(folder) = &args.target_binaries {
+        return wanted
+            .into_iter()
+            .map(|name| in_release_folder(folder, name, manifest.platform))
+            .collect();
     }
-    Ok(found)
+    ensure_this_machine_is(manifest.platform)?;
+    wanted.into_iter().map(super::sibling_binary_required).collect()
 }
 
 /// Whether an installer for this package must carry the update notice.

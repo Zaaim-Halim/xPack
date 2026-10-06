@@ -1895,6 +1895,7 @@ dependencies = [
  "xpack-security",
  "xpack-update",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

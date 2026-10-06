@@ -412,6 +412,11 @@ On Windows, `xpack installer` produces a windowed installer by default. A shell
 does not wait for a windowed program, so build installers that only scripts
 run with `--console`.
 
+**An installer for another platform** carries that platform's programs: on a
+Mac building a Windows installer, unpack xPack's Windows release and pass its
+folder with `--target-binaries`. Every program put into an installer is
+checked to be built for the platform it targets.
+
 ### Signing the Windows installer
 
 Windows names the publisher of a `Setup.exe` only from an Authenticode

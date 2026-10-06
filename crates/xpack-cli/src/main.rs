@@ -23,6 +23,7 @@
 mod branding;
 mod commands;
 mod config;
+mod executable;
 mod output;
 mod progress;
 
