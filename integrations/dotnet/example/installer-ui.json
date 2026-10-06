@@ -1,0 +1,11 @@
+{
+  "license": "LICENSE.txt",
+  "pages": ["welcome", "license", "location", "ready", "install", "finish"],
+  "text": {
+    "welcome": "This will install {name} {version} for your user account. It brings its own .NET, so nothing else is needed.",
+    "finish": "{name} is ready. Open it from your applications, or type xpack-dotnet-demo in a terminal."
+  },
+  "shortcutDefault": true,
+  "pathDefault": true,
+  "launchOnFinish": true
+}

@@ -22,6 +22,9 @@ dotnet publish -c Release -r win-x64 --self-contained -p:XPackKey=$HOME/keys/sig
 The signed package lands in `bin/xpack/`, for example
 `My-App-1.2.0-windows-x64.xpkg`.
 
+A complete example project, every setting explained, is in
+[`example/`](example/README.md).
+
 ## What it does, and what it does not
 
 The package is glue. It knows what MSBuild knows — the name, version,

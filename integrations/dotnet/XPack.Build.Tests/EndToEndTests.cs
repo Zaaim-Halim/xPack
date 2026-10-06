@@ -512,4 +512,59 @@ public sealed class EndToEndTests : IDisposable
             File.Copy(file, target, overwrite: true);
         }
     }
+
+    [Fact]
+    public void The_example_project_builds_installs_and_runs()
+    {
+        // The example in integrations/dotnet/example, as its README builds
+        // it, against the XPack.Build under test: an example that no longer
+        // builds is worse than none.
+        var home = XPackHome();
+        if (home == null)
+        {
+            output.WriteLine("skipped: build xpack (cargo build) or set XPACK_HOME to run this");
+            return;
+        }
+        var xpack = Path.Combine(home, OperatingSystem.IsWindows() ? "xpack.exe" : "xpack");
+        var source = Path.Combine(RepositoryRoot(), "integrations", "dotnet", "example");
+        var example = Path.Combine(work, "example");
+        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            if (relative.Split(Path.DirectorySeparatorChar)[0] is "bin" or "obj" or "packages")
+            {
+                continue;
+            }
+            var target = Path.Combine(example, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+
+        var feed = Path.Combine(work, "feed");
+        var project = Path.Combine(RepositoryRoot(), "integrations", "dotnet", "XPack.Build", "XPack.Build.csproj");
+        var (packed, packOutput) = Run(Dotnet(), $"pack \"{project}\" -c Release -o \"{feed}\" -p:Version={version}", work);
+        Assert.True(packed == 0, packOutput);
+        // The example's own nuget.config, pointed at this run's feed.
+        var config = Path.Combine(example, "nuget.config");
+        File.WriteAllText(config, File.ReadAllText(config).Replace("\"../feed\"", $"\"{feed}\""));
+
+        var key = Key(xpack);
+        var (published, publishOutput) = Run(Dotnet(),
+            $"publish -c Release -r {HostRuntimeIdentifier()} --self-contained -p:XPackKey=\"{key}\" -p:XPackHome=\"{home}\" -p:XPackInstaller=true -p:XPackBuildVersion={version}",
+            example);
+        Assert.True(published == 0, publishOutput);
+        Assert.DoesNotContain("warning", publishOutput.Replace("0 Warning(s)", ""), StringComparison.OrdinalIgnoreCase);
+
+        var dist = Path.Combine(example, "bin", "xpack");
+        Assert.Single(Directory.GetFiles(dist, "xPack-DotNet-Demo-1.0.0-*.xpkg"));
+        var installer = Directory.GetFileSystemEntries(dist).Single(p => !p.EndsWith(".xpkg", StringComparison.Ordinal));
+        var root = Path.Combine(work, "installed");
+        var (installed, installOutput) = Run(InstallerProgram(installer), $"--silent --root \"{root}\"", work);
+        Assert.True(installed == 0, installOutput);
+
+        var (ran, runOutput) = Run(xpack, $"run com.example.dotnetdemo --root \"{root}\"", work);
+        Assert.True(ran == 0, runOutput);
+        Assert.Contains("xPack .NET demo 1.0.0", runOutput);
+        Assert.Contains("arguments:   [--greeting=hello]", runOutput);
+    }
 }

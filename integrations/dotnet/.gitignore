@@ -9,3 +9,7 @@ TestResults/
 .vs/
 *.user
 *.suo
+
+# The example's local package feed and package cache (see example/README.md)
+feed/
+example/packages/
