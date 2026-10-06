@@ -107,6 +107,9 @@
           <targetJdks>
             <windows-x64>/path/to/jdk-windows-x64</windows-x64>
           </targetJdks>
+          <targetBinaries>
+            <windows-x64>/path/to/xpack-0.8.1-windows-x64</windows-x64>
+          </targetBinaries>
           -->
 
           <!-- ================================================== updating -->

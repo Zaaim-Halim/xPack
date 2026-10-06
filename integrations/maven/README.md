@@ -578,13 +578,27 @@ override it from a release build without editing the POM.
 - **Cross-building needs the target platform's JDK.** A runtime image is made
   of that platform's modules; the local JDK only supplies the linker. Either
   set `<targetJdks>` or build each target on its own machine in CI.
+- **An installer for another platform needs xPack's release for it.** The
+  installer is that platform's own installer program with the package
+  attached. Unpack `xpack-<version>-<platform>` from xPack's releases and
+  name its folder; the xpack command line takes the installer program and
+  the runtime programs from it, by its own rules, and refuses any built for
+  another platform:
+
+  ```xml
+  <targetBinaries>
+    <linux-x64>/path/to/xpack-0.8.1-linux-x64</linux-x64>
+  </targetBinaries>
+  ```
 - **Build Unix targets on Unix.** A Windows host records no permission bits,
   so a bundled interpreter arrives without `+x` and the package installs but
   cannot start.
 - **`<updateBaseUrl>` must be HTTPS**, except for loopback addresses, which
   are allowed so a local test server works.
-- **Sign and notarise installers after `xpack:installer`**, not before —
-  appending a payload invalidates a signature applied to the stub.
+- **Sign installers as part of `xpack:installer`, or after it**, never before:
+  appending the payload invalidates a signature applied to the stub. On
+  Windows, `<windowsSignCommand>` does it in the same step; on macOS, sign
+  and notarise the bundle afterwards.
 
 ## Layout
 

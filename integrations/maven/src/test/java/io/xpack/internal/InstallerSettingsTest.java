@@ -76,10 +76,29 @@ class InstallerSettingsTest {
     }
 
     @Test
-    void a_windows_installer_is_the_windowed_build_unless_scripts_need_the_console() {
-        Target windows = new Target(Target.Os.WINDOWS, Target.Arch.X64);
-        assertEquals("xpack-installerw", InstallerSettings.stubName(windows, false));
-        assertEquals("xpack-installer", InstallerSettings.stubName(windows, true));
+    void an_installer_for_another_platform_is_given_that_platforms_release_folder() {
+        Target mac = Target.parse("macos-arm64");
+        Target linux = Target.parse("linux-x64");
+        // Only the folder: the command line chooses the programs from it.
+        assertEquals(List.of("--target-binaries", java.nio.file.Path.of("rel/xpack-linux").toAbsolutePath().toString()),
+                InstallerSettings.targetBinaryArguments(linux, mac, "rel/xpack-linux"));
+    }
+
+    @Test
+    void the_build_machines_own_platform_needs_no_folder() {
+        Target mac = Target.parse("macos-arm64");
+        assertEquals(List.of(), InstallerSettings.targetBinaryArguments(mac, mac, null));
+        assertEquals(List.of(), InstallerSettings.targetBinaryArguments(mac, mac, " "));
+    }
+
+    @Test
+    void another_platform_without_a_folder_says_how_to_set_one() {
+        Target mac = Target.parse("macos-arm64");
+        Target windows = Target.parse("windows-x64");
+        IllegalArgumentException refused = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> InstallerSettings.targetBinaryArguments(windows, mac, null));
+        assertTrue(refused.getMessage().contains("<targetBinaries><windows-x64>"), refused.getMessage());
     }
 
     @Test
@@ -99,53 +118,5 @@ class InstallerSettingsTest {
             Target target = new Target(os, Target.Arch.ARM64);
             assertEquals(List.of(), InstallerSettings.signArguments(target, "signtool sign {file}"));
         }
-    }
-
-    @Test
-    void other_targets_have_one_installer_build() {
-        for (Target.Os os : List.of(Target.Os.MACOS, Target.Os.LINUX)) {
-            Target target = new Target(os, Target.Arch.ARM64);
-            assertEquals("xpack-installer", InstallerSettings.stubName(target, false));
-            assertEquals("xpack-installer", InstallerSettings.stubName(target, true));
-        }
-    }
-
-    private static Map<String, Object> manifest(String os, boolean notify, boolean checkWhileRunning) {
-        // As `xpack inspect --json` reports it: a flag left at false is not written.
-        Map<String, Object> update = new java.util.HashMap<>();
-        update.put("channel", "stable");
-        if (notify) {
-            update.put("notify", true);
-        }
-        if (checkWhileRunning) {
-            update.put("checkWhileRunning", true);
-        }
-        return Map.of("platform", Map.of("os", os, "arch", "x64"), "update", update);
-    }
-
-    @Test
-    void the_notice_is_wanted_exactly_when_installing_would_place_it() {
-        assertTrue(InstallerSettings.wantsNotice(manifest("macos", true, true)));
-        assertTrue(InstallerSettings.wantsNotice(manifest("windows", true, true)));
-        // No dialog on Linux.
-        assertFalse(InstallerSettings.wantsNotice(manifest("linux", true, true)));
-        // Nothing checks while running, so there is nothing to announce.
-        assertFalse(InstallerSettings.wantsNotice(manifest("macos", true, false)));
-        assertFalse(InstallerSettings.wantsNotice(manifest("windows", false, true)));
-        assertFalse(InstallerSettings.wantsNotice(Map.of("platform", "macos-arm64")));
-    }
-
-    @Test
-    void a_cross_built_installer_carries_the_notice_it_was_asked_for() {
-        // Only an installer can place the notice: left out here, every update
-        // of the application would be applied without a word.
-        Target mac = Target.parse("macos-arm64");
-        Target windows = Target.parse("windows-x64");
-        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-notify"),
-                InstallerSettings.runtimeBinaries(mac, true));
-        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller"),
-                InstallerSettings.runtimeBinaries(mac, false));
-        assertEquals(List.of("xpack-launcher", "xpack-updater", "xpack-uninstaller", "xpack-launcherw",
-                "xpack-notify"), InstallerSettings.runtimeBinaries(windows, true));
     }
 }

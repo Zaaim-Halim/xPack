@@ -137,7 +137,7 @@ public class InstallerMojo extends AbstractXPackMojo {
             }
             List<String> signing = InstallerSettings.signArguments(target, windowsSignCommand);
             arguments.addAll(signing);
-            addCrossBuildBinaries(arguments, target, pkg);
+            addCrossBuildBinaries(arguments, target);
 
             Map<String, Object> result = cli().json("installer", arguments);
             boolean signed = Boolean.TRUE.equals(result.get("codeSigned"));
@@ -176,35 +176,20 @@ public class InstallerMojo extends AbstractXPackMojo {
     }
 
     /**
-     * Points the build at the target's own binaries when it is not the host.
+     * Points the build at the target's own xPack release when one is set.
      *
-     * <p>Left alone for the host, where the command line finds the stub and
-     * the runtime binaries sitting beside itself.
+     * <p>Which stub and runtime programs an installer carries is the command
+     * line's to decide, from that folder, by the same rules it applies to its
+     * own; only the folder is passed. Left alone for the host, where the
+     * command line uses the programs beside itself.
      */
-    private void addCrossBuildBinaries(List<String> arguments, Target target, Path pkg)
+    private void addCrossBuildBinaries(List<String> arguments, Target target)
             throws MojoExecutionException {
-        String configured = targetBinaries.get(target.id());
-        if (configured == null || configured.isBlank()) {
-            if (!target.equals(Target.host())) {
-                throw new MojoExecutionException(
-                        "no binaries configured for " + target.id() + ". An installer is that "
-                                + "platform's own stub with a payload attached, so building one "
-                                + "for a foreign platform needs its binaries:\n"
-                                + "  <targetBinaries><" + target.id() + ">/path/to/xpack-"
-                                + target.id() + "</" + target.id() + "></targetBinaries>");
-            }
-            return;
-        }
-
-        Path home = Path.of(configured);
-        arguments.add("--stub");
-        arguments.add(binary(home, InstallerSettings.stubName(target, console)).toString());
-        // The package, not this POM, says whether it announces its updates:
-        // it is what the installer will install.
-        boolean notice = InstallerSettings.wantsNotice(cli().json("inspect", List.of(pkg.toString())));
-        for (String name : InstallerSettings.runtimeBinaries(target, notice)) {
-            arguments.add("--binary");
-            arguments.add(binary(home, name).toString());
+        try {
+            arguments.addAll(InstallerSettings.targetBinaryArguments(
+                    target, Target.host(), targetBinaries.get(target.id())));
+        } catch (IllegalArgumentException e) {
+            throw new MojoExecutionException(e.getMessage(), e);
         }
     }
 }
