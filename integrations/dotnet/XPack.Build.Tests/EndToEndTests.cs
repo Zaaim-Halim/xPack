@@ -32,7 +32,7 @@ public sealed class EndToEndTests : IDisposable
         Directory.CreateDirectory(work);
         // A version of its own for each run, so NuGet's cache never hands a
         // test an earlier build of the package.
-        version = "0.8.1-test." + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+        version = "0.9.0-test." + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
     }
 
     public void Dispose()

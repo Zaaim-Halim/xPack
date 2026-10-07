@@ -23,7 +23,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 # A version no cache has seen, so the publish below uses this build.
-version="0.8.1-ci.$(date +%s)"
+version="0.9.0-ci.$(date +%s)"
 
 "$dotnet" pack "$here/XPack.Build/XPack.Build.csproj" -c Release -o "$work/feed" "-p:Version=$version"
 

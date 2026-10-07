@@ -429,7 +429,7 @@ and a signing key from `xpack keygen --out xpack-signing.json`.
 <plugin>
   <groupId>io.github.zaaim-halim</groupId>
   <artifactId>xpack-maven-plugin</artifactId>
-  <version>0.8.1</version>
+  <version>0.9.0</version>
   <configuration>
     <mainClass>com.example.demo.Main</mainClass>
     <runtime>
@@ -583,11 +583,11 @@ override it from a release build without editing the POM.
   attached. Unpack `xpack-<version>-<platform>` from xPack's releases and
   name its folder; the xpack command line takes the installer program and
   the runtime programs from it, by its own rules, and refuses any built for
-  another platform:
+  another platform (xPack 0.9.0 or later):
 
   ```xml
   <targetBinaries>
-    <linux-x64>/path/to/xpack-0.8.1-linux-x64</linux-x64>
+    <linux-x64>/path/to/xpack-0.9.0-linux-x64</linux-x64>
   </targetBinaries>
   ```
 - **Build Unix targets on Unix.** A Windows host records no permission bits,

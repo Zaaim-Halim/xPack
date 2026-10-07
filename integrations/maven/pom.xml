@@ -6,7 +6,7 @@
 
   <groupId>io.github.zaaim-halim</groupId>
   <artifactId>xpack-maven-plugin</artifactId>
-  <version>0.8.1</version>
+  <version>0.9.0</version>
   <packaging>maven-plugin</packaging>
 
   <name>xPack Maven Plugin</name>

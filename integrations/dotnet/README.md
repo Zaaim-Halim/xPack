@@ -10,7 +10,7 @@ Packages a .NET application into a signed, self-updating
 </PropertyGroup>
 
 <ItemGroup>
-  <PackageReference Include="XPack.Build" Version="0.8.1" PrivateAssets="all" />
+  <PackageReference Include="XPack.Build" Version="0.9.0" PrivateAssets="all" />
 </ItemGroup>
 ```
 
@@ -38,8 +38,8 @@ Nothing happens until `XPackId` is set, and only a publish packs: a plain
 
 ## Requirements
 
-- The xPack command line, the same release as this package (0.8.1 with
-  0.8.1). On the `PATH`, or `XPackHome` set to the folder that holds it. A
+- The xPack command line, the same release as this package (0.9.0 with
+  0.9.0). On the `PATH`, or `XPackHome` set to the folder that holds it. A
   different release is a warning naming both.
 - A **self-contained** publish for one runtime identifier (`-r`). The
   application then carries its own .NET runtime, and installs and runs on a

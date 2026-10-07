@@ -61,6 +61,6 @@ public class RunXPackTests
     {
         var expected = typeof(RunXPack).Assembly.GetName().Version!;
         Assert.Equal($"{expected.Major}.{expected.Minor}.{expected.Build}", RunXPack.PackageVersion());
-        Assert.Equal("0.8.1", RunXPack.PackageVersion());
+        Assert.Equal("0.9.0", RunXPack.PackageVersion());
     }
 }

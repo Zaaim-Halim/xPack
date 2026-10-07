@@ -11,7 +11,7 @@
 
     <PackageId>XPack.Build</PackageId>
     <!-- The xPack release this package drives; the two are released together. -->
-    <Version>0.8.1</Version>
+    <Version>0.9.0</Version>
     <Authors>Halim Zaaim</Authors>
     <Description>Packages a .NET application into a signed, self-updating xPack installation after dotnet publish.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
